@@ -176,6 +176,7 @@ pub async fn mitm_proxy_main(
     upstream_proxy: Option<String>,
     service_port: String,
     ua_profile: UaProfile,
+    connect_ua_profile: Option<UaProfile>,
     proxy_mode: ProxyMode,
     upstream_timeout_ms: u64,
     packet_callback: Option<Arc<dyn Fn(PacketSummary) + Send + Sync>>,
@@ -183,7 +184,7 @@ pub async fn mitm_proxy_main(
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
         new_mitm_tls_service_data().await.context("generate self-signed mitm tls cert")?;
-    let upstream_client = new_upstream_client(proxy_mode);
+    let upstream_client = new_upstream_client(proxy_mode, ua_profile, connect_ua_profile);
 
     let upstream_proxy = match upstream_proxy {
         None => None,
@@ -217,7 +218,12 @@ pub async fn mitm_proxy_main(
     };
 
     let dbstate = state.dbstate.clone();
-    info!("Starting mitm proxy with upstream proxy");
+    info!(
+        ?proxy_mode,
+        request_ua_profile = ?ua_profile,
+        connect_ua_profile = ?connect_ua_profile,
+        "Starting mitm proxy with upstream proxy"
+    );
     let handle = graceful.spawn_task_fn(async move |guard| {
         info!("starting tcp proxy on {service_port}");
         let tcp_service = TcpListener::build()

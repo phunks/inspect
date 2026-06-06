@@ -47,7 +47,15 @@ Options:
   -v...
           Log verbosity level. -vv for more verbosity. Environmental variable `RUST_LOG` overrides this flag!
       --upstream-proxy [<UPSTREAM_PROXY>]
-
+          Upstream proxy address in format 'host:port'
+      --ua-profile <UA_PROFILE>
+          UA for normal upstream HTTP requests [default: auto] [possible values: auto, chrome, firefox]
+      --connect-ua-profile <CONNECT_UA_PROFILE>
+          UA for upstream proxy CONNECT. If omitted, inherits --ua-profile [possible values: auto, chrome, firefox]
+      --proxy-mode <PROXY_MODE>
+          [default: observe] [possible values: observe, emulate]
+      --upstream-timeout-ms <UPSTREAM_TIMEOUT_MS>
+          Upstream request timeout in milliseconds [default: 60000]
       --generate-ca
           Generate (or reuse) persistent local MITM root CA and exit
       --force-regenerate-ca

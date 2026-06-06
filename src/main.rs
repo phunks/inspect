@@ -21,6 +21,7 @@ async fn main() -> Result<(), AnyError> {
 
     let upstream_proxy = opt.upstream_proxy.clone();
     let ua_profile = opt.ua_profile;
+    let connect_ua_profile = opt.connect_ua_profile;
     let proxy_mode = opt.proxy_mode;
     let upstream_timeout_ms = opt.upstream_timeout_ms;
     let (quit_tx, quit_rx) = watch::channel(false);
@@ -30,6 +31,7 @@ async fn main() -> Result<(), AnyError> {
             upstream_proxy,
             service_port,
             ua_profile,
+            connect_ua_profile,
             proxy_mode,
             upstream_timeout_ms,
             Some(callback),

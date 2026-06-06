@@ -37,11 +37,14 @@ pub struct Opt {
     #[arg(short, action = ArgAction::Count, default_value_t = 0)]
     pub verbosity: u8,
 
-    #[arg(long, num_args(0..=1), default_missing_value="false")]
+    #[arg(long, num_args(0..=1), default_missing_value="false", help = "Upstream proxy address in format 'host:port'")]
     pub upstream_proxy: Option<String>,
 
-    #[arg(long, value_enum, default_value_t = UaProfile::Auto)]
+    #[arg(long, value_enum, default_value_t = UaProfile::Auto, help = "UA for normal upstream HTTP requests")]
     pub ua_profile: UaProfile,
+
+    #[arg(long, value_enum, help = "UA for upstream proxy CONNECT. If omitted, inherits --ua-profile")]
+    pub connect_ua_profile: Option<UaProfile>,
 
     #[arg(long, value_enum, default_value_t = ProxyMode::Observe)]
     pub proxy_mode: ProxyMode,
