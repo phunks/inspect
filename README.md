@@ -11,6 +11,8 @@ It captures request/response metadata into SQLite and stores raw headers/bodies 
 - SQLite-backed metadata storage
 - Per-flow request/response header and body dumps
 - Optional upstream proxy support
+- Optional SSL key log file output for TLS debugging
+- File-based structured logging via `tracing_subscriber`
 
 ## Build
 ```bash
@@ -20,28 +22,42 @@ cargo build
 ## Setup
 ### CA
 Generate a local CA certificate for client trust setup:
+```text
 $HOME/.inspect/mitm-root-ca.crt
+```
+
 ```bash
 cargo run -- --generate-ca
 ```
-### Client trust
-Trust the local CA certificate for client trust setup:
-$HOME/.inspect/mitm-root-ca.crt
 
 ## Run
 ```bash
 cargo run -- --ip 127.0.0.1 --port 62019
 ```
 
-## CLI options
+## Usage
 ```text
- --ip Bind address (default: 127.0.0.1)
- --port Bind port (default: 62019)
- --upstream-proxy Upstream HTTP proxy
- --generate-ca Generate a local CA certificate
- --force-regenerate-ca Force regeneration of local CA certificate
- -v Increase log verbosity
- -q Suppress logs
+Usage: inspect [OPTIONS]
+
+Options:
+  -p, --port <PORT>
+          Set port to listen on [default: 62019]
+  -i, --ip <IP>
+          Set ip to listen on [default: 127.0.0.1]
+  -v...
+          Log verbosity level. -vv for more verbosity. Environmental variable `RUST_LOG` overrides this flag!
+      --upstream-proxy [<UPSTREAM_PROXY>]
+
+      --generate-ca
+          Generate (or reuse) persistent local MITM root CA and exit
+      --force-regenerate-ca
+          Force regenerate local MITM root CA
+      --preshared-key-log [<PRESHARED_KEY_LOG>]
+          SSLKEYLOGFILE environment variable
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 ## Output
@@ -60,13 +76,8 @@ capture/
     response.body
 ```
 
-You can override the capture root with:
-```bash
-INSPECT_CAPTURE_DIR=./my-captures
-cargo run -- --port 62019
-```
-
 ## TUI keys
+- `q` / `Ctrl+C`: quit
 - `j` / `Down`: move down
 - `k` / `Up`: move up
 - `J` / `Shift+Down`: page down
@@ -78,17 +89,9 @@ cargo run -- --port 62019
 - HTTPS inspection requires trusting the local CA/certificate used by the proxy.
 - Bodies are stored with a size limit, so large payloads may be truncated.
 - This project is intended for local debugging and traffic analysis.
-- CA certificate can be generated/exported locally for client trust setup
-- Metadata is stored in SQLite using SQLx
-- Non-text bodies may be rendered as hex for inspection
+- CA certificate can be generated/exported locally for client trust setup.
+- Metadata is stored in SQLite using SQLx.
+- Non-text bodies may be rendered as hex for inspection.
+- The packet detail view includes the flow directory for easier correlation with on-disk captures.
 
-## Status
-This project is still under active development.
 
-Current rough edges include:
-- the detail pane is still minimal and not yet well structured
-- documentation and setup flow are still evolving
-
-## TODO
-- document SQLx / database development workflow
-- polish capture browsing experience in the TUI

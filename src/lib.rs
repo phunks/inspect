@@ -50,13 +50,16 @@ use bytes::Bytes;
 use rama::net::address::{Host, HostWithPort, ProxyAddress};
 use rustls::{ServerConfig, ALL_VERSIONS};
 use flate2::read;
-use http::HeaderValue;
+use http::{HeaderName, HeaderValue};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
 use chrono::{DateTime, Utc};
+use rama::http::layer::traffic_writer;
+use rama::http::layer::traffic_writer::RequestWriterLayer;
+use rama::ua::layer::classifier::UserAgentClassifierLayer;
 use tracing::{info, info_span};
 use tracing_futures::Instrument;
 use mitm::store_metadata::{DbState, RequestMetadata, RequestResponseEvent, ResponseMetadata};
@@ -66,6 +69,7 @@ use tokio::sync::{mpsc, watch};
 
 pub mod mitm;
 pub mod tui;
+pub mod option;
 
 const BODY_SAVE_LIMIT_BYTES: usize = 3 * 1024;
 const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -168,7 +172,7 @@ pub async fn mitm_proxy_main(
     upstream_proxy: Option<String>,
     service_port: String,
     packet_callback: Option<Arc<dyn Fn(PacketSummary) + Send + Sync>>,
-    // mut shutdown_rx: watch::Receiver<bool>,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
         new_mitm_tls_service_data().await.context("generate self-signed mitm tls cert")?;
@@ -200,7 +204,7 @@ pub async fn mitm_proxy_main(
     };
     let dbstate = state.dbstate.clone();
     info!("Starting mitm proxy with upstream proxy");
-    graceful.spawn_task_fn(async move |guard| {
+    let handle = graceful.spawn_task_fn(async move |guard| {
         info!("starting tcp proxy on {service_port}");
         let tcp_service = TcpListener::build()
             .bind(service_port)
@@ -238,14 +242,9 @@ pub async fn mitm_proxy_main(
             .await;
     });
 
-    // let _ = shutdown_rx.changed().await;
-
-    graceful
-        .shutdown_with_limit(Duration::from_secs(30))
-        .await
-        .context("graceful shutdown")?;
+    let _ = shutdown_rx.changed().await;
     dbstate.flush_sqlite_wal_on_exit().await?;
-
+    handle.abort();
     Ok(())
 }
 
@@ -468,6 +467,7 @@ async fn http_mitm_proxy(
         // .with_custom_connector(UserAgentClassifierLayer::new().with_overwrite_header(HeaderName::from_static("xxxxx-user-agent")))
         .with_default_http_connector()
         .build_client();
+
         // .with_jit_layer(
         //     // UserAgentClassifierLayer::new().with_overwrite_header(HeaderName::from_static("xxxxx-user-agent")),
         //     RequestWriterLayer::stdout_unbounded(

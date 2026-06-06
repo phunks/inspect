@@ -138,7 +138,7 @@ impl DbState {
                     }
                 }
             }
-            tracing::info!("DB shutting down");
+            tracing::info!("store DB pool shutting down");
         });
 
         Ok(Self {

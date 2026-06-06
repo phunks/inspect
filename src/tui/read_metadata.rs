@@ -62,7 +62,9 @@ impl fmt::Display for RequestMetadata {
         writeln!(f, "{:<width$}: {}", "scheme", opt_str(self.protocol.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "host", opt_str(self.host.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "path", opt_str(self.uri.as_deref()))?;
-        writeln!(f, "{:<width$}: {}", "query", opt_str(self.query_str.as_deref()))?;
+        if self.method.as_deref() == Some("GET") {
+            writeln!(f, "{:<width$}: {}", "query", opt_str(self.query_str.as_deref()))?;
+        }
         writeln!(f, "{:<width$}: {}", "version", opt_str(self.version.as_deref()))?;
         writeln!(f, "{:<width$}:", "headers")?;
         write!(f, "{}", indent_lines(&headers_pretty, "  "))
@@ -151,7 +153,7 @@ impl DbState {
                     }
                 }
             }
-            tracing::info!("DB shutting down");
+            tracing::info!("read DB pool shutting down");
         });
 
         Ok(Self {

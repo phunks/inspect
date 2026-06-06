@@ -1,8 +1,8 @@
 mod read_metadata;
 pub mod global_chords;
+use crate::PacketSummary;
 
 use std::sync::Arc;
-use crate::PacketSummary;
 use std::time::Duration;
 use chord_macro::chord;
 use tokio::sync::{
@@ -85,8 +85,6 @@ impl PacketListDelegate {
             .min_height(5)
             .gap(0)
             .scroll(Scrollbar::AutoHide)
-            .bordered()
-            .border_style(Style::new().fg(Color::grey256(8)))
             .title("Packets")
             .id(&mut list_id);
 
@@ -365,15 +363,16 @@ impl PacketListDelegate {
                 (Ok(req), Ok(res)) => {
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
                     let res_body = read_body_file(res.response_body_path.as_deref()).await;
-
+                    let dir = req.flow_dir.as_deref().unwrap();
                     format!(
-                        "id: {id}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}"
+                        "id: {id}\ndir: {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}"
                     )
                 }
                 (Ok(req), Err(e)) => {
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
+                    let dir = req.flow_dir.as_deref().unwrap();
                     format!(
-                        "id: {id}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\nresponse error: {e}"
+                        "id: {id}\ndir: {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\nresponse error: {e}"
                     )
                 }
                 (Err(e1), Err(e2)) => {
@@ -666,8 +665,10 @@ impl Widget for ClickablePacketRow {
     }
 }
 
-
-pub async fn run_tui(rx: mpsc::UnboundedReceiver<PacketSummary>) -> anyhow::Result<()> {
+pub async fn run_tui(
+    rx: UnboundedReceiver<PacketSummary>,
+    quit_tx: watch::Sender<bool>,
+) -> anyhow::Result<()> {
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
 
     let app: Box<dyn Widget> = PacketListDelegate::new(rx, detail_tx).await;
@@ -678,39 +679,48 @@ pub async fn run_tui(rx: mpsc::UnboundedReceiver<PacketSummary>) -> anyhow::Resu
         .flex(1)
         .gap(0)
         .children([Split::new(
-        SplitPane::horizontal()
-            .children([
-                SplitPaneChild::from(Pane::new()
-                    .preferred_width(60)
-                    .preferred_height(1)
-                    .vertical()
-                    .flex(1)
-                    .children([
-                        app
-                    ])),
-                SplitPaneChild::from(Pane::new()
-                    .preferred_width(40)
-                    .preferred_height(1)
-                    .vertical()
-                    .flex(1)
-                    .title("Details")
-                    .bordered()
-                    .border_style(Style::new().fg(Color::grey256(8)))
-                    .children([
-                        Text::new()
-                            .content("Select row and press Enter".dim())
-                            .overflow(TextOverflow::WRAP)
-                            .id(&mut detail_text_id).flex(1),
-                    ])
-                    .y_scroll(Scrollbar::Visible),
-                ),
-            ])
-        ).flex(1)]
-    );
+            SplitPane::horizontal()
+                .children([
+                    SplitPaneChild::from(Pane::new()
+                        .preferred_width(60)
+                        .preferred_height(1)
+                        .vertical()
+                        .flex(1)
+                        .title("Packets")
+                        .children([
+                            app
+                        ])),
+                    SplitPaneChild::from(Pane::new()
+                        .preferred_width(40)
+                        .preferred_height(1)
+                        .vertical()
+                        .flex(1)
+                        .title("Details")
+                        .children([
+                            Text::new()
+                                .content("Select row and press Enter".dim())
+                                .overflow(TextOverflow::WRAP)
+                                .id(&mut detail_text_id).flex(1),
+                        ])
+                        .y_scroll(Scrollbar::Visible),
+                    ),
+                ])
+            ).flex(1)
+            .border(Border::ROUND)
+            .border_style(Style::new().fg(Color::grey256(8)))
+        ]);
+
+    let mut tx_opt = Some(quit_tx);
+    let _quit_hook = tuie::on_quit(move |_| {
+        if let Some(tx) = tx_opt.take() {
+            let _ = tx.send(true);
+        }
+    });
 
     let root = RootPane::new(split, detail_rx, detail_text_id);
     let root = global_chords::GlobalChords::new(root);
 
     tuie::start_tui(root)?;
+
     Ok(())
 }

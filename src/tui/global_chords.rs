@@ -16,15 +16,15 @@ impl DelegateWidget for GlobalChords {
             return InputResult::Rejected;
         };
 
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/mitm_proxy_tuie_keys.log")
-            .and_then(|mut f| {
-                use std::io::Write;
-                writeln!(f, "queue={}", queue.to_string())?;
-                writeln!(f, "peek={:?}", event.chord)
-            });
+        // let _ = std::fs::OpenOptions::new()
+        //     .create(true)
+        //     .append(true)
+        //     .open("/tmp/mitm_proxy_tuie_keys.log")
+        //     .and_then(|mut f| {
+        //         use std::io::Write;
+        //         writeln!(f, "queue={}", queue.to_string())?;
+        //         writeln!(f, "peek={:?}", event.chord)
+        //     });
 
         match &event.chord {
             chord!(Tab) if queue.is_unhandled() => {
