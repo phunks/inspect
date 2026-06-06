@@ -81,6 +81,7 @@ pub struct ResponseMetadata {
     pub response_body_path: Option<String>,
     pub elapsed: Option<String>,
     pub status: Option<i64>,
+    pub upstream_status: Option<i64>,
     pub version: Option<String>,
     pub headers: Value,
 }
@@ -92,7 +93,9 @@ impl fmt::Display for ResponseMetadata {
             .unwrap_or_else(|_| headers.to_string());
         let width = 9;
         writeln!(f, "{:<width$}: {} ms", "elapsed", opt_str(self.elapsed.as_deref()))?;
-        writeln!(f, "{:<width$}: {}", "status", self.status.map_or("-".into(), |s| s.to_string()))?;
+        writeln!(f, "{:<width$}: {}", "status", self.upstream_status.map_or(
+                                                self.status.unwrap_or(500), |s| s))?;
+        // writeln!(f, "{:<width$}: {}", "upstream_status", self.upstream_status.map_or("-".into(), |s| s.to_string()))?;
         writeln!(f, "{:<width$}: {}", "protocol", opt_str(self.version.as_deref()))?;
         writeln!(f, "{:<width$}:", "headers")?;
         write!(f, "{}", indent_lines(&headers_pretty, "  "))
@@ -236,6 +239,7 @@ where
                 response_body_path,
                 elapsed,
                 status,
+                upstream_status,
                 version,
                 headers
             FROM responses WHERE id = ?"#,

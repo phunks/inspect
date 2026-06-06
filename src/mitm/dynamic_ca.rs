@@ -5,15 +5,23 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use rustls::crypto::aws_lc_rs::sign::any_supported_type;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::server::{ClientHello, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
+use rama::crypto::dep::rcgen::{BasicConstraints,
+                               CertificateParams,
+                               DistinguishedName,
+                               DnType,
+                               ExtendedKeyUsagePurpose,
+                               IsCa, Issuer, KeyPair,
+                               KeyUsagePurpose};
+use rama::error::OpaqueError;
+use rama::net::tls::client::ClientHello;
+use rama::net::tls::DataEncoding;
+use rama::net::tls::server::{DynamicCertIssuer, ServerAuthData};
 use rama::telemetry::tracing;
-use rama::tls::rustls::dep::rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose,
-};
+
+// use rama::tls::rustls::dep::rcgen::{
+//     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+//     Issuer, KeyPair, KeyUsagePurpose,
+// };
 use time::OffsetDateTime;
 
 const DEFAULT_CA_DIR_NAME: &str = ".inspect";
@@ -23,18 +31,18 @@ const DEFAULT_CA_KEY_PEM: &str = "mitm-root-ca.key";
 const DEFAULT_CA_CN: &str = "Inspect Local MITM Root CA";
 
 #[derive(Debug)]
-pub struct Ca<'a> {
+pub struct Ca {
     ca_cert_der: Vec<u8>,
-    issuer: Issuer<'a, KeyPair>,
+    issuer: Issuer<'static, KeyPair>,
 }
 
-impl Default for Ca<'_> {
+impl Default for Ca {
     fn default() -> Self {
         Self::load_or_create_default().expect("failed to load/create default root CA")
     }
 }
 
-impl Ca<'_> {
+impl Ca {
     fn load_or_create_default() -> Result<Self> {
         let dir = default_ca_dir()?;
         ensure_ca_artifacts(&dir, false)?;
@@ -53,7 +61,7 @@ impl Ca<'_> {
         Ok(Self { ca_cert_der, issuer })
     }
 
-    fn sign_for_host(&self, host: &str, issuer: &Issuer<'_, KeyPair>) -> anyhow::Result<CertifiedKey> {
+    fn sign_for_host(&self, host: &str, issuer: &Issuer<'_, KeyPair>) -> anyhow::Result<ServerAuthData> {
         let mut params = CertificateParams::new(vec![host.to_string()])?;
         params.is_ca = IsCa::NoCa;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
@@ -72,13 +80,20 @@ impl Ca<'_> {
         let key_pair = KeyPair::generate()?;
         let cert = params.signed_by(&key_pair, issuer)?;
 
-        let cert_der: CertificateDer<'static> = CertificateDer::from(cert.der().to_vec());
-        let key_der: PrivateKeyDer<'static> = PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into();
-        let signing_key = any_supported_type(&key_der)?;
-        let ca_cert_der: CertificateDer<'static> = CertificateDer::from(self.ca_cert_der.clone());
-        let chain = vec![cert_der, ca_cert_der];
-
-        Ok(CertifiedKey::new(chain, signing_key))
+        Ok(ServerAuthData {
+            private_key: DataEncoding::Pem(
+                key_pair
+                    .serialize_pem()
+                    .try_into()
+                    .expect("valid PEM key"),
+            ),
+            cert_chain: DataEncoding::Pem(
+                cert.pem()
+                    .try_into()
+                    .expect("valid PEM cert"),
+            ),
+            ocsp: None,
+        })
     }
 }
 
@@ -163,26 +178,58 @@ fn ensure_ca_artifacts(dir: &Path, force: bool) -> Result<()> {
 
     Ok(())
 }
+// rustls
+// #[derive(Debug, Default)]
+// pub struct DynamicIssuer<'a> {
+//     ca: Arc<Ca<'a>>,
+//     cache: RwLock<HashMap<String, Arc<CertifiedKey>>>,
+// }
+//
+// impl ResolvesServerCert for DynamicIssuer<'_> {
+//     fn resolve(&self, ch: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+//         let sni = ch.server_name()?.to_string();
+//         if let Some(ck) = self.cache.read().unwrap().get(&sni).cloned() {
+//             return Some(ck);
+//         }
+//
+//         let ca = self.ca.clone();
+//         let ck = match self.ca.sign_for_host(&sni, &ca.issuer) {
+//             Ok(v) => Arc::new(v),
+//             Err(_) => return None,
+//         };
+//         self.cache.write().unwrap().insert(sni.clone(), ck.clone());
+//         Some(ck)
+//     }
+// }
 
 #[derive(Debug, Default)]
-pub struct DynamicIssuer<'a> {
-    ca: Arc<Ca<'a>>,
-    cache: RwLock<HashMap<String, Arc<CertifiedKey>>>,
+pub struct DynamicIssuer {
+    ca: Arc<Ca>,
+    cache: RwLock<HashMap<String, ServerAuthData>>,
 }
 
-impl ResolvesServerCert for DynamicIssuer<'_> {
-    fn resolve(&self, ch: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let sni = ch.server_name()?.to_string();
-        if let Some(ck) = self.cache.read().unwrap().get(&sni).cloned() {
-            return Some(ck);
+impl DynamicCertIssuer for DynamicIssuer {
+    async fn issue_cert(
+        &self,
+        client_hello: ClientHello,
+        _server_name: Option<rama::net::address::Domain>,
+    ) -> Result<ServerAuthData, OpaqueError> {
+        let sni = match client_hello.ext_server_name() {
+            Some(domain) => domain.to_string(),
+            None => return Err(OpaqueError::from_display("missing SNI")),
+        };
+
+        if let Some(data) = self.cache.read().unwrap().get(&sni).cloned() {
+            return Ok(data);
         }
 
         let ca = self.ca.clone();
-        let ck = match self.ca.sign_for_host(&sni, &ca.issuer) {
-            Ok(v) => Arc::new(v),
-            Err(_) => return None,
-        };
-        self.cache.write().unwrap().insert(sni.clone(), ck.clone());
-        Some(ck)
+        let data = self
+            .ca
+            .sign_for_host(&sni, &ca.issuer)
+            .map_err(OpaqueError::from_display)?;
+
+        self.cache.write().unwrap().insert(sni, data.clone());
+        Ok(data)
     }
 }

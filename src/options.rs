@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, ValueEnum};
 use tracing::info;
 use tracing_appender::{self, rolling::daily};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -7,6 +7,19 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::AnyResult;
 use crate::mitm::dynamic_ca::generate_default_ca_files;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum UaProfile {
+    Auto,
+    Chrome,
+    Firefox,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum ProxyMode {
+    Observe,
+    Emulate,
+}
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -26,6 +39,15 @@ pub struct Opt {
 
     #[arg(long, num_args(0..=1), default_missing_value="false")]
     pub upstream_proxy: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = UaProfile::Auto)]
+    pub ua_profile: UaProfile,
+
+    #[arg(long, value_enum, default_value_t = ProxyMode::Observe)]
+    pub proxy_mode: ProxyMode,
+
+    #[arg(long, default_value_t = 60_000, help = "Upstream request timeout in milliseconds")]
+    pub upstream_timeout_ms: u64,
 
     #[arg(long, help = "Generate (or reuse) persistent local MITM root CA and exit")]
     pub generate_ca: bool,

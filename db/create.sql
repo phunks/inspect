@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS responses (
     response_body_path TEXT,
     elapsed TEXT,
     status INTEGER,
+    upstream_status INTEGER,
     version TEXT,
     headers TEXT
 );

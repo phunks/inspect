@@ -41,6 +41,7 @@ pub struct ResponseMetadata {
     pub response_body_path: String,
     pub elapsed: String,
     pub status: u16,
+    pub upstream_status: Option<u16>,
     pub version: String,
     pub headers: Value,
 }
@@ -110,6 +111,7 @@ impl DbState {
                 response_body_path TEXT,
                 elapsed TEXT,
                 status INTEGER,
+                upstream_status INTEGER,
                 version TEXT,
                 headers TEXT
             )"
@@ -198,8 +200,8 @@ where
     sqlx::query(
         "INSERT INTO responses (
             id, seq, flow_key, flow_dir, response_head_path, response_body_path,
-            elapsed, status, version, headers
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            elapsed, status, upstream_status, version, headers
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(&metadata.id)
         .bind(metadata.seq)
@@ -209,6 +211,7 @@ where
         .bind(&metadata.response_body_path)
         .bind(&metadata.elapsed)
         .bind(metadata.status as i64)
+        .bind(metadata.upstream_status.map(|s| s as i64))
         .bind(&metadata.version)
         .bind(metadata.headers.to_string())
         .execute(exec)

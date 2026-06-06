@@ -1,16 +1,16 @@
 
 use rama::{
-    error::{BoxError, ErrorContext, OpaqueError}, extensions::{ExtensionsMut, ExtensionsRef},
+    error::{ErrorContext, OpaqueError}, extensions::{ExtensionsMut, ExtensionsRef},
     http::{
-        client::EasyHttpWebClient, layer::{
+        layer::{
             compression::CompressionLayer,
-            decompression::DecompressionLayer,
             map_response_body::MapResponseBodyLayer,
             remove_header::{RemoveRequestHeaderLayer, RemoveResponseHeaderLayer},
             required_header::AddRequiredRequestHeadersLayer,
             trace::TraceLayer,
             upgrade::{UpgradeLayer, Upgraded},
-        }, matcher::MethodMatcher, server::HttpServer, service::web::response::IntoResponse,
+        }, matcher::MethodMatcher,
+        server::HttpServer, service::web::response::IntoResponse,
         Body,
         Request,
         Response,
@@ -20,24 +20,24 @@ use rama::{
     layer::{AddInputExtensionLayer, ConsumeErrLayer},
     net::{
         http::RequestContext, proxy::ProxyTarget, stream::layer::http::BodyLimitLayer,
-        tls::SecureTransport,
+        tls::server::{ServerAuth, ServerConfig},
     },
     rt::Executor,
     service::service_fn,
-    tcp::{client::service::Forwarder, server::TcpListener},
-    telemetry::tracing::{
-        self,
-        level_filters::LevelFilter,
-        subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter},
+    tcp::{server::TcpListener},
+    telemetry::tracing,
+    tls::boring::{
+        client::{EmulateTlsProfileLayer, TlsConnectorDataBuilder},
+        server::{TlsAcceptorData, TlsAcceptorLayer},
     },
-    tls::rustls::{
-        client::TlsConnectorDataBuilder,
-        server::{TlsAcceptorData, TlsAcceptorDataBuilder, TlsAcceptorLayer},
+    ua::{
+        layer::emulate::UserAgentEmulateLayer,
+        profile::UserAgentDatabase,
     },
     Layer,
     Service,
 };
-use std::{convert::Infallible, io, time::Duration};
+use std::{convert::Infallible, io};
 use std::fmt::{Debug, Formatter};
 use std::io::Read;
 use std::net::IpAddr;
@@ -45,31 +45,30 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use base64::Engine;
 use bytes::Bytes;
 use rama::net::address::{Host, HostWithPort, ProxyAddress};
-use rustls::{ServerConfig, ALL_VERSIONS};
 use flate2::read;
-use http::{HeaderName, HeaderValue};
+use http::HeaderValue;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
 use chrono::{DateTime, Utc};
-use rama::http::layer::traffic_writer;
-use rama::http::layer::traffic_writer::RequestWriterLayer;
-use rama::ua::layer::classifier::UserAgentClassifierLayer;
-use tracing::{info, info_span};
+use rama::net::tls::client::ServerVerifyMode;
+use tracing::{debug, info, info_span, warn};
 use tracing_futures::Instrument;
 use mitm::store_metadata::{DbState, RequestMetadata, RequestResponseEvent, ResponseMetadata};
 use mitm::dynamic_ca::DynamicIssuer;
 use tokio::sync::{mpsc, watch};
-
+use crate::mitm::client::{new_upstream_client, UpstreamClient};
+use crate::options::{ProxyMode, UaProfile};
 
 pub mod mitm;
 pub mod tui;
-pub mod option;
+pub mod options;
 
 const BODY_SAVE_LIMIT_BYTES: usize = 3 * 1024;
 const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -151,6 +150,11 @@ struct State {
     capture_paths: CapturePaths,
     seq: Arc<AtomicU64>,
     tui_callback: Option<Arc<dyn Fn(PacketSummary) + Send + Sync>>,
+    ua_profile: UaProfile,
+    proxy_mode: ProxyMode,
+    ua_db: Arc<UserAgentDatabase>,
+    upstream_client: UpstreamClient,
+    upstream_timeout: Duration,
 }
 
 impl Debug for State {
@@ -171,11 +175,15 @@ impl Debug for State {
 pub async fn mitm_proxy_main(
     upstream_proxy: Option<String>,
     service_port: String,
+    ua_profile: UaProfile,
+    proxy_mode: ProxyMode,
+    upstream_timeout_ms: u64,
     packet_callback: Option<Arc<dyn Fn(PacketSummary) + Send + Sync>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
         new_mitm_tls_service_data().await.context("generate self-signed mitm tls cert")?;
+    let upstream_client = new_upstream_client(proxy_mode);
 
     let upstream_proxy = match upstream_proxy {
         None => None,
@@ -201,7 +209,13 @@ pub async fn mitm_proxy_main(
         capture_paths: CapturePaths::new(),
         seq: Arc::new(AtomicU64::new(0)),
         tui_callback: packet_callback,
+        ua_profile,
+        proxy_mode,
+        ua_db: Arc::new(UserAgentDatabase::try_embedded()?),
+        upstream_client,
+        upstream_timeout: Duration::from_millis(upstream_timeout_ms),
     };
+
     let dbstate = state.dbstate.clone();
     info!("Starting mitm proxy with upstream proxy");
     let handle = graceful.spawn_task_fn(async move |guard| {
@@ -338,46 +352,90 @@ fn new_http_mitm_proxy(state: &State) -> impl Service<Request, Output = Response
         MapResponseBodyLayer::new(Body::new),
         TraceLayer::new_for_http(),
         ConsumeErrLayer::default(),
-        // UserAgentEmulateLayer::new(state.ua_db.clone())
-        //     .with_try_auto_detect_user_agent(true)
-        //     .with_is_optional(true),
+        UserAgentEmulateLayer::new(state.ua_db.clone())
+            .with_try_auto_detect_user_agent(state.proxy_mode == ProxyMode::Emulate)
+            .with_is_optional(true),
         RemoveResponseHeaderLayer::hop_by_hop(),
         RemoveRequestHeaderLayer::hop_by_hop(),
         CompressionLayer::new(),
-        // AddRequiredRequestHeadersLayer::new(),
+        AddRequiredRequestHeadersLayer::new(),
+        EmulateTlsProfileLayer::new(),
     )
         .into_layer(service_fn(http_mitm_proxy))
-
 }
 
 fn decode_reader(header_value: &HeaderValue, bytes: &[u8]) -> io::Result<Bytes> {
     let mut buf = Vec::new();
-    info!("compression method: {:?}", header_value);
-    let res = match header_value.as_bytes() {
-        b"gzip" => read::GzDecoder::new(bytes).read_to_end(&mut buf),
-        b"deflate" => read::DeflateDecoder::new(bytes).read_to_end(&mut buf),
+    let enc = header_value
+        .to_str()
+        .unwrap_or_default()
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    let res = match enc.as_str() {
+        "gzip" => read::GzDecoder::new(bytes).read_to_end(&mut buf),
+        "deflate" => read::DeflateDecoder::new(bytes).read_to_end(&mut buf),
+        "br" => {
+            let mut decoder = brotli::Decompressor::new(bytes, 4096);
+            decoder.read_to_end(&mut buf)
+        }
+        "zstd" => {
+            match zstd::stream::decode_all(bytes) {
+                Ok(decoded) => {
+                    buf = decoded;
+                    Ok(buf.len())
+                }
+                Err(err) => Err(io::Error::new(io::ErrorKind::InvalidData, err)),
+            }
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "invalid encoding",
+            format!("unsupported content-encoding: {enc}"),
         )),
     };
 
     match res {
         Ok(_) => Ok(Bytes::from(buf)),
         Err(e) => {
-            tracing::error!("decode error: {:?}", e);
+            tracing::warn!("decode error: {e}");
             Ok(Bytes::copy_from_slice(bytes))
         }
     }
 }
 
-async fn http_mitm_proxy(
+fn body_for_storage(parts: &rama::http::response::Parts, res_body_bytes: &Bytes) -> Bytes {
+    match parts.headers.get(http::header::CONTENT_ENCODING) {
+        Some(enc) => decode_reader(enc, res_body_bytes).unwrap_or_else(|e| {
+            tracing::warn!("failed to decode response body for storage: {e}");
+            res_body_bytes.clone()
+        }),
+        None => res_body_bytes.clone(),
+    }
+}
+
+fn headers_to_log_lines(headers: &http::HeaderMap) -> Vec<String> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let value = value
+                .to_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| "<binary>".to_string());
+            format!("{name}: {value}")
+        })
+        .collect()
+}
+
+async fn http_mitm_proxy (
     req: Request
 ) -> Result<Response, Infallible> {
     // This function will receive all requests going through this proxy,
     // be it sent via HTTP or HTTPS, both are equally visible. Hence... MITM
 
-    let (mut parts, body) = req.into_parts();
+    let (parts, body) = req.into_parts();
 
     let state = parts.extensions().get::<State>().cloned().unwrap();
     let dbstate = state.dbstate.clone();
@@ -430,7 +488,6 @@ async fn http_mitm_proxy(
     })).unwrap_or_else(|e|
         tracing::error!("error sending request event: {e:?}"));
 
-    let user_agent = parts.headers.get(http::header::USER_AGENT).cloned();
     let req_method = parts.method.to_string().clone();
 
     let req_body_bytes = match body.collect().await {
@@ -446,49 +503,48 @@ async fn http_mitm_proxy(
     ).await;
     let mut req = Request::from_parts(parts, Body::from(req_body_bytes));
 
-    if let Some(user_agent) = user_agent {
-        req.headers_mut().insert(http::header::USER_AGENT, user_agent);
-    }
+    // if state.proxy_mode == ProxyMode::Emulate {
+    //     match state.ua_profile {
+    //         UaProfile::Auto => {}
+    //         UaProfile::Chrome => {
+    //             req.headers_mut().insert(
+    //                 http::header::USER_AGENT,
+    //                 HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"),
+    //             );
+    //         }
+    //         UaProfile::Firefox => {
+    //             req.headers_mut().insert(
+    //                 http::header::USER_AGENT,
+    //                 HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0"),
+    //             );
+    //         }
+    //     }
+    // }
 
-    // NOTE: use a custom connector (layers) in case you wish to add custom features,
-    // such as upstream proxies or other configurations
-    let tls_config = TlsConnectorDataBuilder::new()
-        .with_alpn_protocols_http_auto()
-        .try_with_env_key_logger()
-        .expect("with env keylogger")
-        // .with_no_cert_verifier()
-        .build();
-
-    let client = EasyHttpWebClient::connector_builder()
-        .with_default_transport_connector()
-        .with_tls_proxy_support_using_rustls()
-        .with_proxy_support()
-        .with_tls_support_using_rustls_and_default_http_version(Some(tls_config), Version::HTTP_11)
-        // .with_custom_connector(UserAgentClassifierLayer::new().with_overwrite_header(HeaderName::from_static("xxxxx-user-agent")))
-        .with_default_http_connector()
-        .build_client();
-
-        // .with_jit_layer(
-        //     // UserAgentClassifierLayer::new().with_overwrite_header(HeaderName::from_static("xxxxx-user-agent")),
-        //     RequestWriterLayer::stdout_unbounded(
-        //         &executor,
-        //         Some(traffic_writer::WriterMode::Headers)
-        //     )
-        // );
     let started_at = std::time::Instant::now();
 
-    let (res, upstream_err): (Response, Option<String>) = match client.serve(req).await {
-        Ok(res) => (res, None),
-        Err(err) => {
-            let res = err.into_response();
-            let msg = format!("upstream error: {res:?}");
-            (res, Some(msg))
-        }
-    };
+    let (res, upstream_err, upstream_status): (Response, Option<String>, Option<u16>) =
+        match tokio::time::timeout(state.upstream_timeout, state.upstream_client.serve(req)).await {
+            Ok(v) => v,
+            Err(_) => {
+                let timeout_ms = state.upstream_timeout.as_millis();
+                warn!("upstream timeout after {} ms", timeout_ms);
+
+                let msg = format!("upstream timeout after {} ms", timeout_ms);
+                let res = Response::builder()
+                    .status(StatusCode::GATEWAY_TIMEOUT)
+                    .body(Body::from(msg.clone()))
+                    .unwrap_or_else(|_| StatusCode::GATEWAY_TIMEOUT.into_response());
+
+                (res, Some(msg), Some(StatusCode::GATEWAY_TIMEOUT.as_u16()))
+            }
+        };
 
     let elapsed_ms = started_at.elapsed().as_millis() as i64;
 
     let (parts, body) = res.into_parts();
+
+    let proxy_status = parts.status.as_u16();
 
     let res_head_text = build_response_head_text(&parts);
     let _ = tokio::fs::write(&res_head_path, res_head_text).await;
@@ -504,7 +560,8 @@ async fn http_mitm_proxy(
     if let Some(msg) = upstream_err.as_deref() {
         let _ = write_body_limited(&res_body_path, msg.as_bytes(), BODY_SAVE_LIMIT_BYTES).await;
     } else {
-        let _ = write_body_limited(&res_body_path, &res_body_bytes, BODY_SAVE_LIMIT_BYTES).await;
+        let stored_body_bytes = body_for_storage(&parts, &res_body_bytes);
+        let _ = write_body_limited(&res_body_path, &stored_body_bytes, BODY_SAVE_LIMIT_BYTES).await;
     }
 
     dbstate.event_sender.send(RequestResponseEvent::Response(ResponseMetadata {
@@ -515,12 +572,14 @@ async fn http_mitm_proxy(
         response_head_path: res_head_path.to_string_lossy().to_string(),
         response_body_path: res_body_path.to_string_lossy().to_string(),
         elapsed: elapsed_ms.to_string(),
-        status: parts.status.as_u16(),
+        status: proxy_status,
+        upstream_status,
         version: version_to_string(parts.version),
         headers: headers_to_json(&parts.headers),
     })).unwrap_or_else(|e| tracing::error!("error sending response event: {e:?}"));
 
     if let Some(cb) = tui_callback {
+        let display_status = upstream_status.unwrap_or(proxy_status);
         cb(PacketSummary {
             id: id.into(),
             time: rfc3999z(&time),
@@ -530,7 +589,7 @@ async fn http_mitm_proxy(
             host: req_host,
             uri: uri.path().to_string(),
             query_str: uri.query().unwrap_or_default().into(),
-            status: parts.status.as_u16(),
+            status: display_status,
             version: version_to_string(parts.version),
         });
     }
@@ -634,15 +693,15 @@ fn build_response_head_text(parts: &rama::http::response::Parts) -> String {
 // an issued TLS cert (if possible via ACME). Or at the very least
 // load it in from memory/file, so that your clients can install the certificate for trust.
 async fn new_mitm_tls_service_data() -> Result<TlsAcceptorData, OpaqueError> {
-    let dynamic_issuer = Arc::new(DynamicIssuer::default());
-    let config = ServerConfig::builder_with_protocol_versions(ALL_VERSIONS)
-        .with_no_client_auth()
-        .with_cert_resolver(dynamic_issuer);
-    let data = TlsAcceptorDataBuilder::from(config)
-        .with_alpn_protocols_http_auto()
-        .try_with_env_key_logger()
-        .context("with env key logger")?
-        .build();
+    let dynamic_issuer = DynamicIssuer::default();
 
-    Ok(data)
+    let tls_server_config = ServerConfig::new(
+        ServerAuth::CertIssuer(rama::net::tls::server::ServerCertIssuerData {
+            kind: dynamic_issuer.into(),
+            cache_kind: rama::net::tls::server::CacheKind::Disabled,
+    }));
+
+    tls_server_config
+        .try_into()
+        .context("create tls server config")
 }

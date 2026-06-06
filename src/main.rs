@@ -1,13 +1,10 @@
 use std::sync::Arc;
-use clap::Parser;
-use rama::crypto::dep::x509_parser::nom::combinator::opt;
 use tokio::sync::{mpsc, watch};
 
-use inspect::mitm::dynamic_ca::generate_default_ca_files;
 use inspect::mitm_proxy_main;
 use inspect::tui::run_tui;
 use inspect::{AnyError, CapturePaths, PacketSummary};
-use inspect::option::{Opt, Logger};
+use inspect::options::{Opt, Logger};
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
@@ -23,10 +20,21 @@ async fn main() -> Result<(), AnyError> {
     });
 
     let upstream_proxy = opt.upstream_proxy.clone();
+    let ua_profile = opt.ua_profile;
+    let proxy_mode = opt.proxy_mode;
+    let upstream_timeout_ms = opt.upstream_timeout_ms;
     let (quit_tx, quit_rx) = watch::channel(false);
 
     let proxy_task = tokio::spawn(async move {
-        if let Err(e) = mitm_proxy_main(upstream_proxy, service_port, Some(callback), quit_rx).await {
+        if let Err(e) = mitm_proxy_main(
+            upstream_proxy,
+            service_port,
+            ua_profile,
+            proxy_mode,
+            upstream_timeout_ms,
+            Some(callback),
+            quit_rx,
+        ).await {
             eprintln!("proxy error: {e}");
         }
     });
