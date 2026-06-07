@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS responses (
     flow_dir TEXT NOT NULL,
     response_head_path TEXT,
     response_body_path TEXT,
-    elapsed TEXT,
+    elapsed INTEGER,
     status INTEGER,
     upstream_status INTEGER,
     version TEXT,

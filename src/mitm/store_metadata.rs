@@ -39,7 +39,7 @@ pub struct ResponseMetadata {
     pub flow_dir: String,
     pub response_head_path: String,
     pub response_body_path: String,
-    pub elapsed: String,
+    pub elapsed: i64,
     pub status: u16,
     pub upstream_status: Option<u16>,
     pub version: String,
@@ -109,7 +109,7 @@ impl DbState {
                 flow_dir TEXT NOT NULL,
                 response_head_path TEXT,
                 response_body_path TEXT,
-                elapsed TEXT,
+                elapsed INTEGER,
                 status INTEGER,
                 upstream_status INTEGER,
                 version TEXT,
@@ -209,7 +209,7 @@ where
         .bind(&metadata.flow_dir)
         .bind(&metadata.response_head_path)
         .bind(&metadata.response_body_path)
-        .bind(&metadata.elapsed)
+        .bind(metadata.elapsed)
         .bind(metadata.status as i64)
         .bind(metadata.upstream_status.map(|s| s as i64))
         .bind(&metadata.version)

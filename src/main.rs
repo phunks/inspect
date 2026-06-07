@@ -1,15 +1,25 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
-
+use tracing::info;
 use inspect::mitm_proxy_main;
-use inspect::tui::run_tui;
+use inspect::tui::{run_tui, TimeDisplayConfig};
 use inspect::{AnyError, CapturePaths, PacketSummary};
+use inspect::mitm::dynamic_ca::generate_default_ca_files;
 use inspect::options::{Opt, Logger};
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
     let opt = Opt::init()?;
     let _logger = Logger::build(opt.verbosity);
+
+    if opt.generate_ca {
+        let dir = generate_default_ca_files(opt.force_regenerate_ca)?;
+        info!("Root CA generated: {}", dir.display());
+        info!("Import this certificate into OS trust store:");
+        info!("  {}", dir.join("mitm-root-ca.crt").display());
+        return Ok(());
+    }
+
     let service_port = format!("{}:{}", opt.ip, opt.port);
 
     let _ = CapturePaths::initialize_for_process()?;
@@ -23,8 +33,15 @@ async fn main() -> Result<(), AnyError> {
     let ua_profile = opt.ua_profile;
     let connect_ua_profile = opt.connect_ua_profile;
     let proxy_mode = opt.proxy_mode;
-    let upstream_timeout_ms = opt.upstream_timeout_ms;
+    let upstream_handshake_timeout_ms = opt.upstream_handshake_timeout_ms;
+    let upstream_request_timeout_ms = opt.upstream_request_timeout_ms;
     let (quit_tx, quit_rx) = watch::channel(false);
+
+    let time_display = TimeDisplayConfig {
+        mode: opt.tui_time_mode,
+        format: opt.tui_time_format.clone(),
+        tz: opt.tui_time_tz.clone(),
+    };
 
     let proxy_task = tokio::spawn(async move {
         if let Err(e) = mitm_proxy_main(
@@ -33,7 +50,8 @@ async fn main() -> Result<(), AnyError> {
             ua_profile,
             connect_ua_profile,
             proxy_mode,
-            upstream_timeout_ms,
+            upstream_handshake_timeout_ms,
+            upstream_request_timeout_ms,
             Some(callback),
             quit_rx,
         ).await {
@@ -41,7 +59,7 @@ async fn main() -> Result<(), AnyError> {
         }
     });
 
-    if let Err(e) = run_tui(rx, quit_tx.clone()).await {
+    if let Err(e) = run_tui(rx, quit_tx.clone(), time_display).await {
         eprintln!("tui error: {e}");
     }
 

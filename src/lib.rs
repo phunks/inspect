@@ -57,8 +57,7 @@ use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
 use chrono::{DateTime, Utc};
-use rama::net::tls::client::ServerVerifyMode;
-use tracing::{debug, info, info_span, warn};
+use tracing::{info, info_span, warn};
 use tracing_futures::Instrument;
 use mitm::store_metadata::{DbState, RequestMetadata, RequestResponseEvent, ResponseMetadata};
 use mitm::dynamic_ca::DynamicIssuer;
@@ -154,7 +153,6 @@ struct State {
     proxy_mode: ProxyMode,
     ua_db: Arc<UserAgentDatabase>,
     upstream_client: UpstreamClient,
-    upstream_timeout: Duration,
 }
 
 impl Debug for State {
@@ -178,13 +176,21 @@ pub async fn mitm_proxy_main(
     ua_profile: UaProfile,
     connect_ua_profile: Option<UaProfile>,
     proxy_mode: ProxyMode,
-    upstream_timeout_ms: u64,
+    upstream_handshake_timeout_ms: u64,
+    upstream_request_timeout_ms: u64,
     packet_callback: Option<Arc<dyn Fn(PacketSummary) + Send + Sync>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
         new_mitm_tls_service_data().await.context("generate self-signed mitm tls cert")?;
-    let upstream_client = new_upstream_client(proxy_mode, ua_profile, connect_ua_profile);
+
+    let upstream_client = new_upstream_client(
+        proxy_mode,
+        ua_profile,
+        connect_ua_profile,
+        Duration::from_millis(upstream_handshake_timeout_ms),
+        Duration::from_millis(upstream_request_timeout_ms),
+    );
 
     let upstream_proxy = match upstream_proxy {
         None => None,
@@ -214,7 +220,6 @@ pub async fn mitm_proxy_main(
         proxy_mode,
         ua_db: Arc::new(UserAgentDatabase::try_embedded()?),
         upstream_client,
-        upstream_timeout: Duration::from_millis(upstream_timeout_ms),
     };
 
     let dbstate = state.dbstate.clone();
@@ -507,44 +512,12 @@ async fn http_mitm_proxy (
                                &req_body_bytes,
                                BODY_SAVE_LIMIT_BYTES
     ).await;
-    let mut req = Request::from_parts(parts, Body::from(req_body_bytes));
-
-    // if state.proxy_mode == ProxyMode::Emulate {
-    //     match state.ua_profile {
-    //         UaProfile::Auto => {}
-    //         UaProfile::Chrome => {
-    //             req.headers_mut().insert(
-    //                 http::header::USER_AGENT,
-    //                 HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"),
-    //             );
-    //         }
-    //         UaProfile::Firefox => {
-    //             req.headers_mut().insert(
-    //                 http::header::USER_AGENT,
-    //                 HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0"),
-    //             );
-    //         }
-    //     }
-    // }
+    let req = Request::from_parts(parts, Body::from(req_body_bytes));
 
     let started_at = std::time::Instant::now();
 
     let (res, upstream_err, upstream_status): (Response, Option<String>, Option<u16>) =
-        match tokio::time::timeout(state.upstream_timeout, state.upstream_client.serve(req)).await {
-            Ok(v) => v,
-            Err(_) => {
-                let timeout_ms = state.upstream_timeout.as_millis();
-                warn!("upstream timeout after {} ms", timeout_ms);
-
-                let msg = format!("upstream timeout after {} ms", timeout_ms);
-                let res = Response::builder()
-                    .status(StatusCode::GATEWAY_TIMEOUT)
-                    .body(Body::from(msg.clone()))
-                    .unwrap_or_else(|_| StatusCode::GATEWAY_TIMEOUT.into_response());
-
-                (res, Some(msg), Some(StatusCode::GATEWAY_TIMEOUT.as_u16()))
-            }
-        };
+        state.upstream_client.serve(req).await;
 
     let elapsed_ms = started_at.elapsed().as_millis() as i64;
 
@@ -577,7 +550,7 @@ async fn http_mitm_proxy (
         flow_dir: flow_dir.to_string_lossy().to_string(),
         response_head_path: res_head_path.to_string_lossy().to_string(),
         response_body_path: res_body_path.to_string_lossy().to_string(),
-        elapsed: elapsed_ms.to_string(),
+        elapsed: elapsed_ms,
         status: proxy_status,
         upstream_status,
         version: version_to_string(parts.version),

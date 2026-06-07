@@ -17,11 +17,6 @@ use rama::net::tls::client::ClientHello;
 use rama::net::tls::DataEncoding;
 use rama::net::tls::server::{DynamicCertIssuer, ServerAuthData};
 use rama::telemetry::tracing;
-
-// use rama::tls::rustls::dep::rcgen::{
-//     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-//     Issuer, KeyPair, KeyUsagePurpose,
-// };
 use time::OffsetDateTime;
 
 const DEFAULT_CA_DIR_NAME: &str = ".inspect";
@@ -178,29 +173,6 @@ fn ensure_ca_artifacts(dir: &Path, force: bool) -> Result<()> {
 
     Ok(())
 }
-// rustls
-// #[derive(Debug, Default)]
-// pub struct DynamicIssuer<'a> {
-//     ca: Arc<Ca<'a>>,
-//     cache: RwLock<HashMap<String, Arc<CertifiedKey>>>,
-// }
-//
-// impl ResolvesServerCert for DynamicIssuer<'_> {
-//     fn resolve(&self, ch: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-//         let sni = ch.server_name()?.to_string();
-//         if let Some(ck) = self.cache.read().unwrap().get(&sni).cloned() {
-//             return Some(ck);
-//         }
-//
-//         let ca = self.ca.clone();
-//         let ck = match self.ca.sign_for_host(&sni, &ca.issuer) {
-//             Ok(v) => Arc::new(v),
-//             Err(_) => return None,
-//         };
-//         self.cache.write().unwrap().insert(sni.clone(), ck.clone());
-//         Some(ck)
-//     }
-// }
 
 #[derive(Debug, Default)]
 pub struct DynamicIssuer {

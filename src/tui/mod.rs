@@ -5,13 +5,14 @@ use crate::PacketSummary;
 use std::sync::Arc;
 use std::time::Duration;
 use chord_macro::chord;
+use chrono::{FixedOffset, Local, TimeZone, Utc};
 use tokio::sync::{
     mpsc::{
         self, UnboundedReceiver, UnboundedSender
     }, watch};
 use tuie::prelude::*;
 use read_metadata::DbState;
-
+use crate::options::TimeMode;
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
@@ -43,6 +44,107 @@ struct PacketListContext {
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TimeDisplayConfig {
+    pub mode: TimeMode,
+    pub format: String,
+    pub tz: String,
+}
+
+#[derive(Clone, Debug)]
+enum TuiTimeZone {
+    Local,
+    Utc,
+    Offset(FixedOffset),
+}
+
+impl TuiTimeZone {
+    fn parse(s: &str) -> Self {
+        let lower = s.trim().to_ascii_lowercase();
+        if lower == "local" {
+            return Self::Local;
+        }
+        if lower == "utc" || lower == "z" {
+            return Self::Utc;
+        }
+
+        let raw = s.trim();
+        if raw.len() == 6 && (raw.starts_with('+') || raw.starts_with('-')) && raw.as_bytes()[3] == b':' {
+            let sign = if raw.starts_with('-') { -1 } else { 1 };
+            let hh = raw[1..3].parse::<i32>().ok();
+            let mm = raw[4..6].parse::<i32>().ok();
+            if let (Some(h), Some(m)) = (hh, mm) {
+                let sec = sign * (h * 3600 + m * 60);
+                if let Some(ofs) = FixedOffset::east_opt(sec) {
+                    return Self::Offset(ofs);
+                }
+            }
+        }
+
+        Self::Local
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TimeFormatter {
+    mode: TimeMode,
+    fmt: String,
+    tz: TuiTimeZone,
+    first_epoch_ms: Option<i64>,
+}
+
+impl TimeFormatter {
+    fn new(cfg: TimeDisplayConfig) -> Self {
+        Self {
+            mode: cfg.mode,
+            fmt: cfg.format,
+            tz: TuiTimeZone::parse(&cfg.tz),
+            first_epoch_ms: None,
+        }
+    }
+
+    fn format_includes_tz(fmt: &str) -> bool {
+        fmt.contains("%z")
+            || fmt.contains("%:z")
+            || fmt.contains("%::z")
+            || fmt.contains("%:::z")
+            || fmt.contains("%Z")
+    }
+
+    fn format_packet_time(&mut self, raw_time: &str, epoch_ms: i64) -> String {
+        match self.mode {
+            TimeMode::RFC3339z => raw_time.to_string(),
+            TimeMode::Epoch => epoch_ms.to_string(),
+            TimeMode::Elapsed => {
+                let base = *self.first_epoch_ms.get_or_insert(epoch_ms);
+                let delta = (epoch_ms - base).max(0);
+                let h = delta / 3_600_000;
+                let m = (delta % 3_600_000) / 60_000;
+                let s = (delta % 60_000) / 1_000;
+                let ms = delta % 1_000;
+                format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+            }
+            TimeMode::Absolute => {
+                let Some(dt_utc) = Utc.timestamp_millis_opt(epoch_ms).single() else {
+                    return "-".to_string();
+                };
+
+                match &self.tz {
+                    TuiTimeZone::Utc => {
+                        let mut s = dt_utc.format(&self.fmt).to_string();
+                        if !Self::format_includes_tz(&self.fmt) && !s.ends_with('z') && !s.ends_with('Z') {
+                            s.push('z');
+                        }
+                        s
+                    }
+                    TuiTimeZone::Local => dt_utc.with_timezone(&Local).format(&self.fmt).to_string(),
+                    TuiTimeZone::Offset(ofs) => dt_utc.with_timezone(ofs).format(&self.fmt).to_string(),
+                }
+            }
+        }
+    }
+}
+
 pub struct PacketListDelegate {
     rows: Vec<PacketRow>,
     selected: usize,
@@ -55,6 +157,7 @@ pub struct PacketListDelegate {
     dbstate: Arc<DbState>,
     detail_tx: UnboundedSender<UiEvent>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
+    time_formatter: TimeFormatter,
 }
 
 impl PacketListDelegate {
@@ -63,6 +166,7 @@ impl PacketListDelegate {
     pub async fn new(
         rx: mpsc::UnboundedReceiver<PacketSummary>,
         detail_tx: UnboundedSender<UiEvent>,
+        time_display: TimeDisplayConfig,
     ) -> Box<Self> {
         let rows = vec![PacketRow {
             id: String::new(),
@@ -76,6 +180,7 @@ impl PacketListDelegate {
 
         let selected = 0;
         let row_clicks = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let time_formatter = TimeFormatter::new(time_display);
 
         let mut list_id = WidgetId::EMPTY;
 
@@ -127,6 +232,7 @@ impl PacketListDelegate {
             dbstate: Arc::new(DbState::new().await.expect("dbstate")),
             detail_tx,
             row_clicks,
+            time_formatter,
         });
 
         this.task = tuie::schedule(this.get_id(), Self::TICK_INTERVAL, Self::tick);
@@ -211,9 +317,10 @@ impl PacketListDelegate {
                 continue;
             }
 
+            let display_time = self.time_formatter.format_packet_time(&pkt.time, pkt.epoch_ms);
             let line = format!(
                 "{} {:<6} {:<4} {}{}{}",
-                pkt.time,
+                display_time,
                 pkt.method,
                 pkt.status,
                 pkt.host,
@@ -227,11 +334,11 @@ impl PacketListDelegate {
 
             self.rows.push(PacketRow {
                 id: pkt.id,
-                time: "test time".to_string(),
-                method: "test method".to_string(),
-                status: 0,
-                host: "test host".to_string(),
-                uri: "test url".to_string(),
+                time: display_time,
+                method: pkt.method,
+                status: pkt.status,
+                host: pkt.host,
+                uri: pkt.uri,
                 line,
             });
 
@@ -365,21 +472,21 @@ impl PacketListDelegate {
                     let res_body = read_body_file(res.response_body_path.as_deref()).await;
                     let dir = req.flow_dir.as_deref().unwrap();
                     format!(
-                        "id: {id}\ndir: {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}"
+                        "id  : {id}\ndir : {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}"
                     )
                 }
                 (Ok(req), Err(e)) => {
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
                     let dir = req.flow_dir.as_deref().unwrap();
                     format!(
-                        "id: {id}\ndir: {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\nresponse error: {e}"
+                        "id  : {id}\ndir : {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\nresponse error: {e}"
                     )
                 }
                 (Err(e1), Err(e2)) => {
                     format!("id: {id}\n\nrequest error: {e1}\nresponse error: {e2}")
                 }
                 (Err(e), _) => format!("id: {id}\n\nrequest error: {e}"),
-                (_, Err(e)) => format!("id: {id}\n\nresponse error: {e}"),
+                // (_, Err(e)) => format!("id: {id}\n\nresponse error: {e}"),
             };
 
             let _ = detail_tx.send(UiEvent::ShowDetail(text));
@@ -668,10 +775,11 @@ impl Widget for ClickablePacketRow {
 pub async fn run_tui(
     rx: UnboundedReceiver<PacketSummary>,
     quit_tx: watch::Sender<bool>,
+    time_display: TimeDisplayConfig,
 ) -> anyhow::Result<()> {
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
 
-    let app: Box<dyn Widget> = PacketListDelegate::new(rx, detail_tx).await;
+    let app: Box<dyn Widget> = PacketListDelegate::new(rx, detail_tx, time_display).await;
 
     let mut detail_text_id = WidgetId::EMPTY;
     let split = Pane::new()
@@ -686,16 +794,14 @@ pub async fn run_tui(
                         .preferred_height(1)
                         .vertical()
                         .flex(1)
-                        .title("Packets")
                         .children([
                             app
-                        ])),
+                        ])).title("Packets"),
                     SplitPaneChild::from(Pane::new()
                         .preferred_width(40)
                         .preferred_height(1)
                         .vertical()
                         .flex(1)
-                        .title("Details")
                         .children([
                             Text::new()
                                 .content("Select row and press Enter".dim())
@@ -703,7 +809,7 @@ pub async fn run_tui(
                                 .id(&mut detail_text_id).flex(1),
                         ])
                         .y_scroll(Scrollbar::Visible),
-                    ),
+                    ).title("Details"),
                 ])
             ).flex(1)
             .border(Border::ROUND)

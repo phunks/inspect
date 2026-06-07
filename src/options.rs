@@ -21,6 +21,14 @@ pub enum ProxyMode {
     Emulate,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum TimeMode {
+    RFC3339z,
+    Absolute,
+    Elapsed,
+    Epoch,
+}
+
 #[derive(Parser, Debug)]
 #[command(version)]
 pub struct Opt {
@@ -49,17 +57,29 @@ pub struct Opt {
     #[arg(long, value_enum, default_value_t = ProxyMode::Observe)]
     pub proxy_mode: ProxyMode,
 
-    #[arg(long, default_value_t = 60_000, help = "Upstream request timeout in milliseconds")]
-    pub upstream_timeout_ms: u64,
+    #[arg(long, default_value_t = 10_000, help = "Upstream connect/TLS handshake timeout in milliseconds")]
+    pub upstream_handshake_timeout_ms: u64,
+
+    #[arg(long, default_value_t = 60_000, help = "Upstream request/read timeout in milliseconds")]
+    pub upstream_request_timeout_ms: u64,
 
     #[arg(long, help = "Generate (or reuse) persistent local MITM root CA and exit")]
     pub generate_ca: bool,
 
     #[arg(long, requires = "generate_ca", help = "Force regenerate local MITM root CA")]
-    force_regenerate_ca: bool,
+    pub force_regenerate_ca: bool,
 
     #[arg(long, num_args(0..=1), default_missing_value="true", help = "SSLKEYLOGFILE environment variable")]
     preshared_key_log: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = TimeMode::RFC3339z, help = "TUI time mode: rfc3339|absolute|elapsed|epoch")]
+    pub tui_time_mode: TimeMode,
+
+    #[arg(long, default_value = "%H:%M:%S%.3f", help = "TUI absolute time format (chrono strftime style)")]
+    pub tui_time_format: String,
+
+    #[arg(long, default_value = "utc", help = "TUI timezone: local|utc|+09:00|-05:30")]
+    pub tui_time_tz: String,
 }
 
 impl Opt {
@@ -78,20 +98,13 @@ impl Opt {
             unsafe { std::env::set_var("SSLKEYLOGFILE", a); }
         }
 
-        if opt.generate_ca {
-            let dir = generate_default_ca_files(opt.force_regenerate_ca)?;
-            info!("Root CA generated: {}", dir.display());
-            info!("Import this certificate into OS trust store:");
-            info!("  {}", dir.join("mitm-root-ca.crt").display());
-            // return Ok(());
-        }
         Ok(opt)
     }
 
     pub fn is_preshared_key_log_enabled(&self) -> bool {
         self.preshared_key_log.is_some()
     }
-
+    
     pub fn preshared_key_log_file(&self) -> Option<&str> {
         match &self.preshared_key_log {
             Some(val) if val == "true" => None,

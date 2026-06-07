@@ -54,14 +54,22 @@ Options:
           UA for upstream proxy CONNECT. If omitted, inherits --ua-profile [possible values: auto, chrome, firefox]
       --proxy-mode <PROXY_MODE>
           [default: observe] [possible values: observe, emulate]
-      --upstream-timeout-ms <UPSTREAM_TIMEOUT_MS>
-          Upstream request timeout in milliseconds [default: 60000]
+      --upstream-handshake-timeout-ms <UPSTREAM_HANDSHAKE_TIMEOUT_MS>
+          Upstream connect/TLS handshake timeout in milliseconds [default: 10000]
+      --upstream-request-timeout-ms <UPSTREAM_REQUEST_TIMEOUT_MS>
+          Upstream request/read timeout in milliseconds [default: 60000]
       --generate-ca
           Generate (or reuse) persistent local MITM root CA and exit
       --force-regenerate-ca
           Force regenerate local MITM root CA
       --preshared-key-log [<PRESHARED_KEY_LOG>]
           SSLKEYLOGFILE environment variable
+      --tui-time-mode <TUI_TIME_MODE>
+          TUI time mode: rfc3339|absolute|elapsed|epoch [default: rfc3339z] [possible values: rfc3339z, absolute, elapsed, epoch]
+      --tui-time-format <TUI_TIME_FORMAT>
+          TUI absolute time format (chrono strftime style) [default: %H:%M:%S%.3f]
+      --tui-time-tz <TUI_TIME_TZ>
+          TUI timezone: local|utc|+09:00|-05:30 [default: utc]
   -h, --help
           Print help
   -V, --version

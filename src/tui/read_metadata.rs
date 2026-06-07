@@ -62,9 +62,7 @@ impl fmt::Display for RequestMetadata {
         writeln!(f, "{:<width$}: {}", "scheme", opt_str(self.protocol.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "host", opt_str(self.host.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "path", opt_str(self.uri.as_deref()))?;
-        if self.method.as_deref() == Some("GET") {
-            writeln!(f, "{:<width$}: {}", "query", opt_str(self.query_str.as_deref()))?;
-        }
+        writeln!(f, "{:<width$}: {}", "query", opt_str(self.query_str.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "version", opt_str(self.version.as_deref()))?;
         writeln!(f, "{:<width$}:", "headers")?;
         write!(f, "{}", indent_lines(&headers_pretty, "  "))
@@ -79,7 +77,7 @@ pub struct ResponseMetadata {
     pub flow_dir: Option<String>,
     pub response_head_path: Option<String>,
     pub response_body_path: Option<String>,
-    pub elapsed: Option<String>,
+    pub elapsed: Option<i64>,
     pub status: Option<i64>,
     pub upstream_status: Option<i64>,
     pub version: Option<String>,
@@ -92,7 +90,7 @@ impl fmt::Display for ResponseMetadata {
         let headers_pretty = serde_json::to_string_pretty(&headers)
             .unwrap_or_else(|_| headers.to_string());
         let width = 9;
-        writeln!(f, "{:<width$}: {} ms", "elapsed", opt_str(self.elapsed.as_deref()))?;
+        writeln!(f, "{:<width$}: {} ms", "elapsed", self.elapsed.map_or("-".into(), |d| d.to_string()))?;
         writeln!(f, "{:<width$}: {}", "status", self.upstream_status.map_or(
                                                 self.status.unwrap_or(500), |s| s))?;
         // writeln!(f, "{:<width$}: {}", "upstream_status", self.upstream_status.map_or("-".into(), |s| s.to_string()))?;

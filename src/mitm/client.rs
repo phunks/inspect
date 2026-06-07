@@ -1,17 +1,28 @@
-use rama::{http::{
-    client::EasyHttpWebClient,
-    service::web::response::IntoResponse,
-    Request,
-    Response}, tls::boring::client::TlsConnectorDataBuilder, ua::layer::emulate::{
-    UserAgentEmulateHttpConnectModifierLayer,
-    UserAgentEmulateHttpRequestModifierLayer,
-}, Layer, Service};
+use rama::{
+    http::{
+        client::EasyHttpWebClient,
+        service::web::response::IntoResponse,
+        Request,
+        Response,
+        StatusCode,
+    },
+    layer::timeout::TimeoutLayer as ServiceTimeoutLayer,
+    tls::boring::client::TlsConnectorDataBuilder,
+    ua::layer::emulate::{
+        UserAgentEmulateHttpConnectModifierLayer,
+        UserAgentEmulateHttpRequestModifierLayer,
+    },
+    Layer,
+    Service,
+};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use http::header::USER_AGENT;
 use http::HeaderValue;
 use rama::http::client::proxy::layer::{HttpProxyConnector, HttpProxyConnectorLayer};
+use rama::http::layer::timeout::TimeoutLayer;
 use rama::net::tls::client::ServerVerifyMode;
 use crate::options::{ProxyMode, UaProfile};
 
@@ -22,16 +33,17 @@ type UpstreamCall = Arc<
 >;
 
 #[derive(Clone)]
-pub enum UpstreamClient {
-    Observe(UpstreamCall),
-    Emulate(UpstreamCall),
+pub struct UpstreamClient {
+    call: UpstreamCall,
 }
 
 impl UpstreamClient {
     pub(crate) async fn serve(&self, req: Request) -> (Response, Option<String>, Option<u16>) {
-        match self {
-            Self::Observe(call) | Self::Emulate(call) => (call)(req).await,
-        }
+        (self.call)(req).await
+    }
+
+    fn new(call: UpstreamCall) -> Self {
+        Self { call }
     }
 }
 
@@ -68,6 +80,8 @@ pub fn new_upstream_client(
     proxy_mode: ProxyMode,
     request_ua_profile: UaProfile,
     connect_ua_profile: Option<UaProfile>,
+    handshake_timeout: Duration,
+    request_timeout: Duration,
 ) -> UpstreamClient {
     let base_tls_config = TlsConnectorDataBuilder::new_http_auto()
         .with_server_verify_mode(ServerVerifyMode::Disable)
@@ -98,7 +112,11 @@ pub fn new_upstream_client(
                     .with_custom_connector(CustomProxyUaLayer { ua_value: static_proxy_ua.clone() })
                     .with_tls_support_using_boringssl(Some(base_tls_config.clone()))
                     .with_default_http_connector()
-                    .build_client(),
+                    .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
+                    .build_client()
+                    .with_jit_layer(
+                        TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout)
+                    ),
             );
 
             let request_ua = request_ua.clone();
@@ -124,7 +142,11 @@ pub fn new_upstream_client(
                                 .with_custom_connector(CustomProxyUaLayer { ua_value: connect_ua_from_client })
                                 .with_tls_support_using_boringssl(Some(base_tls_config))
                                 .with_default_http_connector()
-                                .build_client(),
+                                .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
+                                .build_client()
+                                .with_jit_layer(
+                                    TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout)
+                                ),
                         )
                     } else {
                         static_client
@@ -149,7 +171,7 @@ pub fn new_upstream_client(
                 })
             });
 
-            UpstreamClient::Observe(call)
+            UpstreamClient::new(call)
         }
         ProxyMode::Emulate => {
             let client = Arc::new(
@@ -161,8 +183,12 @@ pub fn new_upstream_client(
                     .with_tls_support_using_boringssl(Some(base_tls_config))
                     .with_custom_connector(UserAgentEmulateHttpConnectModifierLayer::default())
                     .with_default_http_connector()
+                    .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
                     .build_client()
-                    .with_jit_layer((UserAgentEmulateHttpRequestModifierLayer::default(),)),
+                    .with_jit_layer((
+                        UserAgentEmulateHttpRequestModifierLayer::default(),
+                        TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout),
+                    )),
             );
 
             let request_ua = request_ua.clone();
@@ -194,7 +220,7 @@ pub fn new_upstream_client(
                 })
             });
 
-            UpstreamClient::Emulate(call)
+            UpstreamClient::new(call)
         }
     }
 }
