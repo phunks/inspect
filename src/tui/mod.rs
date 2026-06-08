@@ -51,12 +51,21 @@ impl PacketRow {
 }
 
 #[derive(Clone, Debug)]
-enum SearchMatcher {
-    Contains(String),
-    Regex {
+enum SearchCondition {
+    UrlContains(String),
+    UrlRegex {
         pattern: String,
         regex: Regex,
     },
+    Method(String),
+    Status(u16),
+    StatusClass(u16),
+}
+
+#[derive(Clone, Debug)]
+struct SearchMatcher {
+    conditions: Vec<SearchCondition>,
+    label: String,
 }
 
 impl SearchMatcher {
@@ -67,32 +76,90 @@ impl SearchMatcher {
             return Ok(None);
         }
 
-        if let Some(pattern) = query.strip_prefix("re:") {
-            let regex = Regex::new(pattern)?;
-            return Ok(Some(Self::Regex {
-                pattern: pattern.to_string(),
-                regex,
-            }));
+        let mut conditions = Vec::new();
+
+        for raw_part in query.split("&&") {
+            let part = raw_part.trim();
+
+            if part.is_empty() {
+                continue;
+            }
+
+            conditions.push(SearchCondition::parse(part)?);
         }
 
-        Ok(Some(Self::Contains(query.to_ascii_lowercase())))
+        if conditions.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            conditions,
+            label: query.to_string(),
+        }))
     }
 
-    fn matches_url(&self, row: &PacketRow) -> bool {
-        let url = row.url_text();
-
-        match self {
-            Self::Contains(query) => url
-                .to_ascii_lowercase()
-                .contains(query),
-            Self::Regex { regex, .. } => regex.is_match(&url),
-        }
+    fn matches(&self, row: &PacketRow) -> bool {
+        self.conditions
+            .iter()
+            .all(|condition| condition.matches(row))
     }
 
     fn label(&self) -> String {
+        self.label.clone()
+    }
+}
+
+impl SearchCondition {
+    fn parse(part: &str) -> Result<Self, regex::Error> {
+        if let Some(value) = part
+            .strip_prefix("method:")
+            .or_else(|| part.strip_prefix("meth:"))
+            .or_else(|| part.strip_prefix("m:"))
+        {
+            return Ok(Self::Method(value.trim().to_ascii_uppercase()));
+        }
+
+        if let Some(value) = part
+            .strip_prefix("status:")
+            .or_else(|| part.strip_prefix("stat:"))
+            .or_else(|| part.strip_prefix("s:"))
+        {
+            let value = value.trim();
+
+            if let Some(prefix) = value.strip_suffix("xx") {
+                if let Ok(class) = prefix.parse::<u16>() {
+                    return Ok(Self::StatusClass(class));
+                }
+            }
+
+            if let Ok(status) = value.parse::<u16>() {
+                return Ok(Self::Status(status));
+            }
+
+            return Ok(Self::UrlContains(part.to_ascii_lowercase()));
+        }
+
+        if let Some(pattern) = part.strip_prefix("re:") {
+            let regex = Regex::new(pattern)?;
+            return Ok(Self::UrlRegex {
+                pattern: pattern.to_string(),
+                regex,
+            });
+        }
+
+        Ok(Self::UrlContains(part.to_ascii_lowercase()))
+    }
+
+    fn matches(&self, row: &PacketRow) -> bool {
         match self {
-            Self::Contains(query) => query.clone(),
-            Self::Regex { pattern, .. } => format!("re:{pattern}"),
+            Self::UrlContains(query) => row
+                .url_text()
+                .to_ascii_lowercase()
+                .contains(query),
+            Self::UrlRegex { regex, .. } => regex.is_match(&row.url_text()),
+            Self::Method(method) => row.method.eq_ignore_ascii_case(method),
+            Self::Status(status) => row.status == *status,
+            Self::StatusClass(class) => row.status / 100 == *class,
         }
     }
 }
@@ -355,7 +422,7 @@ impl PacketListDelegate {
                 && self
                 .search_matcher
                 .as_ref()
-                .is_some_and(|matcher| matcher.matches_url(&row))
+                .is_some_and(|matcher| matcher.matches(&row))
             {
                 self.search_rows.push(row.clone());
             }
@@ -463,7 +530,7 @@ impl PacketListDelegate {
                 self.search_rows = self
                     .rows
                     .iter()
-                    .filter(|row| matcher.matches_url(row))
+                    .filter(|row| matcher.matches(row))
                     .cloned()
                     .collect();
 
@@ -689,7 +756,7 @@ impl PacketListDelegate {
         self.search_rows = self
             .rows
             .iter()
-            .filter(|row| matcher.matches_url(row))
+            .filter(|row| matcher.matches(row))
             .cloned()
             .collect();
 
