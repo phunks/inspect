@@ -5,7 +5,8 @@ mod button;
 mod focus_pane;
 mod time;
 
-use crate::PacketSummary;
+use std::path::PathBuf;
+use crate::{CapturePaths, PacketSummary};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +18,7 @@ use tokio::sync::{
     }, watch};
 use tuie::prelude::*;
 use read_metadata::DbState;
-use crate::tui::search::open_search_popup;
+use crate::tui::search::{open_full_text_search_popup, open_search_popup};
 pub use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 
 const MAX_ROWS: usize = 10_000;
@@ -29,6 +30,7 @@ const DETAIL_PLACEHOLDER_TEXT: &'static str = "Select row and press Enter";
 #[derive(Clone, Debug, Default)]
 struct PacketRow {
     id: String,
+    flow_key: String,
     time: String,
     method: String,
     status: u16,
@@ -137,6 +139,8 @@ pub struct PacketListDelegate {
     detail_tx: UnboundedSender<UiEvent>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     search_requests: Arc<parking_lot::Mutex<Vec<String>>>,
+    full_text_select_requests: Arc<parking_lot::Mutex<Vec<String>>>,
+    capture_flows_dir: PathBuf,
     time_formatter: TimeFormatter,
 }
 
@@ -152,6 +156,7 @@ impl PacketListDelegate {
     ) -> Box<Self> {
         let rows = vec![PacketRow {
             id: String::new(),
+            flow_key: String::new(),
             time: "".to_string(),
             method: "".to_string(),
             status: 0,
@@ -164,6 +169,8 @@ impl PacketListDelegate {
         let selected = 0;
         let row_clicks = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let search_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let full_text_select_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let capture_flows_dir = CapturePaths::new().flows_dir;
         let time_formatter = TimeFormatter::new(time_display);
 
         let mut list_id = WidgetId::EMPTY;
@@ -229,6 +236,8 @@ impl PacketListDelegate {
             detail_tx,
             row_clicks,
             search_requests,
+            full_text_select_requests,
+            capture_flows_dir,
             time_formatter,
         });
 
@@ -332,6 +341,7 @@ impl PacketListDelegate {
 
             let row = PacketRow {
                 id: pkt.id,
+                flow_key: pkt.flow_key,
                 time: display_time,
                 method: pkt.method,
                 status: pkt.status,
@@ -467,6 +477,7 @@ impl PacketListDelegate {
     fn append_system_line(&mut self, line: impl Into<String>) {
         self.rows.push(PacketRow {
             id: String::new(),
+            flow_key: String::new(),
             time: "test time".to_string(),
             method: "test method".to_string(),
             status: 0,
@@ -621,6 +632,15 @@ impl PacketListDelegate {
         });
     }
 
+    fn open_full_text_search(&mut self) {
+        let select_requests = self.full_text_select_requests.clone();
+        let search_path = self.capture_flows_dir.clone();
+
+        open_full_text_search_popup(search_path, move |flow_key| {
+            select_requests.lock().push(flow_key);
+        });
+    }
+
     fn poll_search_requests(&mut self) {
         let requests = {
             let mut search_requests = self.search_requests.lock();
@@ -629,6 +649,17 @@ impl PacketListDelegate {
 
         for query in requests {
             self.search_url(query);
+        }
+    }
+
+    fn poll_full_text_select_requests(&mut self) {
+        let requests = {
+            let mut full_text_select_requests = self.full_text_select_requests.lock();
+            std::mem::take(&mut *full_text_select_requests)
+        };
+
+        for flow_key in requests {
+            self.select_flow_key(&flow_key);
         }
     }
 
@@ -707,6 +738,31 @@ impl PacketListDelegate {
             text.set_content(title);
         }
     }
+
+    fn select_flow_key(&mut self, flow_key: &str) {
+        let Some(idx) = self
+            .rows
+            .iter()
+            .position(|row| row.flow_key == flow_key)
+        else {
+            self.append_system_line(format!("=== search result not found in packet list: {flow_key} ==="));
+            return;
+        };
+
+        self.mode = PacketListMode::Main;
+        self.search_rows.clear();
+        self.search_query.clear();
+        self.search_matcher = None;
+        self.search_error = None;
+
+        self.main_selected = idx;
+        self.selected = idx;
+        self.sync_list_and_reveal_selected();
+
+        if let Some(id) = self.selected_packet_id().map(str::to_owned) {
+            self.on_select_packet(id);
+        }
+    }
 }
 
 async fn read_body_file(path: Option<&str>) -> String {
@@ -773,6 +829,7 @@ impl DelegateWidget for PacketListDelegate {
         self.poll_incoming();
         self.poll_row_clicks();
         self.poll_search_requests();
+        self.poll_full_text_select_requests();
         self.list.as_mut()
     }
 
@@ -792,17 +849,28 @@ impl DelegateWidget for PacketListDelegate {
                 tuie::focus_widget(self.get_id());
                 return InputResult::Rejected
             }
+            // search filter shortcut
             chord!(Char('s')) if queue.is_unhandled() => {
                 queue.next();
                 self.open_search();
+                return InputResult::Handled;
+            }
+            // global search shortcut
+            chord!(Char('g')) if queue.is_unhandled() => {
+                queue.next();
+                self.open_full_text_search();
+                return InputResult::Handled;
             }
             chord!(Esc) if self.mode == PacketListMode::Search => {
                 queue.next();
                 self.clear_search();
+                tuie::dirty_layout();
+                return InputResult::Handled;
             }
             chord!(Enter|l) => {
                 queue.next();
                 self.show_detail();
+                return InputResult::Handled;
             }
             chord!(Up|k) => {
                 queue.next();

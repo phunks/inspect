@@ -123,6 +123,7 @@ impl CapturePaths {
 #[derive(Debug, Clone, Serialize)]
 pub struct PacketSummary {
     pub id: String,
+    pub flow_key: String,
     pub time: String,
     pub epoch_ms: i64,
     pub method: String,
@@ -571,6 +572,7 @@ async fn http_mitm_proxy (
         let display_status = upstream_status.unwrap_or(proxy_status);
         cb(PacketSummary {
             id: id.into(),
+            flow_key,
             time: rfc3999z(&time),
             epoch_ms: time.timestamp_millis(),
             method: req_method,
