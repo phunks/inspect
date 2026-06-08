@@ -113,7 +113,27 @@ impl TimeFormatter {
 
     fn format_packet_time(&mut self, raw_time: &str, epoch_ms: i64) -> String {
         match self.mode {
-            TimeMode::RFC3339z => raw_time.to_string(),
+            TimeMode::RFC3339z => {
+                let Some(dt_utc) = Utc.timestamp_millis_opt(epoch_ms).single() else {
+                    return raw_time.to_string();
+                };
+
+                match &self.tz {
+                    TuiTimeZone::Utc => {
+                        dt_utc.to_rfc3339_opts(chrono::format::SecondsFormat::Millis, true)
+                    }
+                    TuiTimeZone::Local => {
+                        dt_utc
+                            .with_timezone(&Local)
+                            .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
+                    }
+                    TuiTimeZone::Offset(ofs) => {
+                        dt_utc
+                            .with_timezone(ofs)
+                            .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
+                    }
+                }
+            }
             TimeMode::Epoch => epoch_ms.to_string(),
             TimeMode::Elapsed => {
                 let base = *self.first_epoch_ms.get_or_insert(epoch_ms);
@@ -149,7 +169,6 @@ pub struct PacketListDelegate {
     rows: Vec<PacketRow>,
     selected: usize,
     paused: bool,
-    follow_tail: bool,
     rx: mpsc::UnboundedReceiver<PacketSummary>,
     list: Box<Pane>,
     list_id: WidgetId<List>,
@@ -162,6 +181,8 @@ pub struct PacketListDelegate {
 
 impl PacketListDelegate {
     const TICK_INTERVAL: Duration = Duration::from_millis(50);
+    const SELECTED_SCROLL_OFF: i32 = 2;
+    const WAITING_ROW_TEXT: &'static str = "waiting for packets...";
 
     pub async fn new(
         rx: mpsc::UnboundedReceiver<PacketSummary>,
@@ -175,7 +196,7 @@ impl PacketListDelegate {
             status: 0,
             host: "".to_string(),
             uri: "".to_string(),
-            line: "waiting for packets...".to_string(),
+            line: Self::WAITING_ROW_TEXT.to_string(),
         }];
 
         let selected = 0;
@@ -224,7 +245,6 @@ impl PacketListDelegate {
             rows,
             selected,
             paused: false,
-            follow_tail: true,
             rx,
             list,
             list_id,
@@ -255,30 +275,23 @@ impl PacketListDelegate {
     fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
-            self.follow_tail = false;
-            self.sync_list();
+            self.sync_list_and_reveal_selected();
         }
     }
 
     fn move_down(&mut self) {
         if self.selected + 1 < self.rows.len() {
             self.selected += 1;
-
-            if self.selected + 1 == self.rows.len() {
-                self.follow_tail = true;
-            }
-
-            self.sync_list();
+            self.sync_list_and_reveal_selected();
         }
     }
 
     fn page_up(&mut self) {
         let old = self.selected;
         self.selected = self.selected.saturating_sub(20);
-        self.follow_tail = false;
 
         if self.selected != old {
-            self.sync_list();
+            self.sync_list_and_reveal_selected();
         }
     }
 
@@ -290,12 +303,8 @@ impl PacketListDelegate {
         let old = self.selected;
         self.selected = (self.selected + 20).min(self.rows.len() - 1);
 
-        if self.selected + 1 == self.rows.len() {
-            self.follow_tail = true;
-        }
-
         if self.selected != old {
-            self.sync_list();
+            self.sync_list_and_reveal_selected();
         }
     }
 
@@ -305,8 +314,7 @@ impl PacketListDelegate {
         }
 
         self.selected = self.rows.len() - 1;
-        self.follow_tail = true;
-        self.sync_list();
+        self.sync_list_and_reveal_selected();
     }
 
     fn poll_incoming(&mut self) {
@@ -316,6 +324,8 @@ impl PacketListDelegate {
             if self.paused {
                 continue;
             }
+
+            self.remove_waiting_row_if_needed();
 
             let display_time = self.time_formatter.format_packet_time(&pkt.time, pkt.epoch_ms);
             let line = format!(
@@ -347,12 +357,17 @@ impl PacketListDelegate {
 
         if changed {
             self.trim_rows_if_needed();
-
-            if self.follow_tail && !self.rows.is_empty() {
-                self.selected = self.rows.len() - 1;
-            }
-
             self.sync_list();
+        }
+    }
+
+    fn remove_waiting_row_if_needed(&mut self) {
+        if self.rows.len() == 1
+            && self.rows[0].id.is_empty()
+            && self.rows[0].line == Self::WAITING_ROW_TEXT
+        {
+            self.rows.clear();
+            self.selected = 0;
         }
     }
 
@@ -385,6 +400,19 @@ impl PacketListDelegate {
         }
     }
 
+    fn sync_list_and_reveal_selected(&mut self) {
+        self.sync_list();
+
+        if self.rows.is_empty() {
+            return;
+        }
+
+        if let Some(list) = self.list.get_widget_mut(self.list_id) {
+            let selected = self.selected.min(self.rows.len() - 1);
+            list.ensure_visible_scrolloff(selected, Self::SELECTED_SCROLL_OFF);
+        }
+    }
+
     fn sync_list_and_follow_tail(&mut self) {
         self.sync_list();
 
@@ -408,10 +436,8 @@ impl PacketListDelegate {
 
         if self.rows.is_empty() {
             self.selected = 0;
-            self.follow_tail = true;
         } else if self.selected >= self.rows.len() {
             self.selected = self.rows.len() - 1;
-            self.follow_tail = true;
         }
     }
 
@@ -427,12 +453,6 @@ impl PacketListDelegate {
         });
 
         self.trim_rows_if_needed();
-
-        if !self.rows.is_empty() {
-            self.selected = self.rows.len() - 1;
-        }
-
-        self.follow_tail = true;
         self.sync_list();
     }
 
@@ -461,13 +481,19 @@ impl PacketListDelegate {
     fn on_select_packet(&self, id: String) {
         let db = self.dbstate.clone();
         let detail_tx = self.detail_tx.clone();
+        let mut time_formatter = self.time_formatter.clone();
 
         tokio::spawn(async move {
             let req = db.select_request_by_id(id.clone()).await;
             let res = db.select_response_by_id(id.clone()).await;
 
             let text = match (req, res) {
-                (Ok(req), Ok(res)) => {
+                (Ok(mut req), Ok(res)) => {
+                    if let Some(epoch_ms) = req.epoch_ms {
+                        let raw_time = req.time.as_deref().unwrap_or_default();
+                        req.time = Some(time_formatter.format_packet_time(raw_time, epoch_ms));
+                    }
+
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
                     let res_body = read_body_file(res.response_body_path.as_deref()).await;
                     let dir = req.flow_dir.as_deref().unwrap();
@@ -475,7 +501,12 @@ impl PacketListDelegate {
                         "id  : {id}\ndir : {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}"
                     )
                 }
-                (Ok(req), Err(e)) => {
+                (Ok(mut req), Err(e)) => {
+                    if let Some(epoch_ms) = req.epoch_ms {
+                        let raw_time = req.time.as_deref().unwrap_or_default();
+                        req.time = Some(time_formatter.format_packet_time(raw_time, epoch_ms));
+                    }
+
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
                     let dir = req.flow_dir.as_deref().unwrap();
                     format!(
@@ -496,8 +527,7 @@ impl PacketListDelegate {
     fn select_row(&mut self, idx: usize) {
         if idx < self.rows.len() {
             self.selected = idx;
-            self.follow_tail = self.selected + 1 == self.rows.len();
-            self.sync_list();
+            self.sync_list_and_reveal_selected();
 
             if let Some(id) = self.selected_packet_id().map(str::to_owned) {
                 self.on_select_packet(id);

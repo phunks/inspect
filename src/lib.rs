@@ -418,12 +418,20 @@ fn decode_reader(header_value: &HeaderValue, bytes: &[u8]) -> io::Result<Bytes> 
 }
 
 fn body_for_storage(parts: &rama::http::response::Parts, res_body_bytes: &Bytes) -> Bytes {
-    match parts.headers.get(http::header::CONTENT_ENCODING) {
-        Some(enc) => decode_reader(enc, res_body_bytes).unwrap_or_else(|e| {
-            tracing::warn!("failed to decode response body for storage: {e}");
-            res_body_bytes.clone()
+    body_for_storage_by_headers(&parts.headers, res_body_bytes)
+}
+
+fn request_body_for_storage(parts: &rama::http::request::Parts, req_body_bytes: &Bytes) -> Bytes {
+    body_for_storage_by_headers(&parts.headers, req_body_bytes)
+}
+
+fn body_for_storage_by_headers(headers: &http::HeaderMap, body_bytes: &Bytes) -> Bytes {
+    match headers.get(http::header::CONTENT_ENCODING) {
+        Some(enc) => decode_reader(enc, body_bytes).unwrap_or_else(|e| {
+            tracing::warn!("failed to decode body for storage: {e}");
+            body_bytes.clone()
         }),
-        None => res_body_bytes.clone(),
+        None => body_bytes.clone(),
     }
 }
 
@@ -508,10 +516,13 @@ async fn http_mitm_proxy (
             Bytes::new()
         }
     };
-    let _ = write_body_limited(&req_body_path,
-                               &req_body_bytes,
-                               BODY_SAVE_LIMIT_BYTES
+    let stored_req_body_bytes = request_body_for_storage(&parts, &req_body_bytes);
+    let _ = write_body_limited(
+        &req_body_path,
+        &stored_req_body_bytes,
+        BODY_SAVE_LIMIT_BYTES,
     ).await;
+
     let req = Request::from_parts(parts, Body::from(req_body_bytes));
 
     let started_at = std::time::Instant::now();
@@ -522,7 +533,6 @@ async fn http_mitm_proxy (
     let elapsed_ms = started_at.elapsed().as_millis() as i64;
 
     let (parts, body) = res.into_parts();
-
     let proxy_status = parts.status.as_u16();
 
     let res_head_text = build_response_head_text(&parts);
