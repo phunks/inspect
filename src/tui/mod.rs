@@ -1,21 +1,30 @@
 mod read_metadata;
 pub mod global_chords;
+mod search;
+mod button;
+mod focus_pane;
+mod time;
+
 use crate::PacketSummary;
 
 use std::sync::Arc;
 use std::time::Duration;
 use chord_macro::chord;
-use chrono::{FixedOffset, Local, TimeZone, Utc};
+use regex::Regex;
 use tokio::sync::{
     mpsc::{
         self, UnboundedReceiver, UnboundedSender
     }, watch};
 use tuie::prelude::*;
 use read_metadata::DbState;
-use crate::options::TimeMode;
+use crate::tui::search::open_search_popup;
+pub use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
+
+const DETAIL_PLACEHOLDER_TEXT: &'static str = "Select row and press Enter";
+
 
 #[derive(Clone, Debug, Default)]
 struct PacketRow {
@@ -25,7 +34,65 @@ struct PacketRow {
     status: u16,
     host: String,
     uri: String,
+    query_str: String,
     line: String,
+}
+
+impl PacketRow {
+    fn url_text(&self) -> String {
+        if self.query_str.is_empty() {
+            format!("{}{}", self.host, self.uri)
+        } else {
+            format!("{}{}?{}", self.host, self.uri, self.query_str)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum SearchMatcher {
+    Contains(String),
+    Regex {
+        pattern: String,
+        regex: Regex,
+    },
+}
+
+impl SearchMatcher {
+    fn parse(query: &str) -> Result<Option<Self>, regex::Error> {
+        let query = query.trim();
+
+        if query.is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(pattern) = query.strip_prefix("re:") {
+            let regex = Regex::new(pattern)?;
+            return Ok(Some(Self::Regex {
+                pattern: pattern.to_string(),
+                regex,
+            }));
+        }
+
+        Ok(Some(Self::Contains(query.to_ascii_lowercase())))
+    }
+
+    fn matches_url(&self, row: &PacketRow) -> bool {
+        let url = row.url_text();
+
+        match self {
+            Self::Contains(query) => url
+                .to_ascii_lowercase()
+                .contains(query),
+            Self::Regex { regex, .. } => regex.is_match(&url),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Contains(query) => query.clone(),
+            Self::Regex { pattern, .. } => format!("re:{pattern}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -44,138 +111,32 @@ struct PacketListContext {
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct TimeDisplayConfig {
-    pub mode: TimeMode,
-    pub format: String,
-    pub tz: String,
-}
-
-#[derive(Clone, Debug)]
-enum TuiTimeZone {
-    Local,
-    Utc,
-    Offset(FixedOffset),
-}
-
-impl TuiTimeZone {
-    fn parse(s: &str) -> Self {
-        let lower = s.trim().to_ascii_lowercase();
-        if lower == "local" {
-            return Self::Local;
-        }
-        if lower == "utc" || lower == "z" {
-            return Self::Utc;
-        }
-
-        let raw = s.trim();
-        if raw.len() == 6 && (raw.starts_with('+') || raw.starts_with('-')) && raw.as_bytes()[3] == b':' {
-            let sign = if raw.starts_with('-') { -1 } else { 1 };
-            let hh = raw[1..3].parse::<i32>().ok();
-            let mm = raw[4..6].parse::<i32>().ok();
-            if let (Some(h), Some(m)) = (hh, mm) {
-                let sec = sign * (h * 3600 + m * 60);
-                if let Some(ofs) = FixedOffset::east_opt(sec) {
-                    return Self::Offset(ofs);
-                }
-            }
-        }
-
-        Self::Local
-    }
-}
-
-#[derive(Clone, Debug)]
-struct TimeFormatter {
-    mode: TimeMode,
-    fmt: String,
-    tz: TuiTimeZone,
-    first_epoch_ms: Option<i64>,
-}
-
-impl TimeFormatter {
-    fn new(cfg: TimeDisplayConfig) -> Self {
-        Self {
-            mode: cfg.mode,
-            fmt: cfg.format,
-            tz: TuiTimeZone::parse(&cfg.tz),
-            first_epoch_ms: None,
-        }
-    }
-
-    fn format_includes_tz(fmt: &str) -> bool {
-        fmt.contains("%z")
-            || fmt.contains("%:z")
-            || fmt.contains("%::z")
-            || fmt.contains("%:::z")
-            || fmt.contains("%Z")
-    }
-
-    fn format_packet_time(&mut self, raw_time: &str, epoch_ms: i64) -> String {
-        match self.mode {
-            TimeMode::RFC3339z => {
-                let Some(dt_utc) = Utc.timestamp_millis_opt(epoch_ms).single() else {
-                    return raw_time.to_string();
-                };
-
-                match &self.tz {
-                    TuiTimeZone::Utc => {
-                        dt_utc.to_rfc3339_opts(chrono::format::SecondsFormat::Millis, true)
-                    }
-                    TuiTimeZone::Local => {
-                        dt_utc
-                            .with_timezone(&Local)
-                            .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
-                    }
-                    TuiTimeZone::Offset(ofs) => {
-                        dt_utc
-                            .with_timezone(ofs)
-                            .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
-                    }
-                }
-            }
-            TimeMode::Epoch => epoch_ms.to_string(),
-            TimeMode::Elapsed => {
-                let base = *self.first_epoch_ms.get_or_insert(epoch_ms);
-                let delta = (epoch_ms - base).max(0);
-                let h = delta / 3_600_000;
-                let m = (delta % 3_600_000) / 60_000;
-                let s = (delta % 60_000) / 1_000;
-                let ms = delta % 1_000;
-                format!("{h:02}:{m:02}:{s:02}.{ms:03}")
-            }
-            TimeMode::Absolute => {
-                let Some(dt_utc) = Utc.timestamp_millis_opt(epoch_ms).single() else {
-                    return "-".to_string();
-                };
-
-                match &self.tz {
-                    TuiTimeZone::Utc => {
-                        let mut s = dt_utc.format(&self.fmt).to_string();
-                        if !Self::format_includes_tz(&self.fmt) && !s.ends_with('z') && !s.ends_with('Z') {
-                            s.push('z');
-                        }
-                        s
-                    }
-                    TuiTimeZone::Local => dt_utc.with_timezone(&Local).format(&self.fmt).to_string(),
-                    TuiTimeZone::Offset(ofs) => dt_utc.with_timezone(ofs).format(&self.fmt).to_string(),
-                }
-            }
-        }
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PacketListMode {
+    Main,
+    Search,
 }
 
 pub struct PacketListDelegate {
     rows: Vec<PacketRow>,
+    search_rows: Vec<PacketRow>,
+    mode: PacketListMode,
+    main_selected: usize,
+    search_selected: usize,
+    search_query: String,
+    search_matcher: Option<SearchMatcher>,
+    search_error: Option<String>,
     selected: usize,
     paused: bool,
     rx: mpsc::UnboundedReceiver<PacketSummary>,
     list: Box<Pane>,
     list_id: WidgetId<List>,
+    list_title_id: WidgetId<Text>,
     task: TaskHandle,
     dbstate: Arc<DbState>,
     detail_tx: UnboundedSender<UiEvent>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
+    search_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     time_formatter: TimeFormatter,
 }
 
@@ -196,14 +157,17 @@ impl PacketListDelegate {
             status: 0,
             host: "".to_string(),
             uri: "".to_string(),
+            query_str: "".to_string(),
             line: Self::WAITING_ROW_TEXT.to_string(),
         }];
 
         let selected = 0;
         let row_clicks = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let search_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let time_formatter = TimeFormatter::new(time_display);
 
         let mut list_id = WidgetId::EMPTY;
+        let mut list_title_id = WidgetId::EMPTY;
 
         let mut list = List::new()
             .vertical()
@@ -211,7 +175,6 @@ impl PacketListDelegate {
             .min_height(5)
             .gap(0)
             .scroll(Scrollbar::AutoHide)
-            .title("Packets")
             .id(&mut list_id);
 
         let context = PacketListContext {
@@ -239,19 +202,33 @@ impl PacketListDelegate {
             .vertical()
             .flex(1)
             .gap(0)
-            .children([list]);
+            .children([
+                Text::new()
+                    .content("Packets".bold())
+                    .id(&mut list_title_id) as Box<dyn Widget>,
+                list,
+            ]);
 
         let mut this = Box::new(Self {
             rows,
+            search_rows: Vec::new(),
+            mode: PacketListMode::Main,
+            main_selected: selected,
+            search_selected: 0,
+            search_query: String::new(),
+            search_matcher: None,
+            search_error: None,
             selected,
             paused: false,
             rx,
             list,
             list_id,
+            list_title_id,
             task: TaskHandle::EMPTY,
             dbstate: Arc::new(DbState::new().await.expect("dbstate")),
             detail_tx,
             row_clicks,
+            search_requests,
             time_formatter,
         });
 
@@ -273,47 +250,58 @@ impl PacketListDelegate {
     }
 
     fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
+        let selected = self.current_selected();
+
+        if selected > 0 {
+            self.set_current_selected(selected - 1);
             self.sync_list_and_reveal_selected();
         }
     }
 
     fn move_down(&mut self) {
-        if self.selected + 1 < self.rows.len() {
-            self.selected += 1;
+        let len = self.visible_rows_len();
+        let selected = self.current_selected();
+
+        if selected + 1 < len {
+            self.set_current_selected(selected + 1);
             self.sync_list_and_reveal_selected();
         }
     }
 
     fn page_up(&mut self) {
-        let old = self.selected;
-        self.selected = self.selected.saturating_sub(20);
+        let old = self.current_selected();
+        let selected = old.saturating_sub(20);
 
-        if self.selected != old {
+        if selected != old {
+            self.set_current_selected(selected);
             self.sync_list_and_reveal_selected();
         }
     }
 
     fn page_down(&mut self) {
-        if self.rows.is_empty() {
+        let len = self.visible_rows_len();
+
+        if len == 0 {
             return;
         }
 
-        let old = self.selected;
-        self.selected = (self.selected + 20).min(self.rows.len() - 1);
+        let old = self.current_selected();
+        let selected = (old + 20).min(len - 1);
 
-        if self.selected != old {
+        if selected != old {
+            self.set_current_selected(selected);
             self.sync_list_and_reveal_selected();
         }
     }
 
     fn jump_to_bottom(&mut self) {
-        if self.rows.is_empty() {
+        let len = self.visible_rows_len();
+
+        if len == 0 {
             return;
         }
 
-        self.selected = self.rows.len() - 1;
+        self.set_current_selected(len - 1);
         self.sync_list_and_reveal_selected();
     }
 
@@ -342,21 +330,34 @@ impl PacketListDelegate {
                 }
             );
 
-            self.rows.push(PacketRow {
+            let row = PacketRow {
                 id: pkt.id,
                 time: display_time,
                 method: pkt.method,
                 status: pkt.status,
                 host: pkt.host,
                 uri: pkt.uri,
+                query_str: pkt.query_str,
                 line,
-            });
+            };
+
+            if self.mode == PacketListMode::Search
+                && self
+                .search_matcher
+                .as_ref()
+                .is_some_and(|matcher| matcher.matches_url(&row))
+            {
+                self.search_rows.push(row.clone());
+            }
+
+            self.rows.push(row);
 
             changed = true;
         }
 
         if changed {
             self.trim_rows_if_needed();
+            self.clamp_current_selected();
             self.sync_list();
         }
     }
@@ -367,14 +368,19 @@ impl PacketListDelegate {
             && self.rows[0].line == Self::WAITING_ROW_TEXT
         {
             self.rows.clear();
+            self.search_rows.clear();
+            self.main_selected = 0;
+            self.search_selected = 0;
             self.selected = 0;
         }
     }
 
     fn sync_list(&mut self) {
+        self.sync_list_title();
+
         let context = PacketListContext {
-            rows: self.rows.clone(),
-            selected: self.selected,
+            rows: self.visible_rows().to_vec(),
+            selected: self.current_selected(),
             owner_id: self.get_id(),
             row_clicks: self.row_clicks.clone(),
         };
@@ -403,12 +409,15 @@ impl PacketListDelegate {
     fn sync_list_and_reveal_selected(&mut self) {
         self.sync_list();
 
-        if self.rows.is_empty() {
+        let len = self.visible_rows_len();
+
+        if len == 0 {
             return;
         }
 
+        let selected = self.current_selected().min(len - 1);
+
         if let Some(list) = self.list.get_widget_mut(self.list_id) {
-            let selected = self.selected.min(self.rows.len() - 1);
             list.ensure_visible_scrolloff(selected, Self::SELECTED_SCROLL_OFF);
         }
     }
@@ -416,11 +425,16 @@ impl PacketListDelegate {
     fn sync_list_and_follow_tail(&mut self) {
         self.sync_list();
 
+        let len = self.visible_rows_len();
+
+        if len == 0 {
+            return;
+        }
+
+        let last = len - 1;
+
         if let Some(list) = self.list.get_widget_mut(self.list_id) {
-            if !self.rows.is_empty() {
-                let last = self.rows.len() - 1;
-                list.ensure_visible_scrolloff(last, 2);
-            }
+            list.ensure_visible_scrolloff(last, 2);
         }
     }
 
@@ -432,13 +446,22 @@ impl PacketListDelegate {
         let drain_count = TRIM_ROWS.min(self.rows.len());
         self.rows.drain(0..drain_count);
 
-        self.selected = self.selected.saturating_sub(drain_count);
+        self.main_selected = self.main_selected.saturating_sub(drain_count);
 
-        if self.rows.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.rows.len() {
-            self.selected = self.rows.len() - 1;
+        if self.mode == PacketListMode::Search {
+            if let Some(matcher) = self.search_matcher.as_ref() {
+                self.search_rows = self
+                    .rows
+                    .iter()
+                    .filter(|row| matcher.matches_url(row))
+                    .cloned()
+                    .collect();
+
+                self.search_selected = self.search_selected.min(self.search_rows.len().saturating_sub(1));
+            }
         }
+
+        self.clamp_current_selected();
     }
 
     fn append_system_line(&mut self, line: impl Into<String>) {
@@ -449,6 +472,7 @@ impl PacketListDelegate {
             status: 0,
             host: "test host".to_string(),
             uri: "test url".to_string(),
+            query_str: String::new(),
             line: line.into(),
         });
 
@@ -467,8 +491,8 @@ impl PacketListDelegate {
     }
 
     fn selected_packet_id(&self) -> Option<&str> {
-        self.rows
-            .get(self.selected)
+        self.visible_rows()
+            .get(self.current_selected())
             .and_then(|row| {
                 if row.id.is_empty() {
                     None
@@ -525,8 +549,8 @@ impl PacketListDelegate {
     }
 
     fn select_row(&mut self, idx: usize) {
-        if idx < self.rows.len() {
-            self.selected = idx;
+        if idx < self.visible_rows_len() {
+            self.set_current_selected(idx);
             self.sync_list_and_reveal_selected();
 
             if let Some(id) = self.selected_packet_id().map(str::to_owned) {
@@ -543,6 +567,144 @@ impl PacketListDelegate {
 
         for idx in clicked {
             self.select_row(idx);
+        }
+    }
+
+    fn visible_rows(&self) -> &[PacketRow] {
+        match self.mode {
+            PacketListMode::Main => &self.rows,
+            PacketListMode::Search => &self.search_rows,
+        }
+    }
+
+    fn visible_rows_len(&self) -> usize {
+        self.visible_rows().len()
+    }
+
+    fn current_selected(&self) -> usize {
+        match self.mode {
+            PacketListMode::Main => self.main_selected,
+            PacketListMode::Search => self.search_selected,
+        }
+    }
+
+    fn set_current_selected(&mut self, selected: usize) {
+        match self.mode {
+            PacketListMode::Main => {
+                self.main_selected = selected;
+            }
+            PacketListMode::Search => {
+                self.search_selected = selected;
+            }
+        }
+
+        self.selected = selected;
+    }
+
+    fn clamp_current_selected(&mut self) {
+        let len = self.visible_rows_len();
+
+        if len == 0 {
+            self.set_current_selected(0);
+            return;
+        }
+
+        let selected = self.current_selected().min(len - 1);
+        self.set_current_selected(selected);
+    }
+
+    fn open_search(&mut self) {
+        let search_requests = self.search_requests.clone();
+
+        open_search_popup(move |query| {
+            search_requests.lock().push(query);
+        });
+    }
+
+    fn poll_search_requests(&mut self) {
+        let requests = {
+            let mut search_requests = self.search_requests.lock();
+            std::mem::take(&mut *search_requests)
+        };
+
+        for query in requests {
+            self.search_url(query);
+        }
+    }
+
+    fn reset_detail(&self) {
+        let _ = self
+            .detail_tx
+            .send(UiEvent::ShowDetail(DETAIL_PLACEHOLDER_TEXT.to_string()));
+    }
+
+    fn search_url(&mut self, query: impl Into<String>) {
+        let query = query.into();
+
+        let matcher = match SearchMatcher::parse(&query) {
+            Ok(Some(matcher)) => matcher,
+            Ok(None) => {
+                self.clear_search();
+                return;
+            }
+            Err(err) => {
+                self.search_error = Some(format!("invalid regex: {err}"));
+                self.append_system_line(format!("=== invalid regex: {err} ==="));
+                return;
+            }
+        };
+
+        self.search_query = matcher.label();
+        self.search_rows = self
+            .rows
+            .iter()
+            .filter(|row| matcher.matches_url(row))
+            .cloned()
+            .collect();
+
+        self.search_matcher = Some(matcher);
+        self.search_error = None;
+        self.mode = PacketListMode::Search;
+        self.search_selected = 0;
+        self.clamp_current_selected();
+        self.sync_list_and_reveal_selected();
+        self.reset_detail();
+    }
+
+    fn clear_search(&mut self) {
+        self.mode = PacketListMode::Main;
+        self.search_query.clear();
+        self.search_matcher = None;
+        self.search_error = None;
+        self.search_rows.clear();
+        self.clamp_current_selected();
+        self.sync_list_and_reveal_selected();
+        self.reset_detail();
+    }
+
+    fn list_title(&self) -> StyledString {
+        match self.mode {
+            PacketListMode::Main => {
+                StyledString::new()
+                    .span("Packets".bold())
+                    .span(format!(" ({})", self.rows.len()).dim())
+            }
+            PacketListMode::Search => {
+                StyledString::new()
+                    .span("Packets".bold())
+                    .span(" [filter: ".fg(Color::YELLOW))
+                    .span(self.search_query.clone().fg(Color::YELLOW).bold())
+                    .span("]".fg(Color::YELLOW))
+                    .span(format!(" {}/{}", self.search_rows.len(), self.rows.len()).dim())
+            }
+        }
+    }
+
+    fn sync_list_title(&mut self) {
+        let title = self.list_title();
+
+        if let Some(text) = self.list.get_widget_mut(self.list_title_id) {
+            text.set_content(title);
         }
     }
 }
@@ -610,8 +772,10 @@ impl DelegateWidget for PacketListDelegate {
     fn get_delegate_mut(&mut self) -> &mut dyn Widget {
         self.poll_incoming();
         self.poll_row_clicks();
+        self.poll_search_requests();
         self.list.as_mut()
     }
+
     fn override_is_focusable(&self) -> bool {
         true
     }
@@ -627,6 +791,14 @@ impl DelegateWidget for PacketListDelegate {
             chord!(LeftClick) => {
                 tuie::focus_widget(self.get_id());
                 return InputResult::Rejected
+            }
+            chord!(Char('s')) if queue.is_unhandled() => {
+                queue.next();
+                self.open_search();
+            }
+            chord!(Esc) if self.mode == PacketListMode::Search => {
+                queue.next();
+                self.clear_search();
             }
             chord!(Enter|l) => {
                 queue.next();
@@ -826,7 +998,7 @@ pub async fn run_tui(
                         .flex(1)
                         .children([
                             app
-                        ])).title("Packets"),
+                        ])).title("Inspect"),
                     SplitPaneChild::from(Pane::new()
                         .preferred_width(40)
                         .preferred_height(1)
@@ -834,12 +1006,12 @@ pub async fn run_tui(
                         .flex(1)
                         .children([
                             Text::new()
-                                .content("Select row and press Enter".dim())
+                                .content(DETAIL_PLACEHOLDER_TEXT.dim())
                                 .overflow(TextOverflow::WRAP)
                                 .id(&mut detail_text_id).flex(1),
                         ])
                         .y_scroll(Scrollbar::Visible),
-                    ).title("Details"),
+                    ),
                 ])
             ).flex(1)
             .border(Border::ROUND)
