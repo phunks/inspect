@@ -18,7 +18,7 @@ use tokio::sync::{
     }, watch};
 use tuie::prelude::*;
 use read_metadata::DbState;
-use crate::tui::search::{open_full_text_search_popup, open_search_popup};
+use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTextMatcher};
 pub use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 
 const MAX_ROWS: usize = 10_000;
@@ -166,7 +166,10 @@ impl SearchCondition {
 
 #[derive(Debug)]
 pub enum UiEvent {
-    ShowDetail(String),
+    ShowDetail {
+        text: String,
+        highlight_query: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -206,7 +209,7 @@ pub struct PacketListDelegate {
     detail_tx: UnboundedSender<UiEvent>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     search_requests: Arc<parking_lot::Mutex<Vec<String>>>,
-    full_text_select_requests: Arc<parking_lot::Mutex<Vec<String>>>,
+    full_text_select_requests: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
     capture_flows_dir: PathBuf,
     time_formatter: TimeFormatter,
 }
@@ -581,6 +584,10 @@ impl PacketListDelegate {
     }
 
     fn on_select_packet(&self, id: String) {
+        self.on_select_packet_with_highlight(id, None);
+    }
+
+    fn on_select_packet_with_highlight(&self, id: String, highlight_query: Option<String>) {
         let db = self.dbstate.clone();
         let detail_tx = self.detail_tx.clone();
         let mut time_formatter = self.time_formatter.clone();
@@ -622,7 +629,10 @@ impl PacketListDelegate {
                 // (_, Err(e)) => format!("id: {id}\n\nresponse error: {e}"),
             };
 
-            let _ = detail_tx.send(UiEvent::ShowDetail(text));
+            let _ = detail_tx.send(UiEvent::ShowDetail {
+                text,
+                highlight_query,
+            });
         });
     }
 
@@ -703,8 +713,8 @@ impl PacketListDelegate {
         let select_requests = self.full_text_select_requests.clone();
         let search_path = self.capture_flows_dir.clone();
 
-        open_full_text_search_popup(search_path, move |flow_key| {
-            select_requests.lock().push(flow_key);
+        open_full_text_search_popup(search_path, move |flow_key, query| {
+            select_requests.lock().push((flow_key, query));
         });
     }
 
@@ -725,15 +735,18 @@ impl PacketListDelegate {
             std::mem::take(&mut *full_text_select_requests)
         };
 
-        for flow_key in requests {
-            self.select_flow_key(&flow_key);
+        for (flow_key, query) in requests {
+            self.select_flow_key(&flow_key, Some(query));
         }
     }
 
     fn reset_detail(&self) {
         let _ = self
             .detail_tx
-            .send(UiEvent::ShowDetail(DETAIL_PLACEHOLDER_TEXT.to_string()));
+            .send(UiEvent::ShowDetail {
+                text: DETAIL_PLACEHOLDER_TEXT.to_string(),
+                highlight_query: None,
+            });
     }
 
     fn search_url(&mut self, query: impl Into<String>) {
@@ -806,7 +819,7 @@ impl PacketListDelegate {
         }
     }
 
-    fn select_flow_key(&mut self, flow_key: &str) {
+    fn select_flow_key(&mut self, flow_key: &str, highlight_query: Option<String>) {
         let Some(idx) = self
             .rows
             .iter()
@@ -827,7 +840,7 @@ impl PacketListDelegate {
         self.sync_list_and_reveal_selected();
 
         if let Some(id) = self.selected_packet_id().map(str::to_owned) {
-            self.on_select_packet(id);
+            self.on_select_packet_with_highlight(id, highlight_query);
         }
     }
 }
@@ -992,14 +1005,68 @@ impl RootPane {
     fn poll_ui_events(&mut self) {
         while let Ok(event) = self.detail_rx.try_recv() {
             match event {
-                UiEvent::ShowDetail(text) => {
+                UiEvent::ShowDetail {
+                    text,
+                    highlight_query,
+                } => {
                     if let Some(detail) = self.split.get_widget_mut(self.detail_text_id) {
-                        detail.set_content(text);
+                        if let Some(query) = highlight_query {
+                            detail.set_content(highlight_detail_text(&text, &query));
+                        } else {
+                            detail.set_content(text);
+                        }
                     }
                 }
             }
         }
     }
+}
+
+fn highlight_detail_text(text: &str, query: &str) -> StyledString {
+    let Some(matcher) = FullTextMatcher::parse(query) else {
+        return StyledString::new().span(text.dim());
+    };
+
+    let mut styled = StyledString::new();
+
+    for line in text.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let has_newline = line.ends_with('\n');
+
+        let ranges = matcher.find_all_in_line(line_without_newline);
+
+        if ranges.is_empty() {
+            styled = styled.span(line_without_newline.dim());
+        } else {
+            let mut cursor = 0;
+
+            for range in ranges {
+                if cursor < range.start {
+                    styled = styled.span(line_without_newline[cursor..range.start].dim());
+                }
+
+                styled = styled.span(
+                    line_without_newline[range.start..range.end]
+                        .to_string()
+                        .fg(Color::BLACK)
+                        .bg(Color::YELLOW)
+                        .bold(),
+                );
+
+                cursor = range.end;
+            }
+
+            if cursor < line_without_newline.len() {
+                styled = styled.span(line_without_newline[cursor..].dim());
+            }
+        }
+
+        if has_newline {
+            styled = styled.span("\n".dim());
+        }
+    }
+
+    styled
 }
 
 impl DelegateWidget for RootPane {

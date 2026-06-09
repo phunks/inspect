@@ -155,7 +155,7 @@ pub fn open_search_popup(on_search: impl Fn(String) + 'static) {
 }
 
 #[derive(Clone, Debug)]
-pub struct FullTextSearchResult {
+pub(crate) struct FullTextSearchResult {
     pub flow_key: String,
     pub path: String,
     pub line_number: u64,
@@ -305,7 +305,7 @@ pub fn search_capture_files(
 }
 
 #[derive(Clone, Debug)]
-enum FullTextMatcher {
+pub(crate) enum FullTextMatcher {
     Plain {
         query: String,
         escaped_pattern: String,
@@ -316,7 +316,7 @@ enum FullTextMatcher {
 }
 
 impl FullTextMatcher {
-    fn parse(query: &str) -> Option<Self> {
+    pub(crate) fn parse(query: &str) -> Option<Self> {
         let query = query.trim();
 
         if query.is_empty() {
@@ -336,14 +336,14 @@ impl FullTextMatcher {
         })
     }
 
-    fn grep_pattern(&self) -> &str {
+    pub(crate) fn grep_pattern(&self) -> &str {
         match self {
             Self::Plain { escaped_pattern, .. } => escaped_pattern,
             Self::Regex { pattern } => pattern,
         }
     }
 
-    fn find_in_line(&self, line: &str) -> Option<std::ops::Range<usize>> {
+    pub(crate) fn find_in_line(&self, line: &str) -> Option<std::ops::Range<usize>> {
         match self {
             Self::Plain { query, .. } => line.find(query).map(|start| {
                 let end = start + query.len();
@@ -354,7 +354,41 @@ impl FullTextMatcher {
                 .and_then(|regex| regex.find(line).map(|m| m.start()..m.end())),
         }
     }
+
+    pub(crate) fn find_all_in_line(&self, line: &str) -> Vec<std::ops::Range<usize>> {
+        match self {
+            Self::Plain { query, .. } => {
+                if query.is_empty() {
+                    return Vec::new();
+                }
+
+                let mut ranges = Vec::new();
+                let mut offset = 0;
+
+                while let Some(pos) = line[offset..].find(query) {
+                    let start = offset + pos;
+                    let end = start + query.len();
+                    ranges.push(start..end);
+                    offset = end;
+                }
+
+                ranges
+            }
+            Self::Regex { pattern } => regex::Regex::new(pattern)
+                .ok()
+                .map(|regex| {
+                    regex
+                        .find_iter(line)
+                        .filter(|m| m.start() < m.end())
+                        .map(|m| m.start()..m.end())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
 }
+
+
 
 #[derive(Clone, Debug)]
 struct FullTextResultListContext {
@@ -446,7 +480,7 @@ struct FullTextSearchPopupHost {
     popup_id: Rc<Cell<Option<WidgetId>>>,
     result_clicks: Rc<RefCell<Vec<String>>>,
     search_path: PathBuf,
-    on_select: Box<dyn Fn(String)>,
+    on_select: Box<dyn Fn(String, String)>,
 }
 
 impl FullTextSearchPopupHost {
@@ -460,7 +494,7 @@ impl FullTextSearchPopupHost {
         popup_id: Rc<Cell<Option<WidgetId>>>,
         result_clicks: Rc<RefCell<Vec<String>>>,
         search_path: PathBuf,
-        on_select: impl Fn(String) + 'static,
+        on_select: impl Fn(String, String) + 'static,
     ) -> Box<Self> {
         Box::new(Self {
             root,
@@ -566,7 +600,7 @@ impl FullTextSearchPopupHost {
         };
 
         for flow_key in clicked {
-            (self.on_select)(flow_key);
+            (self.on_select)(flow_key, self.query());
             self.close();
         }
     }
@@ -613,7 +647,7 @@ impl DelegateWidget for FullTextSearchPopupHost {
 
 pub fn open_full_text_search_popup(
     search_path: PathBuf,
-    on_select: impl Fn(String) + 'static,
+    on_select: impl Fn(String, String) + 'static,
 ) {
     let mut input_id = WidgetId::EMPTY;
     let mut search_button_id = WidgetId::EMPTY;
