@@ -393,24 +393,25 @@ impl FullTextMatcher {
 #[derive(Clone, Debug)]
 struct FullTextResultListContext {
     results: Vec<FullTextSearchResult>,
-    result_clicks: Rc<RefCell<Vec<String>>>,
+    result_clicks: Rc<RefCell<Vec<usize>>>,
 }
 
 struct ClickableFullTextSearchResult {
     layout: Layout,
-    flow_key: String,
+    result_idx: usize,
     text: String,
-    result_clicks: Rc<RefCell<Vec<String>>>,
+    result_clicks: Rc<RefCell<Vec<usize>>>,
 }
 
 impl ClickableFullTextSearchResult {
     fn new(
+        result_idx: usize,
         result: FullTextSearchResult,
-        result_clicks: Rc<RefCell<Vec<String>>>,
+        result_clicks: Rc<RefCell<Vec<usize>>>,
     ) -> Box<Self> {
         Box::new(Self {
             layout: Layout::new(),
-            flow_key: result.flow_key,
+            result_idx,
             text: result.display_line,
             result_clicks,
         })
@@ -459,7 +460,7 @@ impl Widget for ClickableFullTextSearchResult {
         match &event.chord {
             chord!(LeftClick) => {
                 if self.hit(event.mouse_pos) {
-                    self.result_clicks.borrow_mut().push(self.flow_key.clone());
+                    self.result_clicks.borrow_mut().push(self.result_idx);
                     return InputResult::Handled;
                 }
 
@@ -478,9 +479,10 @@ struct FullTextSearchPopupHost {
     status_text_id: WidgetId<Text>,
     results_list_id: WidgetId<List>,
     popup_id: Rc<Cell<Option<WidgetId>>>,
-    result_clicks: Rc<RefCell<Vec<String>>>,
+    result_clicks: Rc<RefCell<Vec<usize>>>,
+    current_results: Vec<FullTextSearchResult>,
     search_path: PathBuf,
-    on_select: Box<dyn Fn(String, String)>,
+    on_select: Box<dyn Fn(Vec<FullTextSearchResult>, usize, String)>,
 }
 
 impl FullTextSearchPopupHost {
@@ -492,9 +494,9 @@ impl FullTextSearchPopupHost {
         status_text_id: WidgetId<Text>,
         results_list_id: WidgetId<List>,
         popup_id: Rc<Cell<Option<WidgetId>>>,
-        result_clicks: Rc<RefCell<Vec<String>>>,
+        result_clicks: Rc<RefCell<Vec<usize>>>,
         search_path: PathBuf,
-        on_select: impl Fn(String, String) + 'static,
+        on_select: impl Fn(Vec<FullTextSearchResult>, usize, String) + 'static,
     ) -> Box<Self> {
         Box::new(Self {
             root,
@@ -505,6 +507,7 @@ impl FullTextSearchPopupHost {
             results_list_id,
             popup_id,
             result_clicks,
+            current_results: Vec::new(),
             search_path,
             on_select: Box::new(on_select),
         })
@@ -535,6 +538,8 @@ impl FullTextSearchPopupHost {
             results.truncate(MAX_FULL_TEXT_RESULTS_DISPLAYED);
         }
 
+        self.current_results = results.clone();
+
         let context = FullTextResultListContext {
             results,
             result_clicks: self.result_clicks.clone(),
@@ -549,6 +554,7 @@ impl FullTextSearchPopupHost {
 
                     Some(
                         ClickableFullTextSearchResult::new(
+                            idx,
                             result,
                             ctx.result_clicks.clone(),
                         ) as Box<dyn Widget>
@@ -599,9 +605,15 @@ impl FullTextSearchPopupHost {
             std::mem::take(&mut *result_clicks)
         };
 
-        for flow_key in clicked {
-            (self.on_select)(flow_key, self.query());
-            self.close();
+        for result_idx in clicked {
+            if result_idx < self.current_results.len() {
+                (self.on_select)(
+                    self.current_results.clone(),
+                    result_idx,
+                    self.query(),
+                );
+                self.close();
+            }
         }
     }
 }
@@ -647,7 +659,7 @@ impl DelegateWidget for FullTextSearchPopupHost {
 
 pub fn open_full_text_search_popup(
     search_path: PathBuf,
-    on_select: impl Fn(String, String) + 'static,
+    on_select: impl Fn(Vec<FullTextSearchResult>, usize, String) + 'static,
 ) {
     let mut input_id = WidgetId::EMPTY;
     let mut search_button_id = WidgetId::EMPTY;
@@ -655,7 +667,7 @@ pub fn open_full_text_search_popup(
     let mut status_text_id = WidgetId::EMPTY;
     let mut results_list_id = WidgetId::EMPTY;
 
-    let result_clicks: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let result_clicks: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
 
     let search_input = FocusPane::new().children([
         Pane::new()
@@ -692,6 +704,7 @@ pub fn open_full_text_search_popup(
 
             Some(
                 ClickableFullTextSearchResult::new(
+                    idx,
                     result,
                     ctx.result_clicks.clone(),
                 ) as Box<dyn Widget>

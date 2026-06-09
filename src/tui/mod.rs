@@ -18,7 +18,7 @@ use tokio::sync::{
     }, watch};
 use tuie::prelude::*;
 use read_metadata::DbState;
-use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTextMatcher};
+use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTextMatcher, FullTextSearchResult};
 pub use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 
 const MAX_ROWS: usize = 10_000;
@@ -209,9 +209,19 @@ pub struct PacketListDelegate {
     detail_tx: UnboundedSender<UiEvent>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     search_requests: Arc<parking_lot::Mutex<Vec<String>>>,
-    full_text_select_requests: Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    full_text_select_requests: Arc<parking_lot::Mutex<Vec<FullTextSelectRequest>>>,
+    retained_full_text_results: Vec<FullTextSearchResult>,
+    retained_full_text_selected: Option<usize>,
+    retained_full_text_query: Option<String>,
     capture_flows_dir: PathBuf,
     time_formatter: TimeFormatter,
+}
+
+#[derive(Clone, Debug)]
+struct FullTextSelectRequest {
+    results: Vec<FullTextSearchResult>,
+    selected: usize,
+    query: String,
 }
 
 impl PacketListDelegate {
@@ -307,6 +317,9 @@ impl PacketListDelegate {
             row_clicks,
             search_requests,
             full_text_select_requests,
+            retained_full_text_results: Vec::new(),
+            retained_full_text_selected: None,
+            retained_full_text_query: None,
             capture_flows_dir,
             time_formatter,
         });
@@ -713,8 +726,12 @@ impl PacketListDelegate {
         let select_requests = self.full_text_select_requests.clone();
         let search_path = self.capture_flows_dir.clone();
 
-        open_full_text_search_popup(search_path, move |flow_key, query| {
-            select_requests.lock().push((flow_key, query));
+        open_full_text_search_popup(search_path, move |results, selected, query| {
+            select_requests.lock().push(FullTextSelectRequest {
+                results,
+                selected,
+                query,
+            });
         });
     }
 
@@ -735,9 +752,53 @@ impl PacketListDelegate {
             std::mem::take(&mut *full_text_select_requests)
         };
 
-        for (flow_key, query) in requests {
-            self.select_flow_key(&flow_key, Some(query));
+        for request in requests {
+            self.retained_full_text_results = request.results;
+            self.retained_full_text_selected = Some(request.selected);
+            self.retained_full_text_query = Some(request.query.clone());
+
+            self.select_retained_full_text_result(request.selected);
         }
+    }
+
+    fn move_retained_full_text_next(&mut self) {
+        let len = self.retained_full_text_results.len();
+
+        if len == 0 {
+            self.append_system_line("=== no retained full text search results ===");
+            return;
+        }
+
+        let current = self.retained_full_text_selected.unwrap_or(0);
+        let next = if current + 1 < len { current + 1 } else { 0 };
+
+        self.select_retained_full_text_result(next);
+    }
+
+    fn move_retained_full_text_previous(&mut self) {
+        let len = self.retained_full_text_results.len();
+
+        if len == 0 {
+            self.append_system_line("=== no retained full text search results ===");
+            return;
+        }
+
+        let current = self.retained_full_text_selected.unwrap_or(0);
+        let previous = if current == 0 { len - 1 } else { current - 1 };
+
+        self.select_retained_full_text_result(previous);
+    }
+
+    fn select_retained_full_text_result(&mut self, idx: usize) {
+        let Some(result) = self.retained_full_text_results.get(idx).cloned() else {
+            return;
+        };
+
+        self.retained_full_text_selected = Some(idx);
+
+        let query = self.retained_full_text_query.clone();
+
+        self.select_flow_key(&result.flow_key, query);
     }
 
     fn reset_detail(&self) {
@@ -929,8 +990,8 @@ impl DelegateWidget for PacketListDelegate {
                 tuie::focus_widget(self.get_id());
                 return InputResult::Rejected
             }
-            // search filter shortcut
-            chord!(Char('s')) if queue.is_unhandled() => {
+            // filter shortcut
+            chord!(Char('f')) if queue.is_unhandled() => {
                 queue.next();
                 self.open_search();
                 return InputResult::Handled;
@@ -939,6 +1000,16 @@ impl DelegateWidget for PacketListDelegate {
             chord!(Char('g')) if queue.is_unhandled() => {
                 queue.next();
                 self.open_full_text_search();
+                return InputResult::Handled;
+            }
+            chord!(Char('n')) if queue.is_unhandled() => {
+                queue.next();
+                self.move_retained_full_text_next();
+                return InputResult::Handled;
+            }
+            chord!(Char('p')) if queue.is_unhandled() => {
+                queue.next();
+                self.move_retained_full_text_previous();
                 return InputResult::Handled;
             }
             chord!(Esc) if self.mode == PacketListMode::Search => {

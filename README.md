@@ -100,6 +100,82 @@ capture/
 - `K` / `Shift+Up`: page up
 - `G`: jump to bottom
 - `Enter` / `l`: open details
+- `f`: filter packets
+- `g`: full text search
+- `n`: jump to the next retained full text search result
+- `p`: jump to the previous retained full text search result
+
+## Filtering
+
+Press `f` to open the packet filter popup.
+
+The filter supports compound conditions joined with `&&`.
+
+Supported conditions:
+
+- URL
+    - Plain text matching
+    - Regular expression matching with the `re:` prefix
+- Status code
+    - Prefixes: `status:`, `stat:`, `s:`
+    - Exact status codes such as `200`
+    - Status classes such as `2xx` or `5xx`
+- HTTP method
+    - Prefixes: `method:`, `meth:`, `m:`
+
+Examples:
+
+Match URLs containing `windy.com`.
+```text
+windy.com
+```
+Match URLs using a regular expression.
+```text
+re:node.*.com
+```
+Match URLs containing `windy.com` with status `200`.
+```text
+text windy.com && stat:200
+```
+Match URLs containing `windy.com` with any `2xx` status.
+```text
+text windy.com && status:2xx
+```
+Match `GET` requests with status `404`.
+```text
+text method:GET && stat:404
+```
+Match `POST` requests with any `5xx` status.
+```text
+text m:POST && s:5xx
+```
+Match URL regex and status `200`.
+```text
+text re:/api/v\d+ && stat:200
+```
+
+
+## Full text search
+
+Press `g` to open the full text search popup.
+
+Full text search supports:
+
+- Plain text matching, case-sensitive
+- Regular expression matching with the `re:` prefix
+
+Example:
+```text
+re:(?i)region
+```
+
+After selecting a result and closing the search popup, the search results are retained until the next full text search selection.
+
+Use:
+- `n`: jump to the next retained search result
+- `p`: jump to the previous retained search result
+
+
 
 ## Notes
 - HTTPS inspection requires trusting the local CA/certificate used by the proxy.
