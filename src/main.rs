@@ -34,7 +34,7 @@ async fn main() -> Result<(), AnyError> {
     let connect_ua_profile = opt.connect_ua_profile;
     let proxy_mode = opt.proxy_mode;
     let upstream_handshake_timeout_ms = opt.upstream_handshake_timeout_ms;
-    let upstream_request_timeout_ms = opt.upstream_request_timeout_ms;
+    let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
     let (quit_tx, quit_rx) = watch::channel(false);
 
     let time_display = TimeDisplayConfig {
@@ -51,7 +51,7 @@ async fn main() -> Result<(), AnyError> {
             connect_ua_profile,
             proxy_mode,
             upstream_handshake_timeout_ms,
-            upstream_request_timeout_ms,
+            upstream_request_timeout_sec,
             Some(callback),
             quit_rx,
         ).await {

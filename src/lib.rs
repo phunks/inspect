@@ -178,7 +178,7 @@ pub async fn mitm_proxy_main(
     connect_ua_profile: Option<UaProfile>,
     proxy_mode: ProxyMode,
     upstream_handshake_timeout_ms: u64,
-    upstream_request_timeout_ms: u64,
+    upstream_request_timeout_sec: u64,
     packet_callback: Option<Arc<dyn Fn(PacketSummary) + Send + Sync>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
@@ -190,7 +190,7 @@ pub async fn mitm_proxy_main(
         ua_profile,
         connect_ua_profile,
         Duration::from_millis(upstream_handshake_timeout_ms),
-        Duration::from_millis(upstream_request_timeout_ms),
+        Duration::from_secs(upstream_request_timeout_sec),
     );
 
     let upstream_proxy = match upstream_proxy {

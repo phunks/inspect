@@ -119,7 +119,7 @@ pub fn open_search_popup(on_search: impl Fn(String) + 'static) {
         .gap(1)
         .children([
             Text::new()
-                .content("Search URL".fg(Color::Foreground).bold()) as Box<dyn Widget>,
+                .content("Filter".fg(Color::Foreground).bold()) as Box<dyn Widget>,
             sl_input,
             Pane::new()
                 .horizontal()
@@ -130,7 +130,7 @@ pub fn open_search_popup(on_search: impl Fn(String) + 'static) {
                         .children([Text::new().content(" Cancel ")])
                         .id(&mut cancel_button_id) as Box<dyn Widget>,
                     Button::new()
-                        .children([Text::new().content(" Search ")])
+                        .children([Text::new().content(" Apply ")])
                         .id(&mut search_button_id),
                 ]),
         ]);

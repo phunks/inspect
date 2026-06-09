@@ -60,8 +60,8 @@ pub struct Opt {
     #[arg(long, default_value_t = 10_000, help = "Upstream connect/TLS handshake timeout in milliseconds")]
     pub upstream_handshake_timeout_ms: u64,
 
-    #[arg(long, default_value_t = 60_000, help = "Upstream request/read timeout in milliseconds")]
-    pub upstream_request_timeout_ms: u64,
+    #[arg(long, default_value_t = 60, help = "Upstream request/read timeout in seconds")]
+    pub upstream_request_timeout_sec: u64,
 
     #[arg(long, help = "Generate (or reuse) persistent local MITM root CA and exit")]
     pub generate_ca: bool,

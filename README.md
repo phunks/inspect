@@ -56,8 +56,8 @@ Options:
           [default: observe] [possible values: observe, emulate]
       --upstream-handshake-timeout-ms <UPSTREAM_HANDSHAKE_TIMEOUT_MS>
           Upstream connect/TLS handshake timeout in milliseconds [default: 10000]
-      --upstream-request-timeout-ms <UPSTREAM_REQUEST_TIMEOUT_MS>
-          Upstream request/read timeout in milliseconds [default: 60000]
+      --upstream-request-timeout-sec <UPSTREAM_REQUEST_TIMEOUT_SEC>
+          Upstream request/read timeout in seconds [default: 60]
       --generate-ca
           Generate (or reuse) persistent local MITM root CA and exit
       --force-regenerate-ca
