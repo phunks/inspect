@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::info;
 use inspect::mitm::proxy::{mitm_proxy_main, PacketEvent};
-use inspect::tui::run_tui;
+use inspect::tui::{run_tui, TUI_EVENT_BUFFER};
 use inspect::tui::time::TimeDisplayConfig;
 use inspect::mitm::proxy::AnyError;
 use inspect::mitm::capture::CapturePaths;
@@ -25,10 +25,10 @@ async fn main() -> Result<(), AnyError> {
     let service_port = format!("{}:{}", opt.ip, opt.port);
 
     let _ = CapturePaths::initialize_for_process()?;
-
-    let (tx, rx) = mpsc::unbounded_channel();
+    
+    let (tx, rx) = mpsc::channel(TUI_EVENT_BUFFER);
     let callback = Arc::new(move |p: PacketEvent| {
-        let _ = tx.send(p);
+        let _ = tx.try_send(p);
     });
 
     let upstream_proxy = opt.upstream_proxy.clone();

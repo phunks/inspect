@@ -25,7 +25,7 @@ use crate::mitm::capture::CapturePaths;
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
 const DETAIL_PLACEHOLDER_TEXT: &str = "Select row and press Enter";
-
+pub const TUI_EVENT_BUFFER: usize = 4096;
 
 #[derive(Clone, Debug, Default)]
 struct PacketRow {
@@ -40,7 +40,7 @@ struct PacketRow {
     host: String,
     uri: String,
     query_str: String,
-    line: String,
+    line: Arc<str>,
 }
 
 impl PacketRow {
@@ -69,6 +69,12 @@ impl PacketRow {
             .map(|ms| format!("{ms:>5}ms"))
             .unwrap_or_else(|| "       ".to_string());
 
+        let query_suffix = if self.query_str.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", self.query_str)
+        };
+
         self.line = format!(
             "#{:06} {} {:<6} {:<4} {} {}://{}{}{}",
             self.seq,
@@ -79,12 +85,9 @@ impl PacketRow {
             self.protocol,
             self.host,
             self.uri,
-            if self.query_str.is_empty() {
-                String::new()
-            } else {
-                format!("?{}", self.query_str)
-            }
-        );
+            query_suffix,
+        )
+            .into();
     }
 }
 
@@ -143,8 +146,8 @@ impl SearchMatcher {
             .all(|condition| condition.matches(row))
     }
 
-    fn label(&self) -> String {
-        self.label.clone()
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 
@@ -217,8 +220,14 @@ pub enum UiEvent {
 struct RowClicked(usize);
 
 #[derive(Clone, Debug)]
+struct PacketListItem {
+    row_index: usize,
+    line: Arc<str>,
+}
+
+#[derive(Clone, Debug)]
 struct PacketListContext {
-    rows: Vec<PacketRow>,
+    items: Arc<[PacketListItem]>,
     selected: usize,
     owner_id: WidgetId<PacketListDelegate>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
@@ -232,7 +241,7 @@ enum PacketListMode {
 
 pub struct PacketListDelegate {
     rows: Vec<PacketRow>,
-    search_rows: Vec<PacketRow>,
+    search_indices: Vec<usize>,
     mode: PacketListMode,
     main_selected: usize,
     search_selected: usize,
@@ -240,7 +249,7 @@ pub struct PacketListDelegate {
     search_matcher: Option<SearchMatcher>,
     search_error: Option<String>,
     selected: usize,
-    rx: mpsc::UnboundedReceiver<PacketEvent>,
+    rx: mpsc::Receiver<PacketEvent>,
     list: Box<Pane>,
     list_id: WidgetId<List>,
     list_title_id: WidgetId<Text>,
@@ -273,7 +282,7 @@ impl PacketListDelegate {
     const WAITING_ROW_TEXT: &'static str = "waiting for packets...";
 
     pub async fn new(
-        rx: mpsc::UnboundedReceiver<PacketEvent>,
+        rx: mpsc::Receiver<PacketEvent>,
         detail_tx: UnboundedSender<UiEvent>,
         time_display: TimeDisplayConfig,
     ) -> Box<Self> {
@@ -281,15 +290,15 @@ impl PacketListDelegate {
             id: String::new(),
             seq: 0,
             flow_key: String::new(),
-            time: "".to_string(),
-            method: "".to_string(),
+            time: String::new(),
+            method: String::new(),
             status: None,
             elapsed_ms: None,
-            protocol: "".to_string(),
-            host: "".to_string(),
-            uri: "".to_string(),
+            protocol: String::new(),
+            host: String::new(),
+            uri: String::new(),
             query_str: String::new(),
-            line: Self::WAITING_ROW_TEXT.to_string(),
+            line: Arc::<str>::from(Self::WAITING_ROW_TEXT),
         }];
 
         let selected = 0;
@@ -313,23 +322,31 @@ impl PacketListDelegate {
             .id(&mut list_id);
 
         let context = PacketListContext {
-            rows: rows.clone(),
+            items: rows
+                .iter()
+                .enumerate()
+                .map(|(row_index, row)| PacketListItem {
+                    row_index,
+                    line: row.line.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
             selected,
             owner_id: WidgetId::EMPTY,
             row_clicks: row_clicks.clone(),
         };
 
-        list.set_item_count(context.rows.len());
+        list.set_item_count(context.items.len());
         list.set_renderer(
             context,
             |ctx: &mut PacketListContext, idx: usize| -> Option<Box<dyn Widget>> {
-                let row = ctx.rows.get(idx)?;
+                let item = ctx.items.get(idx)?;
                 Some(
                     ClickablePacketRow::new(
                         ctx.owner_id,
                         ctx.row_clicks.clone(),
-                        idx,
-                        row.line.clone(),
+                        item.row_index,
+                        item.line.clone(),
                         idx == ctx.selected,
                     ) as Box<dyn Widget>
                 )
@@ -348,7 +365,7 @@ impl PacketListDelegate {
 
         let mut this = Box::new(Self {
             rows,
-            search_rows: Vec::new(),
+            search_indices: Vec::new(),
             mode: PacketListMode::Main,
             main_selected: selected,
             search_selected: 0,
@@ -522,7 +539,7 @@ impl PacketListDelegate {
             host: pkt.host,
             uri: pkt.uri,
             query_str: pkt.query_str,
-            line: String::new(),
+            line: Arc::<str>::from(""),
         };
         row.refresh_line();
 
@@ -535,7 +552,7 @@ impl PacketListDelegate {
             .as_ref()
             .is_some_and(|matcher| matcher.matches(&row))
         {
-            self.search_rows.push(row.clone());
+            self.search_indices.push(idx);
         }
 
         self.rows.push(row);
@@ -563,26 +580,26 @@ impl PacketListDelegate {
         }
 
         if let Some(matcher) = self.search_matcher.as_ref() {
-            self.search_rows = self
+            self.search_indices = self
                 .rows
                 .iter()
-                .filter(|row| matcher.matches(row))
-                .cloned()
+                .enumerate()
+                .filter_map(|(idx, row)| matcher.matches(row).then_some(idx))
                 .collect();
 
             self.search_selected = self
                 .search_selected
-                .min(self.search_rows.len().saturating_sub(1));
+                .min(self.search_indices.len().saturating_sub(1));
         }
     }
 
     fn remove_waiting_row_if_needed(&mut self) {
         if self.rows.len() == 1
             && self.rows[0].id.is_empty()
-            && self.rows[0].line == Self::WAITING_ROW_TEXT
+            && self.rows[0].line.as_ref() == Self::WAITING_ROW_TEXT
         {
             self.rows.clear();
-            self.search_rows.clear();
+            self.search_indices.clear();
             self.main_selected = 0;
             self.search_selected = 0;
             self.selected = 0;
@@ -592,25 +609,49 @@ impl PacketListDelegate {
     fn sync_list(&mut self) {
         self.sync_list_title();
 
+        let items: Arc<[PacketListItem]> = match self.mode {
+            PacketListMode::Main => self
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(row_index, row)| PacketListItem {
+                    row_index,
+                    line: row.line.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            PacketListMode::Search => self
+                .search_indices
+                .iter()
+                .filter_map(|&row_index| {
+                    self.rows.get(row_index).map(|row| PacketListItem {
+                        row_index,
+                        line: row.line.clone(),
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+
         let context = PacketListContext {
-            rows: self.visible_rows().to_vec(),
             selected: self.current_selected(),
             owner_id: self.get_id(),
             row_clicks: self.row_clicks.clone(),
+            items,
         };
 
         if let Some(list) = self.list.get_widget_mut(self.list_id) {
-            list.set_item_count(context.rows.len());
+            list.set_item_count(context.items.len());
             list.set_renderer(
                 context,
                 |ctx: &mut PacketListContext, idx: usize| -> Option<Box<dyn Widget>> {
-                    let row = ctx.rows.get(idx)?;
+                    let item = ctx.items.get(idx)?;
                     Some(
                         ClickablePacketRow::new(
                             ctx.owner_id,
                             ctx.row_clicks.clone(),
-                            idx,
-                            row.line.clone(),
+                            item.row_index,
+                            item.line.clone(),
                             idx == ctx.selected,
                         ) as Box<dyn Widget>
                     )
@@ -655,16 +696,17 @@ impl PacketListDelegate {
 
         if self.mode == PacketListMode::Search
             && let Some(matcher) = self.search_matcher.as_ref() {
-                self.search_rows = self
-                    .rows
-                    .iter()
-                    .filter(|row| matcher.matches(row))
-                    .cloned()
-                    .collect();
+            self.search_indices = self
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, row)| matcher.matches(row).then_some(idx))
+                .collect();
 
-            self.search_selected = self.search_selected.min(self.search_rows.len().saturating_sub(1));
+            self.search_selected = self
+                .search_selected
+                .min(self.search_indices.len().saturating_sub(1));
         };
-
 
         self.clamp_current_selected();
     }
@@ -682,7 +724,7 @@ impl PacketListDelegate {
             host: "test host".to_string(),
             uri: "test url".to_string(),
             query_str: String::new(),
-            line: line.into(),
+            line: Arc::<str>::from(line.into()),
         });
 
         self.trim_rows_if_needed();
@@ -690,8 +732,7 @@ impl PacketListDelegate {
     }
 
     fn selected_packet_id(&self) -> Option<&str> {
-        self.visible_rows()
-            .get(self.current_selected())
+        self.current_row()
             .and_then(|row| {
                 if row.id.is_empty() {
                     None
@@ -775,15 +816,36 @@ impl PacketListDelegate {
         }
     }
 
-    fn visible_rows(&self) -> &[PacketRow] {
+    // fn visible_rows(&self) -> &[PacketRow] {
+    //     match self.mode {
+    //         PacketListMode::Main => &self.rows,
+    //         PacketListMode::Search => &self.search_rows,
+    //     }
+    // }
+
+    fn visible_rows_len(&self) -> usize {
         match self.mode {
-            PacketListMode::Main => &self.rows,
-            PacketListMode::Search => &self.search_rows,
+            PacketListMode::Main => self.rows.len(),
+            PacketListMode::Search => self.search_indices.len(),
         }
     }
 
-    fn visible_rows_len(&self) -> usize {
-        self.visible_rows().len()
+    fn current_row_index(&self) -> Option<usize> {
+        match self.mode {
+            PacketListMode::Main => {
+                let idx = self.main_selected;
+                (idx < self.rows.len()).then_some(idx)
+            }
+            PacketListMode::Search => self
+                .search_indices
+                .get(self.search_selected)
+                .copied(),
+        }
+    }
+
+    fn current_row(&self) -> Option<&PacketRow> {
+        self.current_row_index()
+            .and_then(|idx| self.rows.get(idx))
     }
 
     fn current_selected(&self) -> usize {
@@ -859,9 +921,9 @@ impl PacketListDelegate {
         };
 
         for request in requests {
-            self.retained_full_text_results = request.results;
             self.retained_full_text_selected = Some(request.selected);
-            self.retained_full_text_query = Some(request.query.clone());
+            self.retained_full_text_query = Some(request.query);
+            self.retained_full_text_results = request.results;
 
             self.select_retained_full_text_result(request.selected);
         }
@@ -896,15 +958,16 @@ impl PacketListDelegate {
     }
 
     fn select_retained_full_text_result(&mut self, idx: usize) {
-        let Some(result) = self.retained_full_text_results.get(idx).cloned() else {
+        let Some(result) = self.retained_full_text_results.get(idx) else {
             return;
         };
 
         self.retained_full_text_selected = Some(idx);
 
+        let flow_key = result.flow_key.clone();
         let query = self.retained_full_text_query.clone();
 
-        self.select_flow_key(&result.flow_key, query);
+        self.select_flow_key(&flow_key, query);
     }
 
     fn reset_detail(&self) {
@@ -932,12 +995,12 @@ impl PacketListDelegate {
             }
         };
 
-        self.search_query = matcher.label();
-        self.search_rows = self
+        self.search_query = matcher.label().to_owned();
+        self.search_indices = self
             .rows
             .iter()
-            .filter(|row| matcher.matches(row))
-            .cloned()
+            .enumerate()
+            .filter_map(|(idx, row)| matcher.matches(row).then_some(idx))
             .collect();
 
         self.search_matcher = Some(matcher);
@@ -954,7 +1017,7 @@ impl PacketListDelegate {
         self.search_query.clear();
         self.search_matcher = None;
         self.search_error = None;
-        self.search_rows.clear();
+        self.search_indices.clear();
         self.clamp_current_selected();
         self.sync_list_and_reveal_selected();
         self.reset_detail();
@@ -971,9 +1034,9 @@ impl PacketListDelegate {
                 StyledString::new()
                     .span("Packets".bold())
                     .span(" [filter: ".fg(Color::YELLOW))
-                    .span(self.search_query.clone().fg(Color::YELLOW).bold())
+                    .span(self.search_query.as_str().fg(Color::YELLOW).bold())
                     .span("]".fg(Color::YELLOW))
-                    .span(format!(" {}/{}", self.search_rows.len(), self.rows.len()).dim())
+                    .span(format!(" {}/{}", self.search_indices.len(), self.rows.len()).dim())
             }
         }
     }
@@ -997,7 +1060,7 @@ impl PacketListDelegate {
         };
 
         self.mode = PacketListMode::Main;
-        self.search_rows.clear();
+        self.search_indices.clear();
         self.search_query.clear();
         self.search_matcher = None;
         self.search_error = None;
@@ -1272,16 +1335,17 @@ struct ClickablePacketRow {
     owner_id: WidgetId<PacketListDelegate>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     idx: usize,
-    text: String,
+    text: Arc<str>,
     selected: bool,
     pressed: std::cell::Cell<bool>,
 }
+
 impl ClickablePacketRow {
     fn new(
         owner_id: WidgetId<PacketListDelegate>,
         row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
         idx: usize,
-        text: String,
+        text: Arc<str>,
         selected: bool,
     ) -> Box<Self> {
         Box::new(Self {
@@ -1359,7 +1423,7 @@ impl Widget for ClickablePacketRow {
 }
 
 pub async fn run_tui(
-    rx: UnboundedReceiver<PacketEvent>,
+    rx: mpsc::Receiver<PacketEvent>,
     quit_tx: watch::Sender<bool>,
     time_display: TimeDisplayConfig,
 ) -> anyhow::Result<()> {
