@@ -14,7 +14,7 @@ pub(crate) struct FocusPane {
 impl FocusPane {
     fn refresh_border(&mut self) {
         let cfg = border::config::get();
-        let focused = tuie::runtime::is_focus_chain(self.pane.get_id());
+        let focused = tuie::runtime::in_focus_chain(self.pane.get_id());
         if focused {
             let style = self
                 .selected_border_style
@@ -27,6 +27,7 @@ impl FocusPane {
         }
     }
 
+    #[allow(unused)]
     fn sync_border_style(&mut self) {
         self.refresh_border();
     }

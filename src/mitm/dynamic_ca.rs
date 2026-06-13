@@ -27,6 +27,7 @@ const DEFAULT_CA_CN: &str = "Inspect Local MITM Root CA";
 
 #[derive(Debug)]
 pub struct Ca {
+    #[allow(unused)]
     ca_cert_der: Vec<u8>,
     issuer: Issuer<'static, KeyPair>,
 }

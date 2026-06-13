@@ -1,13 +1,12 @@
 mod read_metadata;
-pub mod global_chords;
+mod global_chords;
 mod search;
 mod button;
 mod focus_pane;
-mod time;
+pub mod time;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use crate::{CapturePaths, PacketSummary};
-
 use std::sync::Arc;
 use std::time::Duration;
 use chord_macro::chord;
@@ -19,21 +18,25 @@ use tokio::sync::{
 use tuie::prelude::*;
 use read_metadata::DbState;
 use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTextMatcher, FullTextSearchResult};
-pub use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
+use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
+use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketStarted};
+use crate::mitm::capture::CapturePaths;
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
-
-const DETAIL_PLACEHOLDER_TEXT: &'static str = "Select row and press Enter";
+const DETAIL_PLACEHOLDER_TEXT: &str = "Select row and press Enter";
 
 
 #[derive(Clone, Debug, Default)]
 struct PacketRow {
     id: String,
+    seq: u64,
     flow_key: String,
     time: String,
     method: String,
-    status: u16,
+    status: Option<u16>,
+    elapsed_ms: Option<i64>,
+    protocol: String,
     host: String,
     uri: String,
     query_str: String,
@@ -42,11 +45,46 @@ struct PacketRow {
 
 impl PacketRow {
     fn url_text(&self) -> String {
-        if self.query_str.is_empty() {
-            format!("{}{}", self.host, self.uri)
+        let scheme = if self.protocol.is_empty() {
+            String::new()
         } else {
-            format!("{}{}?{}", self.host, self.uri, self.query_str)
+            format!("{}://", self.protocol)
+        };
+
+        if self.query_str.is_empty() {
+            format!("{}{}{}", scheme, self.host, self.uri)
+        } else {
+            format!("{}{}{}?{}", scheme, self.host, self.uri, self.query_str)
         }
+    }
+
+    fn refresh_line(&mut self) {
+        let status = self
+            .status
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "----".to_string());
+
+        let elapsed = self
+            .elapsed_ms
+            .map(|ms| format!("{ms:>5}ms"))
+            .unwrap_or_else(|| "       ".to_string());
+
+        self.line = format!(
+            "#{:06} {} {:<6} {:<4} {} {}://{}{}{}",
+            self.seq,
+            self.time,
+            self.method,
+            status,
+            elapsed,
+            self.protocol,
+            self.host,
+            self.uri,
+            if self.query_str.is_empty() {
+                String::new()
+            } else {
+                format!("?{}", self.query_str)
+            }
+        );
     }
 }
 
@@ -54,6 +92,7 @@ impl PacketRow {
 enum SearchCondition {
     UrlContains(String),
     UrlRegex {
+        #[allow(unused)]
         pattern: String,
         regex: Regex,
     },
@@ -126,11 +165,10 @@ impl SearchCondition {
         {
             let value = value.trim();
 
-            if let Some(prefix) = value.strip_suffix("xx") {
-                if let Ok(class) = prefix.parse::<u16>() {
+            if let Some(prefix) = value.strip_suffix("xx")
+                && let Ok(class) = prefix.parse::<u16>() {
                     return Ok(Self::StatusClass(class));
-                }
-            }
+            };
 
             if let Ok(status) = value.parse::<u16>() {
                 return Ok(Self::Status(status));
@@ -158,8 +196,10 @@ impl SearchCondition {
                 .contains(query),
             Self::UrlRegex { regex, .. } => regex.is_match(&row.url_text()),
             Self::Method(method) => row.method.eq_ignore_ascii_case(method),
-            Self::Status(status) => row.status == *status,
-            Self::StatusClass(class) => row.status / 100 == *class,
+            Self::Status(status) => row.status == Some(*status),
+            Self::StatusClass(class) => row
+                .status
+                .is_some_and(|status| status / 100 == *class),
         }
     }
 }
@@ -172,8 +212,9 @@ pub enum UiEvent {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-struct RowClicked(pub usize);
+struct RowClicked(usize);
 
 #[derive(Clone, Debug)]
 struct PacketListContext {
@@ -199,8 +240,7 @@ pub struct PacketListDelegate {
     search_matcher: Option<SearchMatcher>,
     search_error: Option<String>,
     selected: usize,
-    paused: bool,
-    rx: mpsc::UnboundedReceiver<PacketSummary>,
+    rx: mpsc::UnboundedReceiver<PacketEvent>,
     list: Box<Pane>,
     list_id: WidgetId<List>,
     list_title_id: WidgetId<Text>,
@@ -210,11 +250,14 @@ pub struct PacketListDelegate {
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     search_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     full_text_select_requests: Arc<parking_lot::Mutex<Vec<FullTextSelectRequest>>>,
+    search_history: Arc<parking_lot::Mutex<Vec<String>>>,
+    full_text_search_history: Arc<parking_lot::Mutex<Vec<String>>>,
     retained_full_text_results: Vec<FullTextSearchResult>,
     retained_full_text_selected: Option<usize>,
     retained_full_text_query: Option<String>,
     capture_flows_dir: PathBuf,
     time_formatter: TimeFormatter,
+    id_to_row_index: HashMap<String, usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -226,23 +269,26 @@ struct FullTextSelectRequest {
 
 impl PacketListDelegate {
     const TICK_INTERVAL: Duration = Duration::from_millis(50);
-    const SELECTED_SCROLL_OFF: i32 = 2;
+    const SELECTED_SCROLL_OFF: u16 = 2;
     const WAITING_ROW_TEXT: &'static str = "waiting for packets...";
 
     pub async fn new(
-        rx: mpsc::UnboundedReceiver<PacketSummary>,
+        rx: mpsc::UnboundedReceiver<PacketEvent>,
         detail_tx: UnboundedSender<UiEvent>,
         time_display: TimeDisplayConfig,
     ) -> Box<Self> {
         let rows = vec![PacketRow {
             id: String::new(),
+            seq: 0,
             flow_key: String::new(),
             time: "".to_string(),
             method: "".to_string(),
-            status: 0,
+            status: None,
+            elapsed_ms: None,
+            protocol: "".to_string(),
             host: "".to_string(),
             uri: "".to_string(),
-            query_str: "".to_string(),
+            query_str: String::new(),
             line: Self::WAITING_ROW_TEXT.to_string(),
         }];
 
@@ -250,6 +296,8 @@ impl PacketListDelegate {
         let row_clicks = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let search_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let full_text_select_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let search_history = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let full_text_search_history = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let capture_flows_dir = CapturePaths::new().flows_dir;
         let time_formatter = TimeFormatter::new(time_display);
 
@@ -276,12 +324,14 @@ impl PacketListDelegate {
             context,
             |ctx: &mut PacketListContext, idx: usize| -> Option<Box<dyn Widget>> {
                 let row = ctx.rows.get(idx)?;
-                let prefix = if idx == ctx.selected { "> " } else { "  " };
                 Some(
-                    Text::new()
-                        .content(format!("{prefix}{}", row.line))
-                        .overflow(TextOverflow::TRUNCATE)
-                        .flex(1) as Box<dyn Widget>
+                    ClickablePacketRow::new(
+                        ctx.owner_id,
+                        ctx.row_clicks.clone(),
+                        idx,
+                        row.line.clone(),
+                        idx == ctx.selected,
+                    ) as Box<dyn Widget>
                 )
             },
         );
@@ -306,7 +356,6 @@ impl PacketListDelegate {
             search_matcher: None,
             search_error: None,
             selected,
-            paused: false,
             rx,
             list,
             list_id,
@@ -317,11 +366,14 @@ impl PacketListDelegate {
             row_clicks,
             search_requests,
             full_text_select_requests,
+            search_history,
+            full_text_search_history,
             retained_full_text_results: Vec::new(),
             retained_full_text_selected: None,
             retained_full_text_query: None,
             capture_flows_dir,
             time_formatter,
+            id_to_row_index: HashMap::new(),
         });
 
         this.task = tuie::schedule(this.get_id(), Self::TICK_INTERVAL, Self::tick);
@@ -397,53 +449,49 @@ impl PacketListDelegate {
         self.sync_list_and_reveal_selected();
     }
 
+    fn is_list_at_bottom(&self) -> bool {
+        // if self.selected == 0 && self.list
+        //     .get_widget(self.list_id)
+        //     .map(|list| {
+        //         list.get_scroll_ratio(Axis2D::Y) == 1.0})
+        //     .unwrap_or(true) {
+        //     return true;
+        // }
+        // let visible = self.list
+        //     .get_widget(self.list_id).map(|list|list.get_scroll_ratio(Axis2D::Y));
+        //
+        // debug!("is_list_at_bottom: {:?}", visible);
+
+        self.list
+            .get_widget(self.list_id)
+            .map(|list| {
+                list.get_scroll_ratio(Axis2D::Y) >= 1.0
+                    || list.get_scroll_progress(Axis2D::Y) >= 0.999
+            })
+            .unwrap_or(true)
+    }
+
+    fn follow_list_bottom(&mut self) {
+        if let Some(list) = self.list.get_widget_mut(self.list_id) {
+            list.set_scroll_progress(Axis2D::Y, 1.0);
+        }
+    }
+
     fn poll_incoming(&mut self) {
         let mut changed = false;
+        let was_at_bottom = self.is_list_at_bottom();
 
-        while let Ok(pkt) = self.rx.try_recv() {
-            if self.paused {
-                continue;
-            }
-
+        while let Ok(event) = self.rx.try_recv() {
             self.remove_waiting_row_if_needed();
 
-            let display_time = self.time_formatter.format_packet_time(&pkt.time, pkt.epoch_ms);
-            let line = format!(
-                "{} {:<6} {:<4} {}{}{}",
-                display_time,
-                pkt.method,
-                pkt.status,
-                pkt.host,
-                pkt.uri,
-                if pkt.query_str.is_empty() {
-                    String::new()
-                } else {
-                    format!("?{}", pkt.query_str)
+            match event {
+                PacketEvent::Started(pkt) => {
+                    self.on_packet_started(pkt);
                 }
-            );
-
-            let row = PacketRow {
-                id: pkt.id,
-                flow_key: pkt.flow_key,
-                time: display_time,
-                method: pkt.method,
-                status: pkt.status,
-                host: pkt.host,
-                uri: pkt.uri,
-                query_str: pkt.query_str,
-                line,
-            };
-
-            if self.mode == PacketListMode::Search
-                && self
-                .search_matcher
-                .as_ref()
-                .is_some_and(|matcher| matcher.matches(&row))
-            {
-                self.search_rows.push(row.clone());
+                PacketEvent::Completed(pkt) => {
+                    self.on_packet_completed(pkt);
+                }
             }
-
-            self.rows.push(row);
 
             changed = true;
         }
@@ -452,6 +500,79 @@ impl PacketListDelegate {
             self.trim_rows_if_needed();
             self.clamp_current_selected();
             self.sync_list();
+
+            if was_at_bottom {
+                self.follow_list_bottom();
+            }
+        }
+    }
+
+    fn on_packet_started(&mut self, pkt: PacketStarted) {
+        let display_time = self.time_formatter.format_packet_time(&pkt.time, pkt.epoch_ms);
+
+        let mut row = PacketRow {
+            id: pkt.id,
+            seq: pkt.seq,
+            flow_key: pkt.flow_key,
+            time: display_time,
+            method: pkt.method,
+            status: None,
+            elapsed_ms: None,
+            protocol: pkt.protocol,
+            host: pkt.host,
+            uri: pkt.uri,
+            query_str: pkt.query_str,
+            line: String::new(),
+        };
+        row.refresh_line();
+
+        let idx = self.rows.len();
+        self.id_to_row_index.insert(row.id.clone(), idx);
+
+        if self.mode == PacketListMode::Search
+            && self
+            .search_matcher
+            .as_ref()
+            .is_some_and(|matcher| matcher.matches(&row))
+        {
+            self.search_rows.push(row.clone());
+        }
+
+        self.rows.push(row);
+    }
+
+    fn on_packet_completed(&mut self, pkt: PacketCompleted) {
+        let Some(&idx) = self.id_to_row_index.get(&pkt.id) else {
+            return;
+        };
+
+        let Some(row) = self.rows.get_mut(idx) else {
+            return;
+        };
+
+        row.status = Some(pkt.status);
+        row.elapsed_ms = Some(pkt.elapsed_ms);
+        row.refresh_line();
+
+        self.rebuild_search_rows_if_needed();
+    }
+
+    fn rebuild_search_rows_if_needed(&mut self) {
+        if self.mode != PacketListMode::Search {
+            return;
+        }
+
+        if let Some(matcher) = self.search_matcher.as_ref() {
+            self.search_rows = self
+                .rows
+                .iter()
+                .filter(|row| matcher.matches(row))
+                .cloned()
+                .collect();
+
+            self.search_selected = self
+                .search_selected
+                .min(self.search_rows.len().saturating_sub(1));
         }
     }
 
@@ -515,22 +636,6 @@ impl PacketListDelegate {
         }
     }
 
-    fn sync_list_and_follow_tail(&mut self) {
-        self.sync_list();
-
-        let len = self.visible_rows_len();
-
-        if len == 0 {
-            return;
-        }
-
-        let last = len - 1;
-
-        if let Some(list) = self.list.get_widget_mut(self.list_id) {
-            list.ensure_visible_scrolloff(last, 2);
-        }
-    }
-
     fn trim_rows_if_needed(&mut self) {
         if self.rows.len() <= MAX_ROWS {
             return;
@@ -539,10 +644,17 @@ impl PacketListDelegate {
         let drain_count = TRIM_ROWS.min(self.rows.len());
         self.rows.drain(0..drain_count);
 
+        self.id_to_row_index.clear();
+        for (idx, row) in self.rows.iter().enumerate() {
+            if !row.id.is_empty() {
+                self.id_to_row_index.insert(row.id.clone(), idx);
+            }
+        }
+
         self.main_selected = self.main_selected.saturating_sub(drain_count);
 
-        if self.mode == PacketListMode::Search {
-            if let Some(matcher) = self.search_matcher.as_ref() {
+        if self.mode == PacketListMode::Search
+            && let Some(matcher) = self.search_matcher.as_ref() {
                 self.search_rows = self
                     .rows
                     .iter()
@@ -550,9 +662,9 @@ impl PacketListDelegate {
                     .cloned()
                     .collect();
 
-                self.search_selected = self.search_selected.min(self.search_rows.len().saturating_sub(1));
-            }
-        }
+            self.search_selected = self.search_selected.min(self.search_rows.len().saturating_sub(1));
+        };
+
 
         self.clamp_current_selected();
     }
@@ -560,10 +672,13 @@ impl PacketListDelegate {
     fn append_system_line(&mut self, line: impl Into<String>) {
         self.rows.push(PacketRow {
             id: String::new(),
+            seq: 0,
             flow_key: String::new(),
             time: "test time".to_string(),
             method: "test method".to_string(),
-            status: 0,
+            status: None,
+            elapsed_ms: None,
+            protocol: "test protocol".to_string(),
             host: "test host".to_string(),
             uri: "test url".to_string(),
             query_str: String::new(),
@@ -572,16 +687,6 @@ impl PacketListDelegate {
 
         self.trim_rows_if_needed();
         self.sync_list();
-    }
-
-    fn toggle_pause(&mut self) {
-        self.paused = !self.paused;
-
-        if self.paused {
-            self.append_system_line("=== paused ===");
-        } else {
-            self.append_system_line("=== resumed ===");
-        }
     }
 
     fn selected_packet_id(&self) -> Option<&str> {
@@ -603,7 +708,7 @@ impl PacketListDelegate {
     fn on_select_packet_with_highlight(&self, id: String, highlight_query: Option<String>) {
         let db = self.dbstate.clone();
         let detail_tx = self.detail_tx.clone();
-        let mut time_formatter = self.time_formatter.clone();
+        let time_formatter = self.time_formatter.clone();
 
         tokio::spawn(async move {
             let req = db.select_request_by_id(id.clone()).await;
@@ -613,33 +718,32 @@ impl PacketListDelegate {
                 (Ok(mut req), Ok(res)) => {
                     if let Some(epoch_ms) = req.epoch_ms {
                         let raw_time = req.time.as_deref().unwrap_or_default();
-                        req.time = Some(time_formatter.format_packet_time(raw_time, epoch_ms));
+                        req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
                     }
 
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
                     let res_body = read_body_file(res.response_body_path.as_deref()).await;
                     let dir = req.flow_dir.as_deref().unwrap();
                     format!(
-                        "id  : {id}\ndir : {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}"
+                        "[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}\n\nid  : {id}\ndir : {dir}"
                     )
                 }
                 (Ok(mut req), Err(e)) => {
                     if let Some(epoch_ms) = req.epoch_ms {
                         let raw_time = req.time.as_deref().unwrap_or_default();
-                        req.time = Some(time_formatter.format_packet_time(raw_time, epoch_ms));
+                        req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
                     }
 
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
                     let dir = req.flow_dir.as_deref().unwrap();
                     format!(
-                        "id  : {id}\ndir : {dir}\n\n[request meta]\n{req}\n\n[request body]\n{req_body}\n\nresponse error: {e}"
+                        "[request meta]\n{req}\n\n[request body]\n{req_body}\n\nresponse error: {e}\n\nid  : {id}\ndir : {dir}"
                     )
                 }
                 (Err(e1), Err(e2)) => {
-                    format!("id: {id}\n\nrequest error: {e1}\nresponse error: {e2}")
+                    format!("request error: {e1}\nresponse error: {e2}\n\nid: {id}")
                 }
-                (Err(e), _) => format!("id: {id}\n\nrequest error: {e}"),
-                // (_, Err(e)) => format!("id: {id}\n\nresponse error: {e}"),
+                (Err(e), _) => format!("request error: {e}\n\nid: {id}"),
             };
 
             let _ = detail_tx.send(UiEvent::ShowDetail {
@@ -716,8 +820,9 @@ impl PacketListDelegate {
 
     fn open_search(&mut self) {
         let search_requests = self.search_requests.clone();
+        let search_history = self.search_history.clone();
 
-        open_search_popup(move |query| {
+        open_search_popup(search_history, move |query| {
             search_requests.lock().push(query);
         });
     }
@@ -725,8 +830,9 @@ impl PacketListDelegate {
     fn open_full_text_search(&mut self) {
         let select_requests = self.full_text_select_requests.clone();
         let search_path = self.capture_flows_dir.clone();
+        let full_text_search_history = self.full_text_search_history.clone();
 
-        open_full_text_search_popup(search_path, move |results, selected, query| {
+        open_full_text_search_popup(search_path, full_text_search_history, move |results, selected, query| {
             select_requests.lock().push(FullTextSelectRequest {
                 results,
                 selected,
@@ -1018,6 +1124,11 @@ impl DelegateWidget for PacketListDelegate {
                 tuie::dirty_layout();
                 return InputResult::Handled;
             }
+            chord!(Esc) => {
+                queue.next();
+                self.show_detail();
+                return InputResult::Handled;
+            }
             chord!(Enter|l) => {
                 queue.next();
                 self.show_detail();
@@ -1150,7 +1261,7 @@ impl DelegateWidget for RootPane {
         self.split.as_mut()
     }
 
-    fn override_on_input(&mut self, queue: &mut InputQueue) -> InputResult {
+    fn override_on_input(&mut self, _queue: &mut InputQueue) -> InputResult {
         self.poll_ui_events();
         InputResult::Rejected
     }
@@ -1184,9 +1295,9 @@ impl ClickablePacketRow {
         })
     }
 
-    fn hit(&self, pos: Vec2<i32>) -> bool {
+    fn hit(&self, pos: Vec2<f32>) -> bool {
         let size = self.get_rect_size();
-        pos.x >= 0 && pos.y >= 0 && pos.x < size.x as i32 && pos.y < size.y as i32
+        pos.x >= 0. && pos.y >= 0. && pos.x < size.x as f32 && pos.y < size.y as f32
     }
 }
 
@@ -1226,7 +1337,7 @@ impl Widget for ClickablePacketRow {
 
         match &event.chord {
             chord!(LeftClick) => {
-                if self.hit(event.mouse_pos) {
+                if self.hit(event.pos) {
                     tuie::focus_widget(self.owner_id);
                     self.row_clicks.lock().push(self.idx);
                     return InputResult::Handled;
@@ -1236,7 +1347,7 @@ impl Widget for ClickablePacketRow {
             chord!(LeftRelease) => {
                 let was_pressed = self.pressed.get();
                 self.pressed.set(false);
-                if was_pressed && self.hit(event.mouse_pos) {
+                if was_pressed && self.hit(event.pos) {
                     tuie::emit(self.owner_id, RowClicked(self.idx));
                     return InputResult::Handled;
                 }
@@ -1248,7 +1359,7 @@ impl Widget for ClickablePacketRow {
 }
 
 pub async fn run_tui(
-    rx: UnboundedReceiver<PacketSummary>,
+    rx: UnboundedReceiver<PacketEvent>,
     quit_tx: watch::Sender<bool>,
     time_display: TimeDisplayConfig,
 ) -> anyhow::Result<()> {
@@ -1262,7 +1373,7 @@ pub async fn run_tui(
         .flex(1)
         .gap(0)
         .children([Split::new(
-            SplitPane::horizontal()
+            SplitPane::new()
                 .children([
                     SplitPaneChild::from(Pane::new()
                         .preferred_width(60)

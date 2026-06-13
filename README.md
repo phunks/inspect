@@ -4,6 +4,9 @@
 
 It captures request/response metadata into SQLite and stores raw headers/bodies on disk per flow.
 
+
+<img src=".github/images/capture.png" width="70%" height="70%">
+
 ## Features
 - HTTP and HTTPS proxying
 - MITM inspection for TLS traffic
@@ -14,9 +17,11 @@ It captures request/response metadata into SQLite and stores raw headers/bodies 
 - Optional SSL key log file output for TLS debugging
 - File-based structured logging via `tracing_subscriber`
 
+
 ## Build
 ```bash
-cargo build
+cargo install cargo-zigbuild
+cargo zigbuild --release
 ```
 
 ## Setup
@@ -93,6 +98,7 @@ capture/
 ```
 
 ## TUI keys
+- `h` / `help`:
 - `q` / `Ctrl+C`: quit
 - `j` / `Down`: move down
 - `k` / `Up`: move up
@@ -131,27 +137,27 @@ windy.com
 ```
 Match URLs using a regular expression.
 ```text
-re:node.*.com
+re:node.*\.com
 ```
 Match URLs containing `windy.com` with status `200`.
 ```text
-text windy.com && stat:200
+windy.com && stat:200
 ```
 Match URLs containing `windy.com` with any `2xx` status.
 ```text
-text windy.com && status:2xx
+windy.com && status:2xx
 ```
 Match `GET` requests with status `404`.
 ```text
-text method:GET && stat:404
+method:GET && stat:404
 ```
 Match `POST` requests with any `5xx` status.
 ```text
-text m:POST && s:5xx
+m:POST && s:5xx
 ```
 Match URL regex and status `200`.
 ```text
-text re:/api/v\d+ && stat:200
+re:/api/v\d+ && stat:200
 ```
 
 
@@ -185,5 +191,40 @@ Use:
 - Metadata is stored in SQLite using SQLx.
 - Non-text bodies may be rendered as hex for inspection.
 - The packet detail view includes the flow directory for easier correlation with on-disk captures.
+- Auto-scroll follows appended items even when scrollbar remains at top. [^1]
 
 
+## WebSocket / WSS handling
+
+WebSocket connections are handled as follows:
+
+1. The WebSocket handshake is treated as an HTTP flow.
+2. After `101 Switching Protocols`, the upgraded WebSocket stream is relayed transparently.
+3. WebSocket payload frames are not captured by inspect.
+
+This is intentional. WebSocket connections can be long-lived and may produce unbounded bidirectional traffic, which does not fit well into inspect's request/response based capture model.
+
+If you need to inspect WebSocket payloads, use packet capture tools together with TLS key logging, for example:
+```bash
+SSLKEYLOGFILE=/tmp/sslkeys.log inspect ... sudo tcpdump -i any -w /tmp/ws.pcap
+```
+
+Then open the pcap in Wireshark and configure the TLS pre-master secret log file:
+```text
+Preferences -> Protocols -> TLS -> (Pre)-Master-Secret log filename
+```
+
+Set it to:
+```text
+/tmp/sslkeys.log
+```
+
+Note that MITM proxying creates separate TLS sessions:
+```text
+client <-> inspect <-> upstream
+```
+
+Depending on where you capture packets and which TLS session you want to decrypt, you may need the corresponding key log.
+
+
+[^1]: Temporary patch applied to tuie 2.0 crate `patches/tuie-2.0-scroll-fix.patch`

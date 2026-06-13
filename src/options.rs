@@ -5,8 +5,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use crate::AnyResult;
-use crate::mitm::dynamic_ca::generate_default_ca_files;
+use crate::mitm::proxy::AnyResult;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum UaProfile {

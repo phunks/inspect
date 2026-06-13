@@ -1,0 +1,112 @@
+diff --git a/src/widget/mod.rs b/src/widget/mod.rs
+index 680011a..5df6a6a 100644
+--- a/src/widget/mod.rs
++++ b/src/widget/mod.rs
+@@ -1287,7 +1287,8 @@ pub fn flow_child(child: &mut dyn Widget, size: Vec2<u16>) -> Vec2<u16> {
+     let layout = child.get_layout();
+     let margin = layout.get_margin_total();
+     let content_alloc = Axis2D::map(|a| size[a].saturating_sub(margin[a]));
+-    let hit = layout.flags.get(LayoutFlags::FLOW_LAYOUT_VALID)
++    let hit = layout.get_dirty() != DirtyImpact::Layout
++        && layout.flags.get(LayoutFlags::FLOW_LAYOUT_VALID)
+         && content_alloc == layout.flow_layout.input_size;
+ 
+     if hit {
+diff --git a/src/widget/scrollbar.rs b/src/widget/scrollbar.rs
+index 17565c4..9f6f688 100644
+--- a/src/widget/scrollbar.rs
++++ b/src/widget/scrollbar.rs
+@@ -231,7 +231,9 @@ impl ScrollbarState {
+         }
+         let old_display = self.display_progress();
+         self.progress = new_progress;
+-        if let Some((anchor_in, anchor_out)) = self.remap {
++        if new_progress <= 0.0 || new_progress >= 1.0 {
++            self.remap = None;
++        } else if let Some((anchor_in, anchor_out)) = self.remap {
+             let new_display = piecewise_remap(new_progress, anchor_in, anchor_out);
+             self.remap = Some((new_progress, new_display));
+         } else if new_progress != old_display {
+@@ -470,6 +472,16 @@ impl ScrollbarState {
+ }
+ 
+ fn piecewise_remap(progress: f32, anchor_in: f32, anchor_out: f32) -> f32 {
++    // Piecewise-linearly remaps `progress` so that:
++    //   0.0 maps to 0.0,
++    //   `anchor_in` maps to `anchor_out`,
++    //   1.0 maps to 1.0.
++    if progress <= 0.0 {
++        return 0.0;
++    }
++    if progress >= 1.0 {
++        return 1.0;
++    }
+     if anchor_in <= 0.0 {
+         return (anchor_out + progress * (1.0 - anchor_out)).clamp(0.0, 1.0);
+     }
+@@ -537,3 +549,11 @@ pub enum ScrollbarInputResult {
+     /// Chord was not relevant to the scrollbar.
+     Rejected,
+ }
++
++#[test]
++fn set_progress_to_endpoint_clears_remap() {
++    let mut state = ScrollbarState::new();
++    state.set_progress(0.3);   // creates remap (0.3, 0.0)
++    state.set_progress(1.0);   // endpoint -> remap must be cleared
++    assert_eq!(state.display_progress(), 1.0);
++}
+\ No newline at end of file
+diff --git a/src/widget/widgets/pane.rs b/src/widget/widgets/pane.rs
+index 0c41e7e..01639d2 100644
+--- a/src/widget/widgets/pane.rs
++++ b/src/widget/widgets/pane.rs
+@@ -227,15 +227,22 @@ impl Pane {
+         }
+         let axis = self.orientation;
+         let cross = axis.flip();
++        let child_extent = |child: &Box<dyn Widget>, a: Axis2D| -> u16 {
++            if self.is_scroll_enabled(a) {
++                flow_output_size(child.get_layout())[a]
++            } else {
++                child.get_outer_size()[a]
++            }
++        };
+         let mut extent = Vec2::of(0u32);
+         extent[axis] = self.children.iter()
+-            .map(|c| c.get_outer_size()[axis] as u32)
++            .map(|c| child_extent(c, axis) as u32)
+             .fold(0u32, u32::saturating_add)
+             .saturating_add(self.get_gap_total());
+         extent[cross] = self.children.iter()
+-            .map(|c| c.get_outer_size()[cross] as u32)
++            .map(|c| child_extent(c, cross))
+             .max()
+-            .unwrap_or(0);
++            .unwrap_or(0) as u32;
+         extent
+     }
+ 
+@@ -1417,6 +1424,22 @@ impl Widget for Pane {
+     fn after_layout(&mut self) {
+         if self.resolve_bar_visibility() {
+             self.dirty_layout();
++            return;
++        }
++        // At this point every child's flow output is committed and this pane's
++        // own viewport (including the scrollbar gutter) is finalized, because
++        // `resolve_bar_visibility` reported no further change. Recompute the
++        // scroll clamp and the scrollbar ratio/progress from this authoritative
++        // viewport/content-size pair.
++        //
++        // Doing it only inside `layout_flow` is not enough: there the gutter and
++        // the child sizes can come from different passes, so the viewport and the
++        // content size are momentarily inconsistent. That mismatch makes the
++        // thumb size (ratio) and the "end" position drift right after a child's
++        // content height changes (e.g. swapping the detail text).
++        if self.is_scrolling() {
++            self.clamp_scroll();
++            self.sync_scrollbars();
+         }
+     }
+ 

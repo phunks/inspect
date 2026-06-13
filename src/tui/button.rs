@@ -31,7 +31,7 @@ impl DelegateWidget for Button {
             chord!(LeftRelease) => {
                 let size = self.get_rect_size();
                 let released_inside = Axis2D::all(|axis| {
-                    event.mouse_pos[axis] >= 0 && event.mouse_pos[axis] < size[axis] as i32
+                    event.pos[axis] >= 0. && event.pos[axis] < size[axis] as f32
                 });
                 if released_inside {
                     tuie::emit(self.get_id(), ClickEvent);

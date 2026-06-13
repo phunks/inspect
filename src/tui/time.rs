@@ -60,6 +60,28 @@ impl TimeFormatter {
         }
     }
 
+    pub(crate) fn format_packet_time_rfc3339(&self, raw_time: &str, epoch_ms: i64) -> String {
+        let Some(dt_utc) = Utc.timestamp_millis_opt(epoch_ms).single() else {
+            return raw_time.to_string();
+        };
+
+        match &self.tz {
+            TuiTimeZone::Utc => {
+                dt_utc.to_rfc3339_opts(chrono::format::SecondsFormat::Millis, true)
+            }
+            TuiTimeZone::Local => {
+                dt_utc
+                    .with_timezone(&Local)
+                    .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
+            }
+            TuiTimeZone::Offset(ofs) => {
+                dt_utc
+                    .with_timezone(ofs)
+                    .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
+            }
+        }
+    }
+
     fn format_includes_tz(fmt: &str) -> bool {
         fmt.contains("%z")
             || fmt.contains("%:z")
@@ -70,27 +92,7 @@ impl TimeFormatter {
 
     pub(crate) fn format_packet_time(&mut self, raw_time: &str, epoch_ms: i64) -> String {
         match self.mode {
-            TimeMode::RFC3339z => {
-                let Some(dt_utc) = Utc.timestamp_millis_opt(epoch_ms).single() else {
-                    return raw_time.to_string();
-                };
-
-                match &self.tz {
-                    TuiTimeZone::Utc => {
-                        dt_utc.to_rfc3339_opts(chrono::format::SecondsFormat::Millis, true)
-                    }
-                    TuiTimeZone::Local => {
-                        dt_utc
-                            .with_timezone(&Local)
-                            .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
-                    }
-                    TuiTimeZone::Offset(ofs) => {
-                        dt_utc
-                            .with_timezone(ofs)
-                            .to_rfc3339_opts(chrono::format::SecondsFormat::Millis, false)
-                    }
-                }
-            }
+            TimeMode::RFC3339z => self.format_packet_time_rfc3339(raw_time, epoch_ms),
             TimeMode::Epoch => epoch_ms.to_string(),
             TimeMode::Elapsed => {
                 let base = *self.first_epoch_ms.get_or_insert(epoch_ms);

@@ -21,10 +21,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use http::header::USER_AGENT;
 use http::HeaderValue;
-use rama::http::client::proxy::layer::{HttpProxyConnector, HttpProxyConnectorLayer};
+use rama::http::client::proxy::layer::HttpProxyConnector;
 use rama::http::layer::timeout::TimeoutLayer;
 use rama::net::tls::client::ServerVerifyMode;
 use crate::options::{ProxyMode, UaProfile};
+use crate::mitm::websocket::mitm_websocket;
 
 type UpstreamCall = Arc<
     dyn Fn(Request) -> Pin<Box<dyn Future<Output = (Response, Option<String>, Option<u16>)> + Send>>
@@ -32,9 +33,16 @@ type UpstreamCall = Arc<
     + Sync,
 >;
 
+type UpstreamWebSocketCall = Arc<
+    dyn Fn(Request) -> Pin<Box<dyn Future<Output = Response> + Send>>
+    + Send
+    + Sync,
+>;
+
 #[derive(Clone)]
 pub struct UpstreamClient {
     call: UpstreamCall,
+    websocket_call: UpstreamWebSocketCall,
 }
 
 impl UpstreamClient {
@@ -42,8 +50,15 @@ impl UpstreamClient {
         (self.call)(req).await
     }
 
-    fn new(call: UpstreamCall) -> Self {
-        Self { call }
+    pub(crate) async fn serve_websocket(&self, req: Request) -> Response {
+        (self.websocket_call)(req).await
+    }
+
+    fn new(call: UpstreamCall, websocket_call: UpstreamWebSocketCall) -> Self {
+        Self {
+            call,
+            websocket_call,
+        }
     }
 }
 
@@ -120,6 +135,8 @@ pub fn new_upstream_client(
             );
 
             let request_ua = request_ua.clone();
+            let http_client = static_client.clone();
+
             let call: UpstreamCall = Arc::new(move |req: Request| {
                 let static_client = static_client.clone();
                 let request_ua = request_ua.clone();
@@ -145,7 +162,7 @@ pub fn new_upstream_client(
                                 .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
                                 .build_client()
                                 .with_jit_layer(
-                                    TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout)
+                                    TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout),
                                 ),
                         )
                     } else {
@@ -171,7 +188,15 @@ pub fn new_upstream_client(
                 })
             });
 
-            UpstreamClient::new(call)
+            let websocket_call: UpstreamWebSocketCall = Arc::new(move |req: Request| {
+                let client = http_client.clone();
+
+                Box::pin(async move {
+                    mitm_websocket(client.as_ref(), req).await
+                })
+            });
+
+            UpstreamClient::new(call, websocket_call)
         }
         ProxyMode::Emulate => {
             let client = Arc::new(
@@ -192,11 +217,15 @@ pub fn new_upstream_client(
             );
 
             let request_ua = request_ua.clone();
+            let http_client = client.clone();
+
             let call: UpstreamCall = Arc::new(move |req: Request| {
                 let client = client.clone();
                 let request_ua = request_ua.clone();
+
                 Box::pin(async move {
                     let mut req = req;
+
                     if let Some(ua) = request_ua {
                         req.headers_mut().insert(USER_AGENT, ua);
                     }
@@ -220,7 +249,15 @@ pub fn new_upstream_client(
                 })
             });
 
-            UpstreamClient::new(call)
+            let websocket_call: UpstreamWebSocketCall = Arc::new(move |req: Request| {
+                let client = http_client.clone();
+
+                Box::pin(async move {
+                    mitm_websocket(client.as_ref(), req).await
+                })
+            });
+
+            UpstreamClient::new(call, websocket_call)
         }
     }
 }

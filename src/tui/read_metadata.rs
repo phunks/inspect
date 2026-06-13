@@ -3,16 +3,15 @@ use std::fmt::Formatter;
 use anyhow::{Context, Result};
 use std::time::Duration;
 use serde::Serialize;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::{Executor, Sqlite};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use rama::http::{Request, Body};
 use rama::telemetry::tracing;
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use crate::CapturePaths;
+use crate::mitm::capture::CapturePaths;
 
 #[derive(Debug)]
 pub enum DbCommand {
@@ -28,6 +27,7 @@ pub enum DbCommand {
 
 #[derive(Clone, Debug)]
 pub struct DbState {
+    #[allow(unused)]
     pub db_pool: SqlitePool,
     pub event_sender: UnboundedSender<DbCommand>,
 }
@@ -186,10 +186,6 @@ impl DbState {
 
         rx.await.context("DB worker dropped SelectResponse response")?
     }
-}
-
-fn sqlite_readonly_url_for_path(path: &std::path::Path) -> String {
-    format!("sqlite:{}?mode=ro", path.display())
 }
 
 async fn select_request<'e, E>(exec: E, id: &str) -> Result<RequestMetadata>

@@ -6,11 +6,10 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSy
 use sqlx::{Executor, Sqlite};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
-use rama::http::{Request, Body};
 use rama::telemetry::tracing;
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use crate::CapturePaths;
+use crate::mitm::capture::CapturePaths;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestMetadata {
@@ -58,7 +57,6 @@ pub struct DbState {
     pub event_sender: UnboundedSender<RequestResponseEvent>,
 }
 
-type DbResult<T> = Result<T, sqlx::Error>;
 impl DbState {
     pub async fn new() -> Result<Self> {
         let paths = CapturePaths::new();
@@ -156,10 +154,6 @@ impl DbState {
         self.db_pool.close().await;
         Ok(())
     }
-}
-
-fn sqlite_url_for_path(path: &std::path::Path) -> String {
-    format!("sqlite:{}", path.display())
 }
 
 async fn insert_request<'e, E>(exec: E, metadata: &RequestMetadata) -> Result<()>

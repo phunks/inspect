@@ -1,9 +1,11 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::info;
-use inspect::mitm_proxy_main;
-use inspect::tui::{run_tui, TimeDisplayConfig};
-use inspect::{AnyError, CapturePaths, PacketSummary};
+use inspect::mitm::proxy::{mitm_proxy_main, PacketEvent};
+use inspect::tui::run_tui;
+use inspect::tui::time::TimeDisplayConfig;
+use inspect::mitm::proxy::AnyError;
+use inspect::mitm::capture::CapturePaths;
 use inspect::mitm::dynamic_ca::generate_default_ca_files;
 use inspect::options::{Opt, Logger};
 
@@ -25,7 +27,7 @@ async fn main() -> Result<(), AnyError> {
     let _ = CapturePaths::initialize_for_process()?;
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let callback = Arc::new(move |p: PacketSummary| {
+    let callback = Arc::new(move |p: PacketEvent| {
         let _ = tx.send(p);
     });
 
@@ -62,8 +64,7 @@ async fn main() -> Result<(), AnyError> {
     if let Err(e) = run_tui(rx, quit_tx.clone(), time_display).await {
         eprintln!("tui error: {e}");
     }
-
-    // proxy_task.abort();
+    
     let _ = quit_tx.send(true);
 
     let _ = proxy_task.await;

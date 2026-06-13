@@ -3,16 +3,18 @@ use std::rc::Rc;
 use chord_macro::chord;
 use tuie::prelude::*;
 use grep_regex::RegexMatcher;
-use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
+use grep_searcher::{Searcher, Sink, SinkMatch};
 use ignore::WalkBuilder;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use crate::tui::button::Button;
 use crate::tui::focus_pane::FocusPane;
 
 const MAX_FULL_TEXT_RESULTS_DISPLAYED: usize = 500;
 const MAX_FULL_TEXT_RESULT_LINE_CHARS: usize = 96;
 const MIN_FULL_TEXT_PREVIEW_CHARS: usize = 32;
+const MAX_SEARCH_HISTORY: usize = 100;
 
 struct PopupHost {
     root: Box<Pane>,
@@ -20,6 +22,8 @@ struct PopupHost {
     search_button_id: WidgetId<Button>,
     cancel_button_id: WidgetId<Button>,
     popup_id: Rc<Cell<Option<WidgetId>>>,
+    history: Arc<parking_lot::Mutex<Vec<String>>>,
+    history_selected: Option<usize>,
     on_search: Box<dyn Fn(String)>,
 }
 
@@ -30,6 +34,7 @@ impl PopupHost {
         search_button_id: WidgetId<Button>,
         cancel_button_id: WidgetId<Button>,
         popup_id: Rc<Cell<Option<WidgetId>>>,
+        history: Arc<parking_lot::Mutex<Vec<String>>>,
         on_search: impl Fn(String) + 'static,
     ) -> Box<Self> {
         Box::new(Self {
@@ -38,6 +43,8 @@ impl PopupHost {
             search_button_id,
             cancel_button_id,
             popup_id,
+            history,
+            history_selected: None,
             on_search: Box::new(on_search),
         })
     }
@@ -49,14 +56,69 @@ impl PopupHost {
     }
 
     fn search(&self) {
-        let query = self
-            .root
-            .get_widget(self.input_id)
-            .map(|input| input.get_string())
-            .unwrap_or_default();
+        let query = self.query();
+
+        remember_search_query(&self.history, &query);
 
         (self.on_search)(query);
         self.close();
+    }
+
+    fn query(&self) -> String {
+        self.root
+            .get_widget(self.input_id)
+            .map(|input| input.get_string())
+            .unwrap_or_default()
+    }
+
+    fn set_query(&mut self, query: impl Into<String>) {
+        if let Some(input) = self.root.get_widget_mut(self.input_id) {
+            input.set_content(query.into());
+        }
+        tuie::dirty_layout();
+    }
+
+    fn move_history_up(&mut self) {
+        let len = history_len(&self.history);
+
+        if len == 0 {
+            return;
+        }
+
+        let next = match self.history_selected {
+            Some(idx) => idx.saturating_sub(1),
+            None => len - 1,
+        };
+
+        self.history_selected = Some(next);
+
+        if let Some(query) = history_item(&self.history, next) {
+            self.set_query(query);
+        }
+    }
+
+    fn move_history_down(&mut self) {
+        let len = history_len(&self.history);
+
+        if len == 0 {
+            return;
+        }
+
+        let Some(idx) = self.history_selected else {
+            return;
+        };
+
+        if idx + 1 < len {
+            let next = idx + 1;
+            self.history_selected = Some(next);
+
+            if let Some(query) = history_item(&self.history, next) {
+                self.set_query(query);
+            }
+        } else {
+            self.history_selected = None;
+            self.set_query("");
+        }
     }
 }
 
@@ -72,6 +134,16 @@ impl DelegateWidget for PopupHost {
             chord!(Esc) => {
                 queue.next();
                 self.close();
+                InputResult::Handled
+            }
+            chord!(Up) => {
+                queue.next();
+                self.move_history_up();
+                InputResult::Handled
+            }
+            chord!(Down) => {
+                queue.next();
+                self.move_history_down();
                 InputResult::Handled
             }
             chord!(Enter) => {
@@ -92,7 +164,10 @@ impl DelegateWidget for PopupHost {
     }
 }
 
-pub fn open_search_popup(on_search: impl Fn(String) + 'static) {
+pub fn open_search_popup(
+    history: Arc<parking_lot::Mutex<Vec<String>>>,
+    on_search: impl Fn(String) + 'static,
+) {
     let mut input_id = WidgetId::EMPTY;
     let mut search_button_id = WidgetId::EMPTY;
     let mut cancel_button_id = WidgetId::EMPTY;
@@ -106,9 +181,7 @@ pub fn open_search_popup(on_search: impl Fn(String) + 'static) {
                     .word_wrap()
                     .flex(1)
                     .id(&mut input_id),
-            ])
-            .x_scroll(Scrollbar::AutoHide)
-            .y_scroll(Scrollbar::AutoHide),
+            ]),
     ]);
 
     let body = Pane::new()
@@ -143,6 +216,7 @@ pub fn open_search_popup(on_search: impl Fn(String) + 'static) {
         search_button_id,
         cancel_button_id,
         popup_id.clone(),
+        history,
         on_search,
     );
 
@@ -150,7 +224,7 @@ pub fn open_search_popup(on_search: impl Fn(String) + 'static) {
 
     tuie::open_popup(
         Popup::new(host)
-            .dismissible(true),
+            .dismissible(),
     );
 }
 
@@ -159,6 +233,7 @@ pub(crate) struct FullTextSearchResult {
     pub flow_key: String,
     pub path: String,
     pub line_number: u64,
+    #[allow(dead_code)]
     pub preview: String,
     pub display_line: String,
 }
@@ -168,6 +243,15 @@ fn flow_key_from_path(path: &Path) -> Option<String> {
         .and_then(|parent| parent.file_name())
         .and_then(|name| name.to_str())
         .map(str::to_string)
+}
+
+fn sequence_from_flow_key(flow_key: &str) -> u64 {
+    flow_key
+        .split_once('-')
+        .map(|(seq, _)| seq)
+        .unwrap_or(flow_key)
+        .parse::<u64>()
+        .unwrap_or(u64::MAX)
 }
 
 fn trim_preview(line: &str, max_chars: usize) -> String {
@@ -191,12 +275,6 @@ fn trim_preview(line: &str, max_chars: usize) -> String {
     format!("{head} ... {tail}")
 }
 
-// fn compact_result_path(path: &PathBuf) -> Option<PathBuf> {
-//     let parent_name = path.parent()?.file_name()?;
-//     let file_name = path.file_name()?;
-//     Some(Path::new(parent_name).join(file_name))
-// }
-
 fn compact_result_path(path: &std::path::Path) -> String {
     let file_name = path
         .file_name()
@@ -216,12 +294,6 @@ pub fn search_capture_files(
     search_path: impl AsRef<std::path::Path>,
     query: &str,
 ) -> anyhow::Result<Vec<FullTextSearchResult>> {
-    use grep_regex::RegexMatcher;
-    use grep_searcher::{Searcher, Sink, SinkMatch};
-    use ignore::WalkBuilder;
-    use std::io;
-    use std::path::PathBuf;
-
     struct CollectSink {
         path: PathBuf,
         matcher: FullTextMatcher,
@@ -283,7 +355,7 @@ pub fn search_capture_files(
             continue;
         };
 
-        if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file())  {
             continue;
         }
 
@@ -301,7 +373,44 @@ pub fn search_capture_files(
         results.extend(sink.results);
     }
 
+    results.sort_by_key(|result| {
+        (
+            sequence_from_flow_key(&result.flow_key),
+            result.line_number,
+            result.path.clone(),
+        )
+    });
+
     Ok(results)
+}
+
+fn remember_search_query(history: &Arc<parking_lot::Mutex<Vec<String>>>, query: &str) {
+    let query = query.trim();
+
+    if query.is_empty() {
+        return;
+    }
+
+    let mut history = history.lock();
+
+    if let Some(idx) = history.iter().position(|item| item == query) {
+        history.remove(idx);
+    }
+
+    history.push(query.to_string());
+
+    if history.len() > MAX_SEARCH_HISTORY {
+        let overflow = history.len() - MAX_SEARCH_HISTORY;
+        history.drain(0..overflow);
+    }
+}
+
+fn history_item(history: &Arc<parking_lot::Mutex<Vec<String>>>, idx: usize) -> Option<String> {
+    history.lock().get(idx).cloned()
+}
+
+fn history_len(history: &Arc<parking_lot::Mutex<Vec<String>>>) -> usize {
+    history.lock().len()
 }
 
 #[derive(Clone, Debug)]
@@ -388,8 +497,6 @@ impl FullTextMatcher {
     }
 }
 
-
-
 #[derive(Clone, Debug)]
 struct FullTextResultListContext {
     results: Vec<FullTextSearchResult>,
@@ -417,9 +524,9 @@ impl ClickableFullTextSearchResult {
         })
     }
 
-    fn hit(&self, pos: Vec2<i32>) -> bool {
+    fn hit(&self, pos: Vec2<f32>) -> bool {
         let size = self.get_rect_size();
-        pos.x >= 0 && pos.y >= 0 && pos.x < size.x as i32 && pos.y < size.y as i32
+        pos.x >= 0. && pos.y >= 0. && pos.x < size.x as f32 && pos.y < size.y as f32
     }
 }
 
@@ -438,7 +545,7 @@ impl Widget for ClickableFullTextSearchResult {
 
     fn render(&self, mut ctx: RenderContext) {
         ctx.clear();
-        let _ = write!(ctx, "{}", self.text);
+        write!(ctx, "{}", self.text);
     }
 
     fn measure_constraints(&mut self) -> Constraints {
@@ -459,7 +566,7 @@ impl Widget for ClickableFullTextSearchResult {
 
         match &event.chord {
             chord!(LeftClick) => {
-                if self.hit(event.mouse_pos) {
+                if self.hit(event.pos) {
                     self.result_clicks.borrow_mut().push(self.result_idx);
                     return InputResult::Handled;
                 }
@@ -482,9 +589,12 @@ struct FullTextSearchPopupHost {
     result_clicks: Rc<RefCell<Vec<usize>>>,
     current_results: Vec<FullTextSearchResult>,
     search_path: PathBuf,
+    history: Arc<parking_lot::Mutex<Vec<String>>>,
+    history_selected: Option<usize>,
     on_select: Box<dyn Fn(Vec<FullTextSearchResult>, usize, String)>,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl FullTextSearchPopupHost {
     fn new(
         root: Box<Pane>,
@@ -496,6 +606,7 @@ impl FullTextSearchPopupHost {
         popup_id: Rc<Cell<Option<WidgetId>>>,
         result_clicks: Rc<RefCell<Vec<usize>>>,
         search_path: PathBuf,
+        history: Arc<parking_lot::Mutex<Vec<String>>>,
         on_select: impl Fn(Vec<FullTextSearchResult>, usize, String) + 'static,
     ) -> Box<Self> {
         Box::new(Self {
@@ -509,6 +620,8 @@ impl FullTextSearchPopupHost {
             result_clicks,
             current_results: Vec::new(),
             search_path,
+            history,
+            history_selected: None,
             on_select: Box::new(on_select),
         })
     }
@@ -524,6 +637,56 @@ impl FullTextSearchPopupHost {
             .get_widget(self.input_id)
             .map(|input| input.get_string())
             .unwrap_or_default()
+    }
+
+    fn set_query(&mut self, query: impl Into<String>) {
+        if let Some(input) = self.root.get_widget_mut(self.input_id) {
+            input.set_content(query.into());
+        }
+        tuie::dirty_layout();
+    }
+
+    fn move_history_up(&mut self) {
+        let len = history_len(&self.history);
+
+        if len == 0 {
+            return;
+        }
+
+        let next = match self.history_selected {
+            Some(idx) => idx.saturating_sub(1),
+            None => len - 1,
+        };
+
+        self.history_selected = Some(next);
+
+        if let Some(query) = history_item(&self.history, next) {
+            self.set_query(query);
+        }
+    }
+
+    fn move_history_down(&mut self) {
+        let len = history_len(&self.history);
+
+        if len == 0 {
+            return;
+        }
+
+        let Some(idx) = self.history_selected else {
+            return;
+        };
+
+        if idx + 1 < len {
+            let next = idx + 1;
+            self.history_selected = Some(next);
+
+            if let Some(query) = history_item(&self.history, next) {
+                self.set_query(query);
+            }
+        } else {
+            self.history_selected = None;
+            self.set_query("");
+        }
     }
 
     fn set_status(&mut self, text: impl Into<String>) {
@@ -574,6 +737,8 @@ impl FullTextSearchPopupHost {
             self.set_status("Enter text or regex to search.");
             return;
         }
+
+        remember_search_query(&self.history, &query);
 
         self.set_status("Searching...");
 
@@ -639,6 +804,16 @@ impl DelegateWidget for FullTextSearchPopupHost {
                 self.close();
                 InputResult::Handled
             }
+            chord!(Up) => {
+                queue.next();
+                self.move_history_up();
+                InputResult::Handled
+            }
+            chord!(Down) => {
+                queue.next();
+                self.move_history_down();
+                InputResult::Handled
+            }
             chord!(Enter) => {
                 queue.next();
                 self.run_search();
@@ -659,6 +834,7 @@ impl DelegateWidget for FullTextSearchPopupHost {
 
 pub fn open_full_text_search_popup(
     search_path: PathBuf,
+    history: Arc<parking_lot::Mutex<Vec<String>>>,
     on_select: impl Fn(Vec<FullTextSearchResult>, usize, String) + 'static,
 ) {
     let mut input_id = WidgetId::EMPTY;
@@ -678,9 +854,7 @@ pub fn open_full_text_search_popup(
                     .word_wrap()
                     .flex(1)
                     .id(&mut input_id),
-            ])
-            .x_scroll(Scrollbar::AutoHide)
-            .y_scroll(Scrollbar::AutoHide),
+            ]),
     ]);
 
     let mut results_list = List::new()
@@ -760,6 +934,7 @@ pub fn open_full_text_search_popup(
         popup_id.clone(),
         result_clicks,
         search_path,
+        history,
         on_select,
     );
 
@@ -767,7 +942,7 @@ pub fn open_full_text_search_popup(
 
     tuie::open_popup(
         Popup::new(host)
-            .dismissible(true),
+            .dismissible(),
     );
 }
 
