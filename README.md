@@ -132,6 +132,11 @@ Supported conditions:
       Also works with `status:` and `stat:`
 - HTTP method
     - Prefixes: `method:`, `meth:`, `m:`
+- Combine conditions with `&&`
+- Negate a condition with `!`
+    - Examples: `!s:200`, `s:2xx && !s:204`, `!s:-`
+- Use comma-separated values for OR within the same field
+    - Examples: `s:200,403`, `s:2xx,3xx`, `method:GET,POST`
 
 Examples:
 

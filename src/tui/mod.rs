@@ -100,12 +100,15 @@ impl PacketRow {
 
 #[derive(Clone, Debug)]
 enum SearchCondition {
+    Not(Box<SearchCondition>),
+    Any(Vec<SearchCondition>),
     UrlContains(String),
     UrlRegex {
         _pattern: String,
         regex: Regex,
     },
     Method(String),
+    MethodAny(Vec<String>),
     Status(u16),
     StatusClass(u16),
     NoStatus,
@@ -160,12 +163,27 @@ impl SearchMatcher {
 
 impl SearchCondition {
     fn parse(part: &str) -> Result<Self, regex::Error> {
+        let part = part.trim();
+
+        if let Some(rest) = part.strip_prefix('!') {
+            return Ok(Self::Not(Box::new(Self::parse(rest.trim())?)));
+        }
+
         if let Some(value) = part
             .strip_prefix("method:")
             .or_else(|| part.strip_prefix("meth:"))
             .or_else(|| part.strip_prefix("m:"))
         {
-            return Ok(Self::Method(value.trim().to_ascii_uppercase()));
+            let methods = split_csv_values(value)
+                .into_iter()
+                .map(|method| method.to_ascii_uppercase())
+                .collect::<Vec<_>>();
+
+            if methods.len() == 1 {
+                return Ok(Self::Method(methods.into_iter().next().unwrap()));
+            }
+
+            return Ok(Self::MethodAny(methods));
         }
 
         if let Some(value) = part
@@ -173,22 +191,18 @@ impl SearchCondition {
             .or_else(|| part.strip_prefix("stat:"))
             .or_else(|| part.strip_prefix("s:"))
         {
-            let value = value.trim();
+            let values = split_csv_values(value);
 
-            if value == "-" || value == "----" || value.eq_ignore_ascii_case("none") {
-                return Ok(Self::NoStatus);
+            if values.len() == 1 {
+                return Ok(Self::parse_status_value(&values[0], part));
             }
 
-            if let Some(prefix) = value.strip_suffix("xx")
-                && let Ok(class) = prefix.parse::<u16>() {
-                return Ok(Self::StatusClass(class));
-            };
-
-            if let Ok(status) = value.parse::<u16>() {
-                return Ok(Self::Status(status));
-            }
-
-            return Ok(Self::UrlContains(part.to_ascii_lowercase()));
+            return Ok(Self::Any(
+                values
+                    .into_iter()
+                    .map(|value| Self::parse_status_value(&value, part))
+                    .collect(),
+            ));
         }
 
         if let Some(pattern) = part.strip_prefix("re:") {
@@ -202,14 +216,40 @@ impl SearchCondition {
         Ok(Self::UrlContains(part.to_ascii_lowercase()))
     }
 
+    fn parse_status_value(value: &str, original_part: &str) -> Self {
+        let value = value.trim();
+
+        if value == "-" || value == "----" || value.eq_ignore_ascii_case("none") {
+            return Self::NoStatus;
+        }
+
+        if let Some(prefix) = value.strip_suffix("xx")
+            && let Ok(class) = prefix.parse::<u16>() {
+            return Self::StatusClass(class);
+        };
+
+        if let Ok(status) = value.parse::<u16>() {
+            return Self::Status(status);
+        }
+
+        Self::UrlContains(original_part.to_ascii_lowercase())
+    }
+
     fn matches(&self, row: &PacketRow) -> bool {
         match self {
+            Self::Not(condition) => !condition.matches(row),
+            Self::Any(conditions) => conditions
+                .iter()
+                .any(|condition| condition.matches(row)),
             Self::UrlContains(query) => row
                 .url_text()
                 .to_ascii_lowercase()
                 .contains(query),
             Self::UrlRegex { regex, .. } => regex.is_match(&row.url_text()),
             Self::Method(method) => row.method.eq_ignore_ascii_case(method),
+            Self::MethodAny(methods) => methods
+                .iter()
+                .any(|method| row.method.eq_ignore_ascii_case(method)),
             Self::Status(status) => row.status == Some(*status),
             Self::StatusClass(class) => row
                 .status
@@ -217,6 +257,15 @@ impl SearchCondition {
             Self::NoStatus => row.status.is_none(),
         }
     }
+}
+
+fn split_csv_values(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug)]
