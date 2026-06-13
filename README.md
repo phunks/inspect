@@ -40,6 +40,11 @@ cargo run -- --generate-ca
 cargo run -- --ip 127.0.0.1 --port 62019
 ```
 
+Open an existing capture in read-only viewer mode:
+```bash
+cargo run -- --view-capture capture/20260602143000Z
+```
+
 ## Usage
 ```text
 Usage: inspect [OPTIONS]
@@ -98,6 +103,16 @@ capture/
     response.head
     response.body
 ```
+## Viewer mode
+Use --view-capture to open an existing capture directory without starting the proxy.
+```bash
+inspect --view-capture capture/20260602143000Z
+```
+Viewer mode is read-only:
+- The proxy is not started.
+- No new capture directory is created.
+- `index.sqlite` is opened read-only.
+- Existing `flows/` files are used for detail view and full text search.
 
 ## TUI keys
 - `h` / `help`:
@@ -164,6 +179,26 @@ Match `POST` requests with any `5xx` status.
 ```text
 m:POST && s:5xx
 ```
+Match requests with no response.
+```text
+s:-
+```
+Match responses that are not `200`.
+```text
+!s:200
+```
+Match successful responses except `204`.
+```text
+s:2xx && !s:204
+```
+Match either `200` or `403`.
+```text
+s:200,403
+```
+Match either `GET` or `POST` requests with a response.
+```text
+method:GET,POST && !s:-
+```
 Match URL regex and status `200`.
 ```text
 re:/api/v\d+ && stat:200
@@ -215,9 +250,12 @@ This is intentional. WebSocket connections can be long-lived and may produce unb
 
 If you need to inspect WebSocket payloads, use packet capture tools together with TLS key logging, for example:
 ```bash
-SSLKEYLOGFILE=/tmp/sslkeys.log inspect ... sudo tcpdump -i any -w /tmp/ws.pcap
+SSLKEYLOGFILE=/tmp/sslkeys.log inspect --preshared-key-log /tmp/sslkeys.log ...
 ```
-
+Then capture packets in another terminal:
+```bash
+sudo tcpdump -i any -w /tmp/ws.pcap
+```
 Then open the pcap in Wireshark and configure the TLS pre-master secret log file:
 ```text
 Preferences -> Protocols -> TLS -> (Pre)-Master-Secret log filename
@@ -236,4 +274,4 @@ client <-> inspect <-> upstream
 Depending on where you capture packets and which TLS session you want to decrypt, you may need the corresponding key log.
 
 
-[^1]: Temporary patch applied to tuie 2.0 crate `patches/tuie-2.0-scroll-fix.patch`
+[^1]: Temporary patch applied to tuie 0.2 crate `patches/tuie-0.2-scroll-fix.patch`
