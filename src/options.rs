@@ -39,6 +39,9 @@ pub struct Opt {
     /// Set ip to listen on
     pub ip: String,
 
+    #[arg(long, value_name = "DIR", help = "Open an existing capture directory in read-only TUI view mode")]
+    pub view_capture: Option<std::path::PathBuf>,
+
     /// Log verbosity level. -vv for more verbosity.
     /// Environmental variable `RUST_LOG` overrides this flag!
     #[arg(short, action = ArgAction::Count, default_value_t = 0)]

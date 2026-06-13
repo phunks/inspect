@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use sqlx::{Executor, Sqlite};
+use sqlx::{Executor, FromRow, Sqlite};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -13,6 +13,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::mitm::capture::CapturePaths;
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum DbCommand {
     SelectRequest {
@@ -23,13 +24,31 @@ pub enum DbCommand {
         id: String,
         reply: oneshot::Sender<Result<ResponseMetadata>>,
     },
+    SelectPacketSummaries {
+        reply: oneshot::Sender<Result<Vec<PacketSummary>>>,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub struct DbState {
-    #[allow(unused)]
-    pub db_pool: SqlitePool,
+    _db_pool: SqlitePool,
     pub event_sender: UnboundedSender<DbCommand>,
+}
+
+#[derive(Clone, Debug, FromRow)]
+pub struct PacketSummary {
+    pub id: String,
+    pub seq: i64,
+    pub flow_key: String,
+    pub time: Option<String>,
+    pub epoch_ms: Option<i64>,
+    pub method: Option<String>,
+    pub protocol: Option<String>,
+    pub host: Option<String>,
+    pub uri: Option<String>,
+    pub query_str: Option<String>,
+    pub status: Option<i64>,
+    pub elapsed: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,13 +171,17 @@ impl DbState {
                         let result = select_response(&pool_clone, &id).await;
                         let _ = reply.send(result);
                     }
+                    DbCommand::SelectPacketSummaries { reply } => {
+                        let result = select_packet_summaries(&pool_clone).await;
+                        let _ = reply.send(result);
+                    }
                 }
             }
             tracing::info!("read DB pool shutting down");
         });
 
         Ok(Self {
-            db_pool,
+            _db_pool: db_pool,
             event_sender,
         })
     }
@@ -186,6 +209,48 @@ impl DbState {
 
         rx.await.context("DB worker dropped SelectResponse response")?
     }
+
+    pub async fn select_packet_summaries(&self) -> Result<Vec<PacketSummary>> {
+        let (tx, rx) = oneshot::channel();
+        self.event_sender
+            .send(DbCommand::SelectPacketSummaries {
+                reply: tx,
+            })
+            .context("Failed to send SelectPacketSummaries command")?;
+
+        rx.await.context("DB worker dropped SelectPacketSummaries response")?
+    }
+}
+
+async fn select_packet_summaries<'e, E>(exec: E) -> Result<Vec<PacketSummary>>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let rows = sqlx::query_as::<_, PacketSummary>(
+        r#"
+        SELECT
+            requests.id AS id,
+            requests.seq AS seq,
+            requests.flow_key AS flow_key,
+            requests.time AS time,
+            requests.epoch_ms AS epoch_ms,
+            requests.method AS method,
+            requests.protocol AS protocol,
+            requests.host AS host,
+            requests.uri AS uri,
+            requests.query_str AS query_str,
+            COALESCE(responses.upstream_status, responses.status) AS status,
+            responses.elapsed AS elapsed
+        FROM requests
+        LEFT JOIN responses ON responses.id = requests.id
+        ORDER BY requests.seq ASC
+        "#
+    )
+        .fetch_all(exec)
+        .await
+        .context("Failed to select packet summaries")?;
+
+    Ok(rows)
 }
 
 async fn select_request<'e, E>(exec: E, id: &str) -> Result<RequestMetadata>

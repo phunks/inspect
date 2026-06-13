@@ -21,11 +21,18 @@ use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTex
 use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketStarted};
 use crate::mitm::capture::CapturePaths;
+use crate::tui::read_metadata::PacketSummary;
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
 const DETAIL_PLACEHOLDER_TEXT: &str = "Select row and press Enter";
 pub const TUI_EVENT_BUFFER: usize = 4096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TuiMode {
+    Capture,
+    Viewer,
+}
 
 #[derive(Clone, Debug, Default)]
 struct PacketRow {
@@ -95,13 +102,13 @@ impl PacketRow {
 enum SearchCondition {
     UrlContains(String),
     UrlRegex {
-        #[allow(unused)]
-        pattern: String,
+        _pattern: String,
         regex: Regex,
     },
     Method(String),
     Status(u16),
     StatusClass(u16),
+    NoStatus,
 }
 
 #[derive(Clone, Debug)]
@@ -168,9 +175,13 @@ impl SearchCondition {
         {
             let value = value.trim();
 
+            if value == "-" || value == "----" || value.eq_ignore_ascii_case("none") {
+                return Ok(Self::NoStatus);
+            }
+
             if let Some(prefix) = value.strip_suffix("xx")
                 && let Ok(class) = prefix.parse::<u16>() {
-                    return Ok(Self::StatusClass(class));
+                return Ok(Self::StatusClass(class));
             };
 
             if let Ok(status) = value.parse::<u16>() {
@@ -183,7 +194,7 @@ impl SearchCondition {
         if let Some(pattern) = part.strip_prefix("re:") {
             let regex = Regex::new(pattern)?;
             return Ok(Self::UrlRegex {
-                pattern: pattern.to_string(),
+                _pattern: pattern.to_string(),
                 regex,
             });
         }
@@ -203,6 +214,7 @@ impl SearchCondition {
             Self::StatusClass(class) => row
                 .status
                 .is_some_and(|status| status / 100 == *class),
+            Self::NoStatus => row.status.is_none(),
         }
     }
 }
@@ -221,7 +233,7 @@ struct RowClicked(usize);
 
 #[derive(Clone, Debug)]
 struct PacketListItem {
-    row_index: usize,
+    _row_index: usize,
     line: Arc<str>,
 }
 
@@ -243,6 +255,7 @@ pub struct PacketListDelegate {
     rows: Vec<PacketRow>,
     search_indices: Vec<usize>,
     mode: PacketListMode,
+    _tui_mode: TuiMode,
     main_selected: usize,
     search_selected: usize,
     search_query: String,
@@ -285,30 +298,53 @@ impl PacketListDelegate {
         rx: mpsc::Receiver<PacketEvent>,
         detail_tx: UnboundedSender<UiEvent>,
         time_display: TimeDisplayConfig,
+        tui_mode: TuiMode,
     ) -> Box<Self> {
-        let rows = vec![PacketRow {
-            id: String::new(),
-            seq: 0,
-            flow_key: String::new(),
-            time: String::new(),
-            method: String::new(),
-            status: None,
-            elapsed_ms: None,
-            protocol: String::new(),
-            host: String::new(),
-            uri: String::new(),
-            query_str: String::new(),
-            line: Arc::<str>::from(Self::WAITING_ROW_TEXT),
-        }];
-
-        let selected = 0;
         let row_clicks = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let search_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let full_text_select_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let search_history = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let full_text_search_history = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let capture_flows_dir = CapturePaths::new().flows_dir;
-        let time_formatter = TimeFormatter::new(time_display);
+        let mut time_formatter = TimeFormatter::new(time_display);
+        let dbstate = Arc::new(DbState::new().await.expect("dbstate"));
+
+        let rows = match dbstate.select_packet_summaries().await {
+            Ok(summaries) if !summaries.is_empty() => summaries
+                .into_iter()
+                .map(|summary| Self::row_from_summary(summary, &mut time_formatter))
+                .collect(),
+            Ok(_) | Err(_) => vec![PacketRow {
+                id: String::new(),
+                seq: 0,
+                flow_key: String::new(),
+                time: String::new(),
+                method: String::new(),
+                status: None,
+                elapsed_ms: None,
+                protocol: String::new(),
+                host: String::new(),
+                uri: String::new(),
+                query_str: String::new(),
+                line: Arc::<str>::from(Self::WAITING_ROW_TEXT),
+            }],
+        };
+
+        let selected = match tui_mode {
+            TuiMode::Capture => rows.len().saturating_sub(1),
+            TuiMode::Viewer => 0,
+        };
+        let id_to_row_index = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                if row.id.is_empty() {
+                    None
+                } else {
+                    Some((row.id.clone(), idx))
+                }
+            })
+            .collect();
 
         let mut list_id = WidgetId::EMPTY;
         let mut list_title_id = WidgetId::EMPTY;
@@ -326,7 +362,7 @@ impl PacketListDelegate {
                 .iter()
                 .enumerate()
                 .map(|(row_index, row)| PacketListItem {
-                    row_index,
+                    _row_index: row_index,
                     line: row.line.clone(),
                 })
                 .collect::<Vec<_>>()
@@ -345,7 +381,7 @@ impl PacketListDelegate {
                     ClickablePacketRow::new(
                         ctx.owner_id,
                         ctx.row_clicks.clone(),
-                        item.row_index,
+                        idx,
                         item.line.clone(),
                         idx == ctx.selected,
                     ) as Box<dyn Widget>
@@ -367,6 +403,7 @@ impl PacketListDelegate {
             rows,
             search_indices: Vec::new(),
             mode: PacketListMode::Main,
+            _tui_mode: tui_mode,
             main_selected: selected,
             search_selected: 0,
             search_query: String::new(),
@@ -378,7 +415,7 @@ impl PacketListDelegate {
             list_id,
             list_title_id,
             task: TaskHandle::EMPTY,
-            dbstate: Arc::new(DbState::new().await.expect("dbstate")),
+            dbstate,
             detail_tx,
             row_clicks,
             search_requests,
@@ -390,11 +427,39 @@ impl PacketListDelegate {
             retained_full_text_query: None,
             capture_flows_dir,
             time_formatter,
-            id_to_row_index: HashMap::new(),
+            id_to_row_index,
         });
 
+        this.sync_list_and_reveal_selected();
         this.task = tuie::schedule(this.get_id(), Self::TICK_INTERVAL, Self::tick);
         this
+    }
+
+    fn row_from_summary(summary: PacketSummary, time_formatter: &mut TimeFormatter) -> PacketRow {
+        let raw_time = summary.time.as_deref().unwrap_or_default();
+        let display_time = if let Some(epoch_ms) = summary.epoch_ms {
+            time_formatter.format_packet_time(raw_time, epoch_ms)
+        } else {
+            raw_time.to_string()
+        };
+
+        let mut row = PacketRow {
+            id: summary.id,
+            seq: summary.seq.max(0) as u64,
+            flow_key: summary.flow_key,
+            time: display_time,
+            method: summary.method.unwrap_or_default(),
+            status: summary.status.map(|status| status as u16),
+            elapsed_ms: summary.elapsed,
+            protocol: summary.protocol.unwrap_or_default(),
+            host: summary.host.unwrap_or_default(),
+            uri: summary.uri.unwrap_or_default(),
+            query_str: summary.query_str.unwrap_or_default(),
+            line: Arc::<str>::from(""),
+        };
+
+        row.refresh_line();
+        row
     }
 
     fn tick(&mut self) {
@@ -615,7 +680,7 @@ impl PacketListDelegate {
                 .iter()
                 .enumerate()
                 .map(|(row_index, row)| PacketListItem {
-                    row_index,
+                    _row_index: row_index,
                     line: row.line.clone(),
                 })
                 .collect::<Vec<_>>()
@@ -625,7 +690,7 @@ impl PacketListDelegate {
                 .iter()
                 .filter_map(|&row_index| {
                     self.rows.get(row_index).map(|row| PacketListItem {
-                        row_index,
+                        _row_index: row_index,
                         line: row.line.clone(),
                     })
                 })
@@ -650,7 +715,7 @@ impl PacketListDelegate {
                         ClickablePacketRow::new(
                             ctx.owner_id,
                             ctx.row_clicks.clone(),
-                            item.row_index,
+                            idx,
                             item.line.clone(),
                             idx == ctx.selected,
                         ) as Box<dyn Widget>
@@ -1334,7 +1399,7 @@ struct ClickablePacketRow {
     layout: Layout,
     owner_id: WidgetId<PacketListDelegate>,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
-    idx: usize,
+    visible_idx: usize,
     text: Arc<str>,
     selected: bool,
     pressed: std::cell::Cell<bool>,
@@ -1344,7 +1409,7 @@ impl ClickablePacketRow {
     fn new(
         owner_id: WidgetId<PacketListDelegate>,
         row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
-        idx: usize,
+        visible_idx: usize,
         text: Arc<str>,
         selected: bool,
     ) -> Box<Self> {
@@ -1352,7 +1417,7 @@ impl ClickablePacketRow {
             layout: Layout::new(),
             owner_id,
             row_clicks,
-            idx,
+            visible_idx,
             text,
             selected,
             pressed: std::cell::Cell::new(false),
@@ -1403,7 +1468,7 @@ impl Widget for ClickablePacketRow {
             chord!(LeftClick) => {
                 if self.hit(event.pos) {
                     tuie::focus_widget(self.owner_id);
-                    self.row_clicks.lock().push(self.idx);
+                    self.row_clicks.lock().push(self.visible_idx);
                     return InputResult::Handled;
                 }
                 InputResult::Rejected
@@ -1412,7 +1477,7 @@ impl Widget for ClickablePacketRow {
                 let was_pressed = self.pressed.get();
                 self.pressed.set(false);
                 if was_pressed && self.hit(event.pos) {
-                    tuie::emit(self.owner_id, RowClicked(self.idx));
+                    tuie::emit(self.owner_id, RowClicked(self.visible_idx));
                     return InputResult::Handled;
                 }
                 InputResult::Rejected
@@ -1426,10 +1491,21 @@ pub async fn run_tui(
     rx: mpsc::Receiver<PacketEvent>,
     quit_tx: watch::Sender<bool>,
     time_display: TimeDisplayConfig,
+    tui_mode: TuiMode,
 ) -> anyhow::Result<()> {
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
 
-    let app: Box<dyn Widget> = PacketListDelegate::new(rx, detail_tx, time_display).await;
+    let app: Box<dyn Widget> = PacketListDelegate::new(
+        rx,
+        detail_tx,
+        time_display,
+        tui_mode,
+    ).await;
+
+    let title = match tui_mode {
+        TuiMode::Capture => "Inspect",
+        TuiMode::Viewer => "Inspect (Viewer Mode)",
+    };
 
     let mut detail_text_id = WidgetId::EMPTY;
     let split = Pane::new()
@@ -1446,7 +1522,7 @@ pub async fn run_tui(
                         .flex(1)
                         .children([
                             app
-                        ])).title("Inspect"),
+                        ])).title(title),
                     SplitPaneChild::from(Pane::new()
                         .preferred_width(40)
                         .preferred_height(1)

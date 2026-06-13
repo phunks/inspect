@@ -27,8 +27,7 @@ const DEFAULT_CA_CN: &str = "Inspect Local MITM Root CA";
 
 #[derive(Debug)]
 pub struct Ca {
-    #[allow(unused)]
-    ca_cert_der: Vec<u8>,
+    _ca_cert_der: Vec<u8>,
     issuer: Issuer<'static, KeyPair>,
 }
 
@@ -54,7 +53,7 @@ impl Ca {
         let key_pair = KeyPair::from_pem(&key_pem).context("parse CA private key PEM")?;
         let issuer = Issuer::new(ca_params()?, key_pair);
 
-        Ok(Self { ca_cert_der, issuer })
+        Ok(Self { _ca_cert_der: ca_cert_der, issuer })
     }
 
     fn sign_for_host(&self, host: &str, issuer: &Issuer<'_, KeyPair>) -> anyhow::Result<ServerAuthData> {

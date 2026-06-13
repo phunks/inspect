@@ -129,8 +129,7 @@ struct State {
     capture_paths: CapturePaths,
     seq: Arc<AtomicU64>,
     tui_callback: Option<Arc<dyn Fn(PacketEvent) + Send + Sync>>,
-    #[allow(unused)]
-    ua_profile: UaProfile,
+    _ua_profile: UaProfile,
     proxy_mode: ProxyMode,
     ua_db: Arc<UserAgentDatabase>,
     upstream_client: UpstreamClient,
@@ -198,7 +197,7 @@ pub async fn mitm_proxy_main(
         capture_paths: CapturePaths::new(),
         seq: Arc::new(AtomicU64::new(0)),
         tui_callback: packet_callback,
-        ua_profile,
+        _ua_profile: ua_profile,
         proxy_mode,
         ua_db: Arc::new(UserAgentDatabase::try_embedded()?),
         upstream_client,

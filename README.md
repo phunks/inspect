@@ -49,6 +49,8 @@ Options:
           Set port to listen on [default: 62019]
   -i, --ip <IP>
           Set ip to listen on [default: 127.0.0.1]
+      --view-capture <DIR>
+          Open an existing capture directory in read-only TUI view mode
   -v...
           Log verbosity level. -vv for more verbosity. Environmental variable `RUST_LOG` overrides this flag!
       --upstream-proxy [<UPSTREAM_PROXY>]
@@ -126,6 +128,8 @@ Supported conditions:
     - Prefixes: `status:`, `stat:`, `s:`
     - Exact status codes such as `200`
     - Status classes such as `2xx` or `5xx`
+    - No response: `s:-`, `s:none`, `s:----`  
+      Also works with `status:` and `stat:`
 - HTTP method
     - Prefixes: `method:`, `meth:`, `m:`
 

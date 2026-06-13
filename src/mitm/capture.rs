@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use chrono::Utc;
 
@@ -9,6 +9,7 @@ pub struct CapturePaths {
     pub flows_dir: PathBuf,
 }
 static CAPTURE_PATHS: OnceLock<CapturePaths> = OnceLock::new();
+
 impl CapturePaths {
     fn build() -> std::io::Result<Self> {
         let base_dir = std::env::var("INSPECT_CAPTURE_DIR")
@@ -28,12 +29,46 @@ impl CapturePaths {
         Ok(Self { root, db_path, flows_dir })
     }
 
+    fn from_existing_root(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        let db_path = root.join("index.sqlite");
+        let flows_dir = root.join("flows");
+
+        if !db_path.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("capture database not found: {}", db_path.display()),
+            ));
+        }
+
+        if !flows_dir.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("capture flows directory not found: {}", flows_dir.display()),
+            ));
+        }
+
+        Ok(Self { root, db_path, flows_dir })
+    }
+
     pub fn initialize_for_process() -> std::io::Result<&'static Self> {
         if let Some(existing) = CAPTURE_PATHS.get() {
             return Ok(existing);
         }
 
         let built = Self::build()?;
+        let _ = CAPTURE_PATHS.set(built);
+        Ok(CAPTURE_PATHS.get().expect("capture paths must be initialized"))
+    }
+
+    pub fn initialize_for_existing_capture(
+        root: impl AsRef<Path>,
+    ) -> std::io::Result<&'static Self> {
+        if let Some(existing) = CAPTURE_PATHS.get() {
+            return Ok(existing);
+        }
+
+        let built = Self::from_existing_root(root)?;
         let _ = CAPTURE_PATHS.set(built);
         Ok(CAPTURE_PATHS.get().expect("capture paths must be initialized"))
     }
