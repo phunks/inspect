@@ -4,7 +4,8 @@ mod search;
 mod button;
 mod focus_pane;
 pub mod time;
-mod tab;
+pub mod tab;
+mod segmented_control;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketStarted};
 use crate::mitm::capture::CapturePaths;
 use crate::tui::read_metadata::PacketSummary;
+use crate::tui::tab::{DetailContent, DetailMessagePartSelection, DetailMessageTypeSelection, DetailPane, DetailTabSelection};
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
@@ -272,8 +274,9 @@ fn split_csv_values(value: &str) -> Vec<String> {
 #[derive(Debug)]
 pub enum UiEvent {
     ShowDetail {
-        text: String,
+        detail: DetailContent,
         highlight_query: Option<String>,
+        tab_selection: Option<DetailTabSelection>,
     },
 }
 
@@ -337,6 +340,32 @@ struct FullTextSelectRequest {
     results: Vec<FullTextSearchResult>,
     selected: usize,
     query: String,
+}
+
+fn detail_tab_selection_from_search_path(path: &str) -> Option<DetailTabSelection> {
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+
+    let message_type = if file_name.starts_with("request.") {
+        DetailMessageTypeSelection::Request
+    } else if file_name.starts_with("response.") {
+        DetailMessageTypeSelection::Response
+    } else {
+        return None;
+    };
+
+    let message_part = if file_name.ends_with(".body") {
+        DetailMessagePartSelection::Body
+    } else {
+        DetailMessagePartSelection::Meta
+    };
+
+    Some(DetailTabSelection {
+        message_type,
+        message_part,
+    })
 }
 
 impl PacketListDelegate {
@@ -858,10 +887,15 @@ impl PacketListDelegate {
     }
 
     fn on_select_packet(&self, id: String) {
-        self.on_select_packet_with_highlight(id, None);
+        self.on_select_packet_with_highlight(id, None, None);
     }
 
-    fn on_select_packet_with_highlight(&self, id: String, highlight_query: Option<String>) {
+    fn on_select_packet_with_highlight(
+        &self,
+        id: String,
+        highlight_query: Option<String>,
+        tab_selection: Option<DetailTabSelection>,
+    ) {
         let db = self.dbstate.clone();
         let detail_tx = self.detail_tx.clone();
         let time_formatter = self.time_formatter.clone();
@@ -870,7 +904,7 @@ impl PacketListDelegate {
             let req = db.select_request_by_id(id.clone()).await;
             let res = db.select_response_by_id(id.clone()).await;
 
-            let text = match (req, res) {
+            let detail = match (req, res) {
                 (Ok(mut req), Ok(res)) => {
                     if let Some(epoch_ms) = req.epoch_ms {
                         let raw_time = req.time.as_deref().unwrap_or_default();
@@ -879,10 +913,18 @@ impl PacketListDelegate {
 
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
                     let res_body = read_body_file(res.response_body_path.as_deref()).await;
-                    let dir = req.flow_dir.as_deref().unwrap();
-                    format!(
-                        "[request meta]\n{req}\n\n[request body]\n{req_body}\n\n[response meta]\n{res}\n\n[response body]\n{res_body}\n\nid  : {id}\ndir : {dir}"
-                    )
+                    let req_body = format_body_with_size(req.body_size_line(), req_body);
+                    let res_body = format_body_with_size(res.body_size_line(), res_body);
+                    let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
+
+                    DetailContent {
+                        request_meta: req.to_string(),
+                        request_body: req_body,
+                        response_meta: res.to_string(),
+                        response_body: res_body,
+                        id,
+                        dir,
+                    }
                 }
                 (Ok(mut req), Err(e)) => {
                     if let Some(epoch_ms) = req.epoch_ms {
@@ -891,20 +933,44 @@ impl PacketListDelegate {
                     }
 
                     let req_body = read_body_file(req.request_body_path.as_deref()).await;
-                    let dir = req.flow_dir.as_deref().unwrap();
-                    format!(
-                        "[request meta]\n{req}\n\n[request body]\n{req_body}\n\nresponse error: {e}\n\nid  : {id}\ndir : {dir}"
-                    )
+                    let req_body = format_body_with_size(req.body_size_line(), req_body);
+                    let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
+
+                    DetailContent {
+                        request_meta: req.to_string(),
+                        request_body: req_body,
+                        response_meta: format!("response error: {e:#}"),
+                        response_body: String::new(),
+                        id,
+                        dir,
+                    }
                 }
                 (Err(e1), Err(e2)) => {
-                    format!("request error: {e1}\nresponse error: {e2}\n\nid: {id}")
+                    DetailContent {
+                        request_meta: format!("request error: {e1:#}"),
+                        request_body: String::new(),
+                        response_meta: format!("response error: {e2:#}"),
+                        response_body: String::new(),
+                        id,
+                        dir: String::new(),
+                    }
                 }
-                (Err(e), _) => format!("request error: {e}\n\nid: {id}"),
+                (Err(e), _) => {
+                    DetailContent {
+                        request_meta: format!("request error: {e:#}"),
+                        request_body: String::new(),
+                        response_meta: String::new(),
+                        response_body: String::new(),
+                        id,
+                        dir: String::new(),
+                    }
+                }
             };
 
             let _ = detail_tx.send(UiEvent::ShowDetail {
-                text,
+                detail,
                 highlight_query,
+                tab_selection,
             });
         });
     }
@@ -1081,16 +1147,21 @@ impl PacketListDelegate {
 
         let flow_key = result.flow_key.clone();
         let query = self.retained_full_text_query.clone();
+        let tab_selection = detail_tab_selection_from_search_path(&result.path);
 
-        self.select_flow_key(&flow_key, query);
+        self.select_flow_key(&flow_key, query, tab_selection);
     }
 
     fn reset_detail(&self) {
         let _ = self
             .detail_tx
             .send(UiEvent::ShowDetail {
-                text: DETAIL_PLACEHOLDER_TEXT.to_string(),
+                detail: DetailContent {
+                    request_meta: DETAIL_PLACEHOLDER_TEXT.to_string(),
+                    ..Default::default()
+                },
                 highlight_query: None,
+                tab_selection: None,
             });
     }
 
@@ -1164,7 +1235,12 @@ impl PacketListDelegate {
         }
     }
 
-    fn select_flow_key(&mut self, flow_key: &str, highlight_query: Option<String>) {
+    fn select_flow_key(
+        &mut self,
+        flow_key: &str,
+        highlight_query: Option<String>,
+        tab_selection: Option<DetailTabSelection>,
+    ) {
         let Some(idx) = self
             .rows
             .iter()
@@ -1185,7 +1261,7 @@ impl PacketListDelegate {
         self.sync_list_and_reveal_selected();
 
         if let Some(id) = self.selected_packet_id().map(str::to_owned) {
-            self.on_select_packet_with_highlight(id, highlight_query);
+            self.on_select_packet_with_highlight(id, highlight_query, tab_selection);
         }
     }
 }
@@ -1201,12 +1277,17 @@ async fn read_body_file(path: Option<&str>) -> String {
     }
 }
 
+fn format_body_with_size(body_size: String, body: String) -> String {
+    format!("body size : {body_size}\n\n{body}")
+}
+
 fn format_body_for_display(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return text.to_string();
     }
     hexdump_with_ascii(bytes)
 }
+
 
 fn hexdump_with_ascii(bytes: &[u8]) -> String {
     const WIDTH: usize = 16;
@@ -1346,19 +1427,19 @@ impl DelegateWidget for PacketListDelegate {
 struct RootPane {
     split: Box<Pane>,
     detail_rx: UnboundedReceiver<UiEvent>,
-    detail_text_id: WidgetId<Text>,
+    detail_pane_id: WidgetId<DetailPane>,
 }
 
 impl RootPane {
     fn new(
         split: Box<Pane>,
         detail_rx: UnboundedReceiver<UiEvent>,
-        detail_text_id: WidgetId<Text>,
+        detail_pane_id: WidgetId<DetailPane>,
     ) -> Box<Self> {
         Box::new(Self {
             split,
             detail_rx,
-            detail_text_id,
+            detail_pane_id,
         })
     }
 
@@ -1366,15 +1447,12 @@ impl RootPane {
         while let Ok(event) = self.detail_rx.try_recv() {
             match event {
                 UiEvent::ShowDetail {
-                    text,
+                    detail,
                     highlight_query,
+                    tab_selection,
                 } => {
-                    if let Some(detail) = self.split.get_widget_mut(self.detail_text_id) {
-                        if let Some(query) = highlight_query {
-                            detail.set_content(highlight_detail_text(&text, &query));
-                        } else {
-                            detail.set_content(text);
-                        }
+                    if let Some(detail_pane) = self.split.get_widget_mut(self.detail_pane_id) {
+                        detail_pane.set_content(detail, highlight_query, tab_selection);
                     }
                 }
             }
@@ -1557,7 +1635,10 @@ pub async fn run_tui(
         TuiMode::Viewer => "Inspect (Viewer Mode)",
     };
 
-    let mut detail_text_id = WidgetId::EMPTY;
+    let mut detail_pane_id = WidgetId::EMPTY;
+    let detail_pane = DetailPane::new()
+        .id(&mut detail_pane_id);
+
     let split = Pane::new()
         .vertical()
         .flex(1)
@@ -1579,15 +1660,12 @@ pub async fn run_tui(
                         .vertical()
                         .flex(1)
                         .children([
-                            Text::new()
-                                .content(DETAIL_PLACEHOLDER_TEXT.dim())
-                                .overflow(TextOverflow::WRAP)
-                                .id(&mut detail_text_id).flex(1),
-                        ])
-                        .y_scroll(Scrollbar::Visible),
+                            detail_pane,
+                        ]),
+                        // .y_scroll(Scrollbar::Visible),
                     ),
                 ])
-            ).flex(1)
+        ).flex(1)
             .border(Border::ROUND)
             .border_style(Style::new().fg(Color::grey256(8)))
         ]);
@@ -1599,7 +1677,7 @@ pub async fn run_tui(
         }
     });
 
-    let root = RootPane::new(split, detail_rx, detail_text_id);
+    let root = RootPane::new(split, detail_rx, detail_pane_id);
     let root = global_chords::GlobalChords::new(root);
 
     tuie::start_tui(root)?;

@@ -132,14 +132,19 @@ impl fmt::Display for RequestMetadata {
         writeln!(f, "{:<width$}: {}", "path", opt_str(self.uri.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "query", opt_str(self.query_str.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "version", opt_str(self.version.as_deref()))?;
-        writeln!(f, "{:<width$}: {}", "body size", format_body_size_line(
+        writeln!(f, "{:<width$}:", "headers")?;
+        write!(f, "{}", indent_lines(&headers_pretty, "  "))
+    }
+}
+
+impl RequestMetadata {
+    pub fn body_size_line(&self) -> String {
+        format_body_size_line(
             self.body_size,
             self.body_saved_size,
             self.body_truncated,
             self.body_save_limit,
-        ))?;
-        writeln!(f, "{:<width$}:", "headers")?;
-        write!(f, "{}", indent_lines(&headers_pretty, "  "))
+        )
     }
 }
 
@@ -205,18 +210,23 @@ impl fmt::Display for ResponseMetadata {
         let headers_pretty = serde_json::to_string_pretty(&headers)
             .unwrap_or_else(|_| headers.to_string());
         let width = 10;
-        writeln!(f, "{:<width$}: {} ms", "elapsed", self.elapsed.map_or("-".into(), |d| d.to_string()))?;
         writeln!(f, "{:<width$}: {}", "status", self.upstream_status.map_or(
             self.status.unwrap_or(500), |s| s))?;
-        writeln!(f, "{:<width$}: {}", "body size", format_body_size_line(
+        writeln!(f, "{:<width$}: {} ms", "elapsed", self.elapsed.map_or("-".into(), |d| d.to_string()))?;
+        writeln!(f, "{:<width$}: {}", "protocol", opt_str(self.version.as_deref()))?;
+        writeln!(f, "{:<width$}:", "headers")?;
+        write!(f, "{}", indent_lines(&headers_pretty, "  "))
+    }
+}
+
+impl ResponseMetadata {
+    pub fn body_size_line(&self) -> String {
+        format_body_size_line(
             self.body_size,
             self.body_saved_size,
             self.body_truncated,
             self.body_save_limit,
-        ))?;
-        writeln!(f, "{:<width$}: {}", "protocol", opt_str(self.version.as_deref()))?;
-        writeln!(f, "{:<width$}:", "headers")?;
-        write!(f, "{}", indent_lines(&headers_pretty, "  "))
+        )
     }
 }
 
