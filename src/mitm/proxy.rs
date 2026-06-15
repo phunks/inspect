@@ -66,7 +66,6 @@ use crate::mitm::dynamic_ca::DynamicIssuer;
 use crate::mitm::client::{new_upstream_client, UpstreamClient};
 use crate::options::{ProxyMode, UaProfile};
 
-const BODY_SAVE_LIMIT_BYTES: usize = 3 * 1024;
 const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 const WEBSOCKET_NOT_CAPTURED_MESSAGE: &str =
     "<WebSocket upgraded; payload is not captured by inspect. Use tcpdump + SSLKEYLOGFILE + Wireshark.>\n";
@@ -127,6 +126,8 @@ struct State {
     exec: Executor,
     dbstate: DbState,
     capture_paths: CapturePaths,
+    body_save_limit_bytes: Option<usize>,
+    proxy_body_limit_bytes: Option<usize>,
     seq: Arc<AtomicU64>,
     tui_callback: Option<Arc<dyn Fn(PacketEvent) + Send + Sync>>,
     _ua_profile: UaProfile,
@@ -159,6 +160,7 @@ pub async fn mitm_proxy_main(
     proxy_mode: ProxyMode,
     upstream_handshake_timeout_ms: u64,
     upstream_request_timeout_sec: u64,
+    body_save_limit_bytes: Option<usize>,
     packet_callback: Option<Arc<dyn Fn(PacketEvent) + Send + Sync>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
@@ -195,6 +197,9 @@ pub async fn mitm_proxy_main(
         exec: exec.clone(),
         dbstate: DbState::new().await.expect("dbstate"),
         capture_paths: CapturePaths::new(),
+        body_save_limit_bytes,
+        proxy_body_limit_bytes: body_save_limit_bytes
+            .map(|limit| limit.max(PROXY_BODY_LIMIT_BYTES)),
         seq: Arc::new(AtomicU64::new(0)),
         tui_callback: packet_callback,
         _ua_profile: ua_profile,
@@ -234,18 +239,28 @@ pub async fn mitm_proxy_main(
                 .into_layer(http_mitm_service),
         );
 
-        tcp_service
-            .serve_graceful(
-                guard,
-                (
-                    AddInputExtensionLayer::new(state),
-                    // protect the http proxy from too large bodies,
-                    // both from request and response end
-                    BodyLimitLayer::symmetric(PROXY_BODY_LIMIT_BYTES),
+        if let Some(proxy_body_limit_bytes) = state.proxy_body_limit_bytes {
+            tcp_service
+                .serve_graceful(
+                    guard,
+                    (
+                        AddInputExtensionLayer::new(state),
+                        // protect the http proxy from too large bodies,
+                        // both from request and response end
+                        BodyLimitLayer::symmetric(proxy_body_limit_bytes),
+                    )
+                        .into_layer(http_service),
                 )
-                    .into_layer(http_service),
-            )
-            .await;
+                .await;
+        } else {
+            tcp_service
+                .serve_graceful(
+                    guard,
+                    AddInputExtensionLayer::new(state)
+                        .into_layer(http_service),
+                )
+                .await;
+        }
     });
 
     let _ = shutdown_rx.changed().await;
@@ -495,25 +510,6 @@ async fn http_mitm_proxy (
     let req_head_text = build_request_head_text(&parts);
     let _ = tokio::fs::write(&req_head_path, req_head_text).await;
 
-    dbstate.event_sender.send(RequestResponseEvent::Request(RequestMetadata{
-        id: id.to_string(),
-        seq: seq as i64,
-        flow_key: flow_key.clone(),
-        flow_dir: flow_dir.to_string_lossy().to_string(),
-        request_head_path: req_head_path.to_string_lossy().to_string(),
-        request_body_path: req_body_path.to_string_lossy().to_string(),
-        time: rfc3999z(&time),
-        epoch_ms: time.timestamp_millis(),
-        method: parts.method.as_str().into(),
-        protocol: req_protocol.clone(),
-        host: req_host.clone(),
-        uri: uri.path().to_string(),
-        query_str: uri.query().unwrap_or_default().into(),
-        version: version_to_string(parts.version),
-        headers: headers_to_json(&parts.headers),
-    })).unwrap_or_else(|e|
-        tracing::error!("error sending request event: {e:?}"));
-
     let req_method = parts.method.to_string().clone();
 
     if let Some(cb) = tui_callback.as_ref() {
@@ -539,13 +535,39 @@ async fn http_mitm_proxy (
             Bytes::new()
         }
     };
-    
+
     let stored_req_body_bytes = request_body_for_storage(&parts, &req_body_bytes);
-    let _ = write_body_limited(
+    let req_storage_info =
+        body_storage_info(stored_req_body_bytes.len(), state.body_save_limit_bytes);
+
+    let _ = write_body_for_storage(
         &req_body_path,
         &stored_req_body_bytes,
-        BODY_SAVE_LIMIT_BYTES,
+        state.body_save_limit_bytes,
     ).await;
+
+    dbstate.event_sender.send(RequestResponseEvent::Request(RequestMetadata{
+        id: id.to_string(),
+        seq: seq as i64,
+        flow_key: flow_key.clone(),
+        flow_dir: flow_dir.to_string_lossy().to_string(),
+        request_head_path: req_head_path.to_string_lossy().to_string(),
+        request_body_path: req_body_path.to_string_lossy().to_string(),
+        time: rfc3999z(&time),
+        epoch_ms: time.timestamp_millis(),
+        method: parts.method.as_str().into(),
+        protocol: req_protocol.clone(),
+        host: req_host.clone(),
+        uri: uri.path().to_string(),
+        query_str: uri.query().unwrap_or_default().into(),
+        version: version_to_string(parts.version),
+        headers: headers_to_json(&parts.headers),
+        body_size: req_body_bytes.len() as i64,
+        body_saved_size: req_storage_info.saved_size as i64,
+        body_truncated: req_storage_info.truncated,
+        body_save_limit: state.body_save_limit_bytes.map(|limit| limit as i64),
+    })).unwrap_or_else(|e|
+        tracing::error!("error sending request event: {e:?}"));
 
     let req = Request::from_parts(parts, Body::from(req_body_bytes));
 
@@ -570,11 +592,32 @@ async fn http_mitm_proxy (
         }
     };
 
+    let body_size = res_body_bytes.len() as i64;
+    let body_saved_size;
+    let body_truncated;
+    let body_save_limit = state.body_save_limit_bytes.map(|limit| limit as i64);
+
     if let Some(msg) = upstream_err.as_deref() {
-        let _ = write_body_limited(&res_body_path, msg.as_bytes(), BODY_SAVE_LIMIT_BYTES).await;
+        let storage_info = body_storage_info(msg.as_bytes().len(), state.body_save_limit_bytes);
+        body_saved_size = storage_info.saved_size as i64;
+        body_truncated = storage_info.truncated;
+
+        let _ = write_body_for_storage(
+            &res_body_path,
+            msg.as_bytes(),
+            state.body_save_limit_bytes,
+        ).await;
     } else {
         let stored_body_bytes = body_for_storage(&parts, &res_body_bytes);
-        let _ = write_body_limited(&res_body_path, &stored_body_bytes, BODY_SAVE_LIMIT_BYTES).await;
+        let storage_info = body_storage_info(stored_body_bytes.len(), state.body_save_limit_bytes);
+        body_saved_size = storage_info.saved_size as i64;
+        body_truncated = storage_info.truncated;
+
+        let _ = write_body_for_storage(
+            &res_body_path,
+            &stored_body_bytes,
+            state.body_save_limit_bytes,
+        ).await;
     }
 
     dbstate.event_sender.send(RequestResponseEvent::Response(ResponseMetadata {
@@ -589,6 +632,10 @@ async fn http_mitm_proxy (
         upstream_status,
         version: version_to_string(parts.version),
         headers: headers_to_json(&parts.headers),
+        body_size,
+        body_saved_size,
+        body_truncated,
+        body_save_limit,
     })).unwrap_or_else(|e| tracing::error!("error sending response event: {e:?}"));
 
     if let Some(cb) = tui_callback {
@@ -662,6 +709,10 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
         query_str: uri.query().unwrap_or_default().into(),
         version: version_to_string(parts.version),
         headers: headers_to_json(&parts.headers),
+        body_size: 0,
+        body_saved_size: 0,
+        body_truncated: false,
+        body_save_limit: state.body_save_limit_bytes.map(|limit| limit as i64),
     })).unwrap_or_else(|e| {
         tracing::error!("error sending websocket request event: {e:?}");
     });
@@ -707,6 +758,10 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
         upstream_status: Some(proxy_status),
         version: version_to_string(parts.version),
         headers: headers_to_json(&parts.headers),
+        body_size: 0,
+        body_saved_size: WEBSOCKET_NOT_CAPTURED_MESSAGE.len() as i64,
+        body_truncated: false,
+        body_save_limit: state.body_save_limit_bytes.map(|limit| limit as i64),
     })).unwrap_or_else(|e| {
         tracing::error!("error sending websocket response event: {e:?}");
     });
@@ -748,6 +803,35 @@ async fn write_body_limited(
     }
 
     tokio::fs::write(path, out).await
+}
+
+struct BodyStorageInfo {
+    saved_size: usize,
+    truncated: bool,
+}
+
+fn body_storage_info(body_len: usize, max_len: Option<usize>) -> BodyStorageInfo {
+    match max_len {
+        Some(max_len) => BodyStorageInfo {
+            saved_size: body_len.min(max_len),
+            truncated: body_len > max_len,
+        },
+        None => BodyStorageInfo {
+            saved_size: body_len,
+            truncated: false,
+        },
+    }
+}
+
+async fn write_body_for_storage(
+    path: &std::path::Path,
+    bytes: &[u8],
+    max_len: Option<usize>,
+) -> std::io::Result<()> {
+    match max_len {
+        Some(max_len) => write_body_limited(path, bytes, max_len).await,
+        None => tokio::fs::write(path, bytes).await,
+    }
 }
 
 fn rfc3999z(time: &DateTime<Utc>) -> String {
@@ -839,3 +923,4 @@ async fn new_mitm_tls_service_data() -> Result<TlsAcceptorData, OpaqueError> {
         .try_into()
         .context("create tls server config")
 }
+

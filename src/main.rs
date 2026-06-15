@@ -13,6 +13,7 @@ use inspect::options::{Opt, Logger};
 async fn main() -> Result<(), AnyError> {
     let opt = Opt::init()?;
     let _logger = Logger::build(opt.verbosity);
+    opt.log_effective_config();
 
     if opt.generate_ca {
         let dir = generate_default_ca_files(opt.force_regenerate_ca)?;
@@ -57,6 +58,7 @@ async fn main() -> Result<(), AnyError> {
     let proxy_mode = opt.proxy_mode;
     let upstream_handshake_timeout_ms = opt.upstream_handshake_timeout_ms;
     let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
+    let body_save_limit_bytes = opt.effective_body_save_limit_bytes();
     let (quit_tx, quit_rx) = watch::channel(false);
 
     let proxy_task = tokio::spawn(async move {
@@ -68,6 +70,7 @@ async fn main() -> Result<(), AnyError> {
             proxy_mode,
             upstream_handshake_timeout_ms,
             upstream_request_timeout_sec,
+            body_save_limit_bytes,
             Some(callback),
             quit_rx,
         ).await {

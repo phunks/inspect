@@ -68,6 +68,55 @@ pub struct RequestMetadata {
     pub query_str: Option<String>,
     pub version: Option<String>,
     pub headers: Value,
+    pub body_size: Option<i64>,
+    pub body_saved_size: Option<i64>,
+    pub body_truncated: Option<i64>,
+    pub body_save_limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct RequestMetadataLegacy {
+    pub id: Option<String>,
+    pub seq: Option<i64>,
+    pub flow_key: Option<String>,
+    pub flow_dir: Option<String>,
+    pub request_head_path: Option<String>,
+    pub request_body_path: Option<String>,
+    pub time: Option<String>,
+    pub epoch_ms: Option<i64>,
+    pub method: Option<String>,
+    pub protocol: Option<String>,
+    pub host: Option<String>,
+    pub uri: Option<String>,
+    pub query_str: Option<String>,
+    pub version: Option<String>,
+    pub headers: Value,
+}
+
+impl From<RequestMetadataLegacy> for RequestMetadata {
+    fn from(value: RequestMetadataLegacy) -> Self {
+        Self {
+            id: value.id,
+            seq: value.seq,
+            flow_key: value.flow_key,
+            flow_dir: value.flow_dir,
+            request_head_path: value.request_head_path,
+            request_body_path: value.request_body_path,
+            time: value.time,
+            epoch_ms: value.epoch_ms,
+            method: value.method,
+            protocol: value.protocol,
+            host: value.host,
+            uri: value.uri,
+            query_str: value.query_str,
+            version: value.version,
+            headers: value.headers,
+            body_size: None,
+            body_saved_size: None,
+            body_truncated: None,
+            body_save_limit: None,
+        }
+    }
 }
 
 impl fmt::Display for RequestMetadata {
@@ -75,7 +124,7 @@ impl fmt::Display for RequestMetadata {
         let headers = normalize_headers_for_display(self.headers.clone());
         let headers_pretty = serde_json::to_string_pretty(&headers)
             .unwrap_or_else(|_| headers.to_string());
-        let width = 8;
+        let width = 10;
         writeln!(f, "{:<width$}: {}", "time", opt_str(self.time.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "method", opt_str(self.method.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "scheme", opt_str(self.protocol.as_deref()))?;
@@ -83,6 +132,12 @@ impl fmt::Display for RequestMetadata {
         writeln!(f, "{:<width$}: {}", "path", opt_str(self.uri.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "query", opt_str(self.query_str.as_deref()))?;
         writeln!(f, "{:<width$}: {}", "version", opt_str(self.version.as_deref()))?;
+        writeln!(f, "{:<width$}: {}", "body size", format_body_size_line(
+            self.body_size,
+            self.body_saved_size,
+            self.body_truncated,
+            self.body_save_limit,
+        ))?;
         writeln!(f, "{:<width$}:", "headers")?;
         write!(f, "{}", indent_lines(&headers_pretty, "  "))
     }
@@ -101,6 +156,47 @@ pub struct ResponseMetadata {
     pub upstream_status: Option<i64>,
     pub version: Option<String>,
     pub headers: Value,
+    pub body_size: Option<i64>,
+    pub body_saved_size: Option<i64>,
+    pub body_truncated: Option<i64>,
+    pub body_save_limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ResponseMetadataLegacy {
+    pub id: Option<String>,
+    pub seq: Option<i64>,
+    pub flow_key: Option<String>,
+    pub flow_dir: Option<String>,
+    pub response_head_path: Option<String>,
+    pub response_body_path: Option<String>,
+    pub elapsed: Option<i64>,
+    pub status: Option<i64>,
+    pub upstream_status: Option<i64>,
+    pub version: Option<String>,
+    pub headers: Value,
+}
+
+impl From<ResponseMetadataLegacy> for ResponseMetadata {
+    fn from(value: ResponseMetadataLegacy) -> Self {
+        Self {
+            id: value.id,
+            seq: value.seq,
+            flow_key: value.flow_key,
+            flow_dir: value.flow_dir,
+            response_head_path: value.response_head_path,
+            response_body_path: value.response_body_path,
+            elapsed: value.elapsed,
+            status: value.status,
+            upstream_status: value.upstream_status,
+            version: value.version,
+            headers: value.headers,
+            body_size: None,
+            body_saved_size: None,
+            body_truncated: None,
+            body_save_limit: None,
+        }
+    }
 }
 
 impl fmt::Display for ResponseMetadata {
@@ -108,15 +204,64 @@ impl fmt::Display for ResponseMetadata {
         let headers = normalize_headers_for_display(self.headers.clone());
         let headers_pretty = serde_json::to_string_pretty(&headers)
             .unwrap_or_else(|_| headers.to_string());
-        let width = 9;
+        let width = 10;
         writeln!(f, "{:<width$}: {} ms", "elapsed", self.elapsed.map_or("-".into(), |d| d.to_string()))?;
         writeln!(f, "{:<width$}: {}", "status", self.upstream_status.map_or(
-                                                self.status.unwrap_or(500), |s| s))?;
-        // writeln!(f, "{:<width$}: {}", "upstream_status", self.upstream_status.map_or("-".into(), |s| s.to_string()))?;
+            self.status.unwrap_or(500), |s| s))?;
+        writeln!(f, "{:<width$}: {}", "body size", format_body_size_line(
+            self.body_size,
+            self.body_saved_size,
+            self.body_truncated,
+            self.body_save_limit,
+        ))?;
         writeln!(f, "{:<width$}: {}", "protocol", opt_str(self.version.as_deref()))?;
         writeln!(f, "{:<width$}:", "headers")?;
         write!(f, "{}", indent_lines(&headers_pretty, "  "))
     }
+}
+
+fn format_body_size_line(
+    body_size: Option<i64>,
+    body_saved_size: Option<i64>,
+    body_truncated: Option<i64>,
+    body_save_limit: Option<i64>,
+) -> String {
+    let Some(body_size) = body_size else {
+        return "-".to_string();
+    };
+
+    let body_size_text = format_number(body_size);
+
+    if body_truncated == Some(1) {
+        let saved = body_saved_size.map(format_number).unwrap_or_else(|| "-".to_string());
+        let limit = body_save_limit.map(format_number).unwrap_or_else(|| "-".to_string());
+        return format!("{body_size_text} bytes (saved {saved} bytes, truncated limit {limit} bytes)");
+    }
+
+    if let Some(saved) = body_saved_size
+        && saved != body_size {
+        return format!("{body_size_text} bytes (saved {} bytes)", format_number(saved));
+    }
+
+    format!("{body_size_text} bytes")
+}
+
+fn format_number(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut out = String::new();
+
+    for (idx, ch) in s.chars().rev().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+
+    let mut out = out.chars().rev().collect::<String>();
+    if n < 0 {
+        out.insert(0, '-');
+    }
+    out
 }
 
 fn opt_str(v: Option<&str>) -> &str {
@@ -253,11 +398,8 @@ where
     Ok(rows)
 }
 
-async fn select_request<'e, E>(exec: E, id: &str) -> Result<RequestMetadata>
-where
-    E: Executor<'e, Database = Sqlite>,
-{
-    let r = sqlx::query_as!(
+async fn select_request(exec: &SqlitePool, id: &str) -> Result<RequestMetadata> {
+    let with_body_columns = sqlx::query_as!(
         RequestMetadata,
         r#"SELECT id,
                 seq,
@@ -273,22 +415,56 @@ where
                 uri,
                 query_str,
                 version,
-                headers
+                headers,
+                body_size,
+                body_saved_size,
+                body_truncated,
+                body_save_limit
             FROM requests WHERE id = ?"#,
         id,
     )
         .fetch_one(exec)
-        .await
-        .context("Failed to select request")?;
+        .await;
 
-    Ok(r)
+    match with_body_columns {
+        Ok(request) => Ok(request),
+        Err(new_schema_error) => {
+            let legacy = sqlx::query_as!(
+                RequestMetadataLegacy,
+                r#"SELECT id,
+                        seq,
+                        flow_key,
+                        flow_dir,
+                        request_head_path,
+                        request_body_path,
+                        time,
+                        epoch_ms,
+                        method,
+                        protocol,
+                        host,
+                        uri,
+                        query_str,
+                        version,
+                        headers
+                    FROM requests WHERE id = ?"#,
+                id,
+            )
+                .fetch_one(exec)
+                .await
+                .with_context(|| {
+                    format!("Failed to select request; new schema error: {new_schema_error}")
+                })?;
+
+            Ok(legacy.into())
+        }
+    }
 }
 
 async fn select_response<'e, E>(exec: E, id: &str) -> Result<ResponseMetadata>
 where
-    E: Executor<'e, Database = Sqlite>,
+    E: Executor<'e, Database = Sqlite> + Copy,
 {
-    let r = sqlx::query_as!(
+    let with_body_columns = sqlx::query_as!(
         ResponseMetadata,
         r#"SELECT id,
                 seq,
@@ -300,14 +476,44 @@ where
                 status,
                 upstream_status,
                 version,
-                headers
+                headers,
+                body_size,
+                body_saved_size,
+                body_truncated,
+                body_save_limit
             FROM responses WHERE id = ?"#,
         id
     )
         .fetch_one(exec)
-        .await
-        .context("Failed to select response")?;
+        .await;
 
-    Ok(r)
+    match with_body_columns {
+        Ok(response) => Ok(response),
+        Err(new_schema_error) => {
+            let legacy = sqlx::query_as!(
+                ResponseMetadataLegacy,
+                r#"SELECT id,
+                        seq,
+                        flow_key,
+                        flow_dir,
+                        response_head_path,
+                        response_body_path,
+                        elapsed,
+                        status,
+                        upstream_status,
+                        version,
+                        headers
+                    FROM responses WHERE id = ?"#,
+                id
+            )
+                .fetch_one(exec)
+                .await
+                .with_context(|| {
+                    format!("Failed to select response; new schema error: {new_schema_error}")
+                })?;
+
+            Ok(legacy.into())
+        }
+    }
 }
 

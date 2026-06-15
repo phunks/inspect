@@ -13,7 +13,11 @@ CREATE TABLE IF NOT EXISTS requests (
     uri TEXT,
     query_str TEXT,
     version TEXT,
-    headers TEXT
+    headers TEXT,
+    body_size INTEGER,
+    body_saved_size INTEGER,
+    body_truncated INTEGER,
+    body_save_limit INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS responses (
@@ -27,5 +31,9 @@ CREATE TABLE IF NOT EXISTS responses (
     status INTEGER,
     upstream_status INTEGER,
     version TEXT,
-    headers TEXT
+    headers TEXT,
+    body_size INTEGER,
+    body_saved_size INTEGER,
+    body_truncated INTEGER,
+    body_save_limit INTEGER
 );

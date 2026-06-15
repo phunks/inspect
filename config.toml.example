@@ -1,0 +1,182 @@
+# inspect configuration
+#
+# Precedence:
+#   CLI option > config.toml > built-in default
+#
+# By default, inspect reads this file:
+#   config.toml
+#
+# You can specify another config file with:
+#   inspect --config inspect.local.toml
+#
+# Notes:
+# - All keys are optional.
+# - Unknown keys are rejected.
+# - String enum values are kebab-case.
+# - Paths can be relative to the current working directory.
+
+# Listen port for the local proxy.
+# CLI: --port, -p
+# Default: 62019
+port = 62019
+
+# Listen IP address for the local proxy.
+# CLI: --ip, -i
+# Default: "127.0.0.1"
+ip = "127.0.0.1"
+
+# Open an existing capture directory in read-only TUI viewer mode.
+# CLI: --view-capture <DIR>
+# Default: unset
+#
+# Example:
+# view_capture = "capture/20260602143000Z"
+# view_capture = ""
+
+# Log verbosity level.
+# CLI: -v...
+# Default: 0
+#
+# Mapping:
+#   0 = warn
+#   1 = info
+#   2 = debug
+#   3+ = trace
+#
+# Note:
+#   RUST_LOG environment variable overrides this verbosity-derived filter.
+verbosity = 0
+
+# Upstream HTTP proxy address in "host:port" format.
+# CLI: --upstream-proxy [<UPSTREAM_PROXY>]
+# Default: unset
+#
+# Example:
+# upstream_proxy = "127.0.0.1:8080"
+# upstream_proxy = ""
+
+# User-Agent/TLS emulation profile for normal upstream HTTP requests.
+# CLI: --ua-profile
+# Default: "auto"
+#
+# Possible values:
+#   "auto"
+#   "chrome"
+#   "firefox"
+ua_profile = "auto"
+
+# User-Agent/TLS emulation profile for upstream proxy CONNECT.
+# CLI: --connect-ua-profile
+# Default: unset, inherits ua_profile behavior
+#
+# Possible values:
+#   "auto"
+#   "chrome"
+#   "firefox"
+#
+# Example:
+# connect_ua_profile = "chrome"
+# connect_ua_profile = ""
+
+# Proxy behavior mode.
+# CLI: --proxy-mode
+# Default: "observe"
+#
+# Possible values:
+#   "observe" = observe traffic without trying to emulate client fingerprinting aggressively
+#   "emulate" = try to auto-detect and emulate User-Agent/TLS profile
+proxy_mode = "observe"
+
+# Upstream connect/TLS handshake timeout in milliseconds.
+# CLI: --upstream-handshake-timeout-ms
+# Default: 10000
+upstream_handshake_timeout_ms = 10000
+
+# Upstream request/read timeout in seconds.
+# CLI: --upstream-request-timeout-sec
+# Default: 60
+upstream_request_timeout_sec = 60
+
+# Maximum bytes to save per captured request/response body.
+# CLI: --body-save-limit-bytes
+# Default: 3072
+#
+# Notes:
+# - This controls saved capture file size.
+# - If body_save_unlimited = true, this value is ignored for saved body truncation.
+# - If MITM body limit is derived from this value, the effective proxy body limit may be:
+#     max(body_save_limit_bytes, 16 MiB)
+#   depending on proxy.rs implementation.
+body_save_limit_bytes = 3072
+
+# Save captured bodies without truncation.
+# CLI: --body-save-unlimited
+# Default: false
+#
+# Notes:
+# - When true, body_save_limit_bytes is ignored for saved body truncation.
+# - If proxy body limit is also wired to this option, BodyLimitLayer should be disabled.
+# - This can increase memory and disk usage significantly.
+body_save_unlimited = false
+
+# Generate or reuse persistent local MITM root CA and exit.
+# CLI: --generate-ca
+# Default: false
+generate_ca = false
+
+# Force regenerate local MITM root CA.
+# CLI: --force-regenerate-ca
+# Default: false
+#
+# Note:
+#   This is only meaningful when generate_ca = true.
+force_regenerate_ca = false
+
+# SSLKEYLOGFILE setting for TLS debugging.
+# CLI: --preshared-key-log [<PRESHARED_KEY_LOG>]
+# Default: unset
+#
+# Values:
+#   unset / commented out = disabled
+#   "true"                = enabled with default path "/tmp/sslkeys.log"
+#   "/path/to/file.log"   = enabled with explicit path
+#
+# Examples:
+# preshared_key_log = "true"
+# preshared_key_log = "/tmp/sslkeys.log"
+# preshared_key_log = ""
+
+# TUI packet time display mode.
+# CLI: --tui-time-mode
+# Default: "rfc3339z"
+#
+# Possible values:
+#   "rfc3339z" = RFC3339 timestamp
+#   "absolute" = formatted absolute time using tui_time_format
+#   "elapsed"  = elapsed time since first packet
+#   "epoch"    = Unix epoch milliseconds
+tui_time_mode = "rfc3339z"
+
+# TUI absolute time format.
+# CLI: --tui-time-format
+# Default: "%H:%M:%S%.3f"
+#
+# Note:
+#   Uses chrono strftime syntax.
+#   Only used when tui_time_mode = "absolute".
+#
+# Examples:
+#   "%H:%M:%S%.3f"
+#   "%Y-%m-%d %H:%M:%S%.3f"
+tui_time_format = "%H:%M:%S%.3f"
+
+# TUI timezone.
+# CLI: --tui-time-tz
+# Default: "utc"
+#
+# Possible values:
+#   "utc"
+#   "local"
+#   "+09:00"
+#   "-05:30"
+tui_time_tz = "utc"

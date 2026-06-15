@@ -4,6 +4,7 @@ mod search;
 mod button;
 mod focus_pane;
 pub mod time;
+mod tab;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

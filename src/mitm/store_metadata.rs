@@ -28,6 +28,10 @@ pub struct RequestMetadata {
     pub query_str: String,
     pub version: String,
     pub headers: Value,
+    pub body_size: i64,
+    pub body_saved_size: i64,
+    pub body_truncated: bool,
+    pub body_save_limit: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -43,6 +47,10 @@ pub struct ResponseMetadata {
     pub upstream_status: Option<u16>,
     pub version: String,
     pub headers: Value,
+    pub body_size: i64,
+    pub body_saved_size: i64,
+    pub body_truncated: bool,
+    pub body_save_limit: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -94,7 +102,11 @@ impl DbState {
                 uri TEXT,
                 query_str TEXT,
                 version TEXT,
-                headers TEXT
+                headers TEXT,
+                body_size INTEGER,
+                body_saved_size INTEGER,
+                body_truncated INTEGER,
+                body_save_limit INTEGER
             )"
         )
             .execute(&db_pool)
@@ -111,7 +123,11 @@ impl DbState {
                 status INTEGER,
                 upstream_status INTEGER,
                 version TEXT,
-                headers TEXT
+                headers TEXT,
+                body_size INTEGER,
+                body_saved_size INTEGER,
+                body_truncated INTEGER,
+                body_save_limit INTEGER
             )"
         )
             .execute(&db_pool)
@@ -163,8 +179,9 @@ where
     sqlx::query(
         "INSERT INTO requests (
             id, seq, flow_key, flow_dir, request_head_path, request_body_path,
-            time, epoch_ms, method, protocol, host, uri, query_str, version, headers
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            time, epoch_ms, method, protocol, host, uri, query_str, version, headers,
+            body_size, body_saved_size, body_truncated, body_save_limit
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(&metadata.id)
         .bind(metadata.seq)
@@ -181,6 +198,10 @@ where
         .bind(&metadata.query_str)
         .bind(&metadata.version)
         .bind(metadata.headers.to_string())
+        .bind(metadata.body_size)
+        .bind(metadata.body_saved_size)
+        .bind(metadata.body_truncated as i64)
+        .bind(metadata.body_save_limit)
         .execute(exec)
         .await?;
 
@@ -194,8 +215,9 @@ where
     sqlx::query(
         "INSERT INTO responses (
             id, seq, flow_key, flow_dir, response_head_path, response_body_path,
-            elapsed, status, upstream_status, version, headers
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            elapsed, status, upstream_status, version, headers,
+            body_size, body_saved_size, body_truncated, body_save_limit
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(&metadata.id)
         .bind(metadata.seq)
@@ -208,6 +230,10 @@ where
         .bind(metadata.upstream_status.map(|s| s as i64))
         .bind(&metadata.version)
         .bind(metadata.headers.to_string())
+        .bind(metadata.body_size)
+        .bind(metadata.body_saved_size)
+        .bind(metadata.body_truncated as i64)
+        .bind(metadata.body_save_limit)
         .execute(exec)
         .await?;
 

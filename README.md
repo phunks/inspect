@@ -70,6 +70,10 @@ Options:
           Upstream connect/TLS handshake timeout in milliseconds [default: 10000]
       --upstream-request-timeout-sec <UPSTREAM_REQUEST_TIMEOUT_SEC>
           Upstream request/read timeout in seconds [default: 60]
+      --body-save-limit-bytes <BODY_SAVE_LIMIT_BYTES>
+          Maximum bytes to save per captured body [default: 3072]
+      --body-save-unlimited
+          Save captured bodies without truncation
       --generate-ca
           Generate (or reuse) persistent local MITM root CA and exit
       --force-regenerate-ca

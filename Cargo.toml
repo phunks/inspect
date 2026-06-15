@@ -1,6 +1,6 @@
 [package]
 name = "inspect"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -35,3 +35,4 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 itertools = "0"
+toml = "1.1"
