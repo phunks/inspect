@@ -2,6 +2,7 @@ use std::fmt;
 use std::fmt::Formatter;
 use anyhow::{Context, Result};
 use std::time::Duration;
+use http::StatusCode;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::{Executor, FromRow, Sqlite};
@@ -210,8 +211,13 @@ impl fmt::Display for ResponseMetadata {
         let headers_pretty = serde_json::to_string_pretty(&headers)
             .unwrap_or_else(|_| headers.to_string());
         let width = 10;
-        writeln!(f, "{:<width$}: {}", "status", self.upstream_status.map_or(
-            self.status.unwrap_or(500), |s| s))?;
+        let status = self.upstream_status.or(self.status);
+        writeln!(
+            f,
+            "{:<width$}: {}",
+            "status",
+            format_status_for_display(status)
+        )?;
         writeln!(f, "{:<width$}: {} ms", "elapsed", self.elapsed.map_or("-".into(), |d| d.to_string()))?;
         writeln!(f, "{:<width$}: {}", "protocol", opt_str(self.version.as_deref()))?;
         writeln!(f, "{:<width$}:", "headers")?;
@@ -227,6 +233,24 @@ impl ResponseMetadata {
             self.body_truncated,
             self.body_save_limit,
         )
+    }
+}
+
+fn format_status_for_display(status: Option<i64>) -> String {
+    let Some(status) = status else {
+        return "-".to_string();
+    };
+
+    let Ok(status_u16) = u16::try_from(status) else {
+        return status.to_string();
+    };
+
+    match StatusCode::from_u16(status_u16)
+        .ok()
+        .and_then(|status| status.canonical_reason())
+    {
+        Some(reason) => format!("{status_u16} {reason}"),
+        None => status_u16.to_string(),
     }
 }
 
