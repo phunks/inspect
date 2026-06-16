@@ -152,113 +152,99 @@ impl Opt {
         let text = std::fs::read_to_string(&self.config)?;
         let config: FileConfig = toml::from_str(&text)?;
 
-        if !cli_specified(matches, "port") {
-            if let Some(value) = config.port {
-                self.port = value;
-            }
+        if !cli_specified(matches, "port")
+            && let Some(value) = config.port {
+            self.port = value;
         }
 
-        if !cli_specified(matches, "ip") {
-            if let Some(value) = config.ip {
-                self.ip = value;
-            }
+        if !cli_specified(matches, "ip")
+            && let Some(value) = config.ip {
+            self.ip = value;
         }
 
-        if !cli_specified(matches, "view_capture") {
-            if let Some(value) = config.view_capture {
-                self.view_capture = Some(value);
-            }
+        if !cli_specified(matches, "view_capture")
+            && let Some(value) = config.view_capture {
+            self.view_capture = Some(value);
         }
 
-        if !cli_specified(matches, "verbosity") {
-            if let Some(value) = config.verbosity {
-                self.verbosity = value;
-            }
+        if !cli_specified(matches, "verbosity")
+            && let Some(value) = config.verbosity {
+            self.verbosity = value;
         }
 
-        if !cli_specified(matches, "upstream_proxy") {
-            if let Some(value) = config.upstream_proxy {
-                self.upstream_proxy = Some(value);
-            }
+        if !cli_specified(matches, "upstream_proxy")
+            && let Some(value) = config.upstream_proxy {
+            self.upstream_proxy = Some(value);
         }
 
-        if !cli_specified(matches, "ua_profile") {
-            if let Some(value) = config.ua_profile {
-                self.ua_profile = value;
-            }
+        if !cli_specified(matches, "ua_profile")
+            && let Some(value) = config.ua_profile {
+            self.ua_profile = value;
         }
 
-        if !cli_specified(matches, "connect_ua_profile") {
-            if let Some(value) = config.connect_ua_profile {
-                self.connect_ua_profile = Some(value);
-            }
+        if !cli_specified(matches, "connect_ua_profile")
+            && let Some(value) = config.connect_ua_profile {
+            self.connect_ua_profile = Some(value);
         }
 
-        if !cli_specified(matches, "proxy_mode") {
-            if let Some(value) = config.proxy_mode {
-                self.proxy_mode = value;
-            }
+        if !cli_specified(matches, "proxy_mode")
+            && let Some(value) = config.proxy_mode {
+            self.proxy_mode = value;
         }
 
-        if !cli_specified(matches, "upstream_handshake_timeout_ms") {
-            if let Some(value) = config.upstream_handshake_timeout_ms {
-                self.upstream_handshake_timeout_ms = value;
-            }
+        if !cli_specified(matches, "upstream_handshake_timeout_ms")
+            && let Some(value) = config.upstream_handshake_timeout_ms {
+            self.upstream_handshake_timeout_ms = value;
         }
 
-        if !cli_specified(matches, "upstream_request_timeout_sec") {
-            if let Some(value) = config.upstream_request_timeout_sec {
-                self.upstream_request_timeout_sec = value;
-            }
+        if !cli_specified(matches, "upstream_request_timeout_sec")
+            && let Some(value) = config.upstream_request_timeout_sec {
+            self.upstream_request_timeout_sec = value;
         }
 
-        if !cli_specified(matches, "body_save_limit_bytes") {
-            if let Some(value) = config.body_save_limit_bytes {
-                self.body_save_limit_bytes = value;
-            }
+        if !cli_specified(matches, "body_save_limit_bytes")
+            && let Some(value) = config.body_save_limit_bytes {
+            self.body_save_limit_bytes = value;
         }
 
-        if !cli_specified(matches, "body_save_unlimited") {
-            if let Some(value) = config.body_save_unlimited {
-                self.body_save_unlimited = value;
-            }
+        if !cli_specified(matches, "body_save_unlimited")
+            && let Some(value) = config.body_save_unlimited {
+            self.body_save_unlimited = value;
         }
 
-        if !cli_specified(matches, "generate_ca") {
-            if let Some(value) = config.generate_ca {
-                self.generate_ca = value;
-            }
+        if !cli_specified(matches, "generate_ca")
+            && let Some(value) = config.generate_ca {
+            self.generate_ca = value;
         }
 
-        if !cli_specified(matches, "force_regenerate_ca") {
-            if let Some(value) = config.force_regenerate_ca {
-                self.force_regenerate_ca = value;
-            }
+        if !cli_specified(matches, "force_regenerate_ca")
+            && let Some(value) = config.force_regenerate_ca {
+            self.force_regenerate_ca = value;
         }
 
-        if !cli_specified(matches, "preshared_key_log") {
-            if let Some(value) = config.preshared_key_log {
-                self.preshared_key_log = Some(value);
-            }
+        if !cli_specified(matches, "preshared_key_log")
+            && let Some(value) = config.preshared_key_log {
+            self.preshared_key_log = Some(value);
         }
 
-        if !cli_specified(matches, "tui_time_mode") {
-            if let Some(value) = config.tui_time_mode {
-                self.tui_time_mode = value;
-            }
+
+        if !cli_specified(matches, "tui_time_mode")
+            && let Some(value) = config.tui_time_mode {
+            self.tui_time_mode = value;
         }
 
-        if !cli_specified(matches, "tui_time_format") {
-            if let Some(value) = config.tui_time_format {
-                self.tui_time_format = value;
-            }
+
+        if !cli_specified(matches, "tui_time_format")
+            && let Some(value) = config.tui_time_format {
+            self.tui_time_format = value;
         }
 
-        if !cli_specified(matches, "tui_time_tz") {
-            if let Some(value) = config.tui_time_tz {
-                self.tui_time_tz = value;
-            }
+
+        if !cli_specified(matches, "tui_time_tz")
+            && let Some(value) = config.tui_time_tz {
+            self.tui_time_tz = value;
         }
+
 
         Ok(())
     }

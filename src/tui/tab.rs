@@ -21,19 +21,19 @@ enum DetailMessageInfo {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DetailTabSelection {
-    pub(crate) message_type: DetailMessageTypeSelection,
-    pub(crate) message_part: DetailMessagePartSelection,
+pub struct DetailTabSelection {
+    pub message_type: DetailMessageTypeSelection,
+    pub message_part: DetailMessagePartSelection,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DetailMessageTypeSelection {
+pub enum DetailMessageTypeSelection {
     Request,
     Response,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DetailMessagePartSelection {
+pub enum DetailMessagePartSelection {
     Meta,
     Body,
 }

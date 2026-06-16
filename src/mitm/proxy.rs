@@ -598,7 +598,7 @@ async fn http_mitm_proxy (
     let body_save_limit = state.body_save_limit_bytes.map(|limit| limit as i64);
 
     if let Some(msg) = upstream_err.as_deref() {
-        let storage_info = body_storage_info(msg.as_bytes().len(), state.body_save_limit_bytes);
+        let storage_info = body_storage_info(msg.len(), state.body_save_limit_bytes);
         body_saved_size = storage_info.saved_size as i64;
         body_truncated = storage_info.truncated;
 

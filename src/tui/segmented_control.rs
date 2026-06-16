@@ -159,20 +159,18 @@ impl Widget for SegmentedControl {
                 }
             }
             chord!(LeftClick) => {
-                if let Some(i) = self.hit_segment(event.cell()) {
-                    if !self.is_disabled(i) {
-                        tuie::focus_widget(self.get_id());
-                        self.set_pressed(Some(i));
-                    }
+                if let Some(i) = self.hit_segment(event.cell())
+                    && !self.is_disabled(i) {
+                    tuie::focus_widget(self.get_id());
+                    self.set_pressed(Some(i));
                 }
             }
             chord!(LeftRelease) => {
                 let pressed = self.pressed.get();
                 self.set_pressed(None);
-                if let Some(i) = self.hit_segment(event.cell()) {
-                    if pressed == Some(i) {
-                        self.select_index(i);
-                    }
+                if let Some(i) = self.hit_segment(event.cell())
+                    && pressed == Some(i) {
+                    self.select_index(i);
                 }
             }
             _ => return InputResult::Rejected,
@@ -194,6 +192,7 @@ impl SegmentedControl {
     }
 
     /// Sets the segment at `index` as initially disabled.
+    #[allow(unused)]
     pub fn disabled(self: Box<Self>, index: usize) -> Box<Self> {
         let mask = self.disabled.get();
         self.disabled.set(mask | (1 << index));
@@ -207,6 +206,7 @@ impl SegmentedControl {
     }
 
     /// Sets whether the segment at `index` is disabled.
+    #[allow(unused)]
     pub fn set_disabled(&mut self, index: usize, disabled: bool) {
         let mask = self.disabled.get();
         let new_mask = if disabled {

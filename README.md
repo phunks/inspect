@@ -50,6 +50,8 @@ cargo run -- --view-capture capture/20260602143000Z
 Usage: inspect [OPTIONS]
 
 Options:
+      --config <FILE>
+          Config TOML file path [default: config.toml]
   -p, --port <PORT>
           Set port to listen on [default: 62019]
   -i, --ip <IP>
