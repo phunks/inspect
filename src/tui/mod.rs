@@ -911,8 +911,12 @@ impl PacketListDelegate {
                         req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
                     }
 
-                    let req_body = read_body_file(req.request_body_path.as_deref()).await;
-                    let res_body = read_body_file(res.response_body_path.as_deref()).await;
+                    let req_body = read_body_file(
+                        req.request_body_path.as_deref()
+                    ).await;
+                    let res_body = read_body_file(
+                        res.response_body_path.as_deref()
+                    ).await;
                     let req_body = format_body_with_size(req.body_size_line(), req_body);
                     let res_body = format_body_with_size(res.body_size_line(), res_body);
                     let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
@@ -932,7 +936,9 @@ impl PacketListDelegate {
                         req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
                     }
 
-                    let req_body = read_body_file(req.request_body_path.as_deref()).await;
+                    let req_body = read_body_file(
+                        req.request_body_path.as_deref()
+                    ).await;
                     let req_body = format_body_with_size(req.body_size_line(), req_body);
                     let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
 
@@ -1281,13 +1287,99 @@ fn format_body_with_size(body_size: String, body: String) -> String {
     format!("body size : {body_size}\n\n{body}")
 }
 
-fn format_body_for_display(bytes: &[u8]) -> String {
-    if let Ok(text) = std::str::from_utf8(bytes) {
+pub fn format_body_for_display(bytes: &[u8]) -> String {
+    if let Some(kind) = binary_magic_kind(bytes) {
+        return format!("<binary body detected by magic number: {kind}>\n\n{}", hexdump_with_ascii(bytes));
+    }
+
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && looks_like_text(text) {
         return text.to_string();
     }
+
     hexdump_with_ascii(bytes)
 }
 
+fn binary_magic_kind(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("png");
+    }
+
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("jpeg");
+    }
+
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+
+    if bytes.starts_with(b"%PDF-") {
+        return Some("pdf");
+    }
+
+    if bytes.starts_with(b"PK\x03\x04")
+        || bytes.starts_with(b"PK\x05\x06")
+        || bytes.starts_with(b"PK\x07\x08") {
+        return Some("zip");
+    }
+
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return Some("gzip");
+    }
+
+    if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        return Some("zstd");
+    }
+
+    if bytes.starts_with(b"\x00asm") {
+        return Some("wasm");
+    }
+
+    if bytes.starts_with(b"\x7fELF") {
+        return Some("elf");
+    }
+
+    if bytes.starts_with(b"BM") {
+        return Some("bmp");
+    }
+
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        return Some("webp");
+    }
+
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {
+        return Some("wav");
+    }
+
+    if bytes.starts_with(b"OggS") {
+        return Some("ogg");
+    }
+
+    if bytes.len() >= 12 && bytes.get(4..12) == Some(b"ftypavif") {
+        return Some("avif");
+    }
+
+    if bytes.len() >= 12 && bytes.get(4..8) == Some(b"ftyp") {
+        return Some("mp4");
+    }
+
+    None
+}
+
+fn looks_like_text(text: &str) -> bool {
+    let mut total = 0usize;
+    let mut control = 0usize;
+
+    for ch in text.chars() {
+        total += 1;
+
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            control += 1;
+        }
+    }
+
+    total == 0 || control * 100 / total <= 5
+}
 
 fn hexdump_with_ascii(bytes: &[u8]) -> String {
     const WIDTH: usize = 16;
