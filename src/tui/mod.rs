@@ -24,7 +24,7 @@ use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketStarted};
 use crate::mitm::capture::CapturePaths;
 use crate::tui::read_metadata::PacketSummary;
-use crate::tui::tab::{DetailContent, DetailMessagePartSelection, DetailMessageTypeSelection, DetailPane, DetailTabSelection};
+use crate::tui::tab::{DetailContent, DetailMessagePartSelection, DetailPane, DetailPrimaryTabSelection, DetailTabSelection};
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
@@ -348,10 +348,17 @@ fn detail_tab_selection_from_search_path(path: &str) -> Option<DetailTabSelectio
         .and_then(|name| name.to_str())
         .unwrap_or(path);
 
-    let message_type = if file_name.starts_with("request.") {
-        DetailMessageTypeSelection::Request
+    if file_name == "ssl_tls.json" {
+        return Some(DetailTabSelection {
+            primary_tab: DetailPrimaryTabSelection::SslTls,
+            message_part: DetailMessagePartSelection::Meta,
+        });
+    }
+
+    let primary_tab = if file_name.starts_with("request.") {
+        DetailPrimaryTabSelection::Request
     } else if file_name.starts_with("response.") {
-        DetailMessageTypeSelection::Response
+        DetailPrimaryTabSelection::Response
     } else {
         return None;
     };
@@ -363,7 +370,7 @@ fn detail_tab_selection_from_search_path(path: &str) -> Option<DetailTabSelectio
     };
 
     Some(DetailTabSelection {
-        message_type,
+        primary_tab,
         message_part,
     })
 }
@@ -920,12 +927,17 @@ impl PacketListDelegate {
                     let req_body = format_body_with_size(req.body_size_line(), req_body);
                     let res_body = format_body_with_size(res.body_size_line(), res_body);
                     let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
+                    let ssl_tls_info = format_ssl_tls_info(
+                        req.tls_sni.as_deref(),
+                        res.tls_upstream.as_deref(),
+                    );
 
                     DetailContent {
                         request_meta: req.to_string(),
                         request_body: req_body,
                         response_meta: res.to_string(),
                         response_body: res_body,
+                        ssl_tls_info,
                         id,
                         dir,
                     }
@@ -941,12 +953,14 @@ impl PacketListDelegate {
                     ).await;
                     let req_body = format_body_with_size(req.body_size_line(), req_body);
                     let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
+                    let ssl_tls_info = format_ssl_tls_info(req.tls_sni.as_deref(), None);
 
                     DetailContent {
                         request_meta: req.to_string(),
                         request_body: req_body,
                         response_meta: format!("response error: {e:#}"),
                         response_body: String::new(),
+                        ssl_tls_info,
                         id,
                         dir,
                     }
@@ -957,6 +971,7 @@ impl PacketListDelegate {
                         request_body: String::new(),
                         response_meta: format!("response error: {e2:#}"),
                         response_body: String::new(),
+                        ssl_tls_info: format_ssl_tls_info(None, None),
                         id,
                         dir: String::new(),
                     }
@@ -967,6 +982,7 @@ impl PacketListDelegate {
                         request_body: String::new(),
                         response_meta: String::new(),
                         response_body: String::new(),
+                        ssl_tls_info: format_ssl_tls_info(None, None),
                         id,
                         dir: String::new(),
                     }
@@ -1285,6 +1301,24 @@ async fn read_body_file(path: Option<&str>) -> String {
 
 fn format_body_with_size(body_size: String, body: String) -> String {
     format!("body size : {body_size}\n\n{body}")
+}
+
+fn format_ssl_tls_info(tls_sni: Option<&str>, tls_upstream: Option<&str>) -> String {
+    let upstream_tls = tls_upstream
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let value = serde_json::json!({
+        "request": {
+            "tls_sni": tls_sni,
+        },
+        "response": {
+            "upstream_tls": upstream_tls,
+        }
+    });
+
+    serde_json::to_string_pretty(&value)
+        .unwrap_or_else(|_| value.to_string())
 }
 
 pub fn format_body_for_display(bytes: &[u8]) -> String {

@@ -518,6 +518,7 @@ async fn http_mitm_proxy (
     let req_body_path = flow_dir.join("request.body");
     let res_head_path = flow_dir.join("response.head");
     let res_body_path = flow_dir.join("response.body");
+    let ssl_tls_path = flow_dir.join("ssl_tls.json");
 
     let req_head_text = build_request_head_text(&parts, tls_sni.as_deref());
     let _ = tokio::fs::write(&req_head_path, req_head_text).await;
@@ -590,6 +591,21 @@ async fn http_mitm_proxy (
         state.upstream_client.serve(req).await;
 
     let elapsed_ms = started_at.elapsed().as_millis() as i64;
+
+    let tls_upstream = upstream_tls_info_from_extensions(res.extensions());
+    let ssl_tls_json = json!({
+        "request": {
+            "tls_sni": tls_sni,
+        },
+        "response": {
+            "upstream_tls": tls_upstream,
+        }
+    });
+
+    let ssl_tls_text = serde_json::to_string_pretty(&ssl_tls_json)
+        .unwrap_or_else(|_| ssl_tls_json.to_string());
+
+    let _ = tokio::fs::write(&ssl_tls_path, ssl_tls_text).await;
 
     let tls_upstream = upstream_tls_info_from_extensions(res.extensions());
 
@@ -703,6 +719,7 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
     let req_body_path = flow_dir.join("request.body");
     let res_head_path = flow_dir.join("response.head");
     let res_body_path = flow_dir.join("response.body");
+    let ssl_tls_path = flow_dir.join("ssl_tls.json");
 
     let (parts, body) = req.into_parts();
     let req_method = parts.method.to_string();
@@ -710,6 +727,21 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
     let req_head_text = build_request_head_text(&parts, tls_sni.as_deref());
     let _ = tokio::fs::write(&req_head_path, req_head_text).await;
     let _ = tokio::fs::write(&req_body_path, "<empty>\n").await;
+
+    let ssl_tls_json = json!({
+        "request": {
+            "tls_sni": tls_sni.clone(),
+        },
+        "response": {
+            "upstream_tls": null,
+            "note": "websocket payload is not captured"
+        }
+    });
+
+    let ssl_tls_text = serde_json::to_string_pretty(&ssl_tls_json)
+        .unwrap_or_else(|_| ssl_tls_json.to_string());
+
+    let _ = tokio::fs::write(&ssl_tls_path, ssl_tls_text).await;
 
     dbstate.event_sender.send(RequestResponseEvent::Request(RequestMetadata {
         id: id.to_string(),
@@ -891,7 +923,7 @@ fn upstream_tls_info_from_extensions(extensions: &Extensions) -> Option<Value> {
             .iter()
             .filter_map(|der| certificate_der_to_json(der).ok())
             .collect::<Vec<_>>(),
-        Some(DataEncoding::Der(der)) => certificate_der_to_json(&der)
+        Some(DataEncoding::Der(der)) => certificate_der_to_json(der)
             .ok()
             .into_iter()
             .collect::<Vec<_>>(),

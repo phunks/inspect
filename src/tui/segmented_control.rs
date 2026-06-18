@@ -148,12 +148,12 @@ impl Widget for SegmentedControl {
         let selected = self.selected.get();
 
         match &event.chord {
-            chord!(Left | h) => {
+            chord!(Left) => {
                 if let Some(i) = self.step(selected, -1) {
                     self.select_index(i);
                 }
             }
-            chord!(Right | l) => {
+            chord!(Right) => {
                 if let Some(i) = self.step(selected, 1) {
                     self.select_index(i);
                 }
