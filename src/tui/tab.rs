@@ -4,9 +4,11 @@ use crate::tui::{highlight_detail_text, DETAIL_PLACEHOLDER_TEXT};
 use crate::tui::segmented_control::SegmentedControl;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DetailMessageType {
+enum DetailPrimaryTab {
     Request,
     Response,
+    SslTls,
+    Info,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16,20 +18,17 @@ enum DetailMessagePart {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DetailMessageInfo {
-    Info,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DetailTabSelection {
-    pub message_type: DetailMessageTypeSelection,
+    pub primary_tab: DetailPrimaryTabSelection,
     pub message_part: DetailMessagePartSelection,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DetailMessageTypeSelection {
+pub enum DetailPrimaryTabSelection {
     Request,
     Response,
+    SslTls,
+    Info,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,11 +37,13 @@ pub enum DetailMessagePartSelection {
     Body,
 }
 
-impl From<DetailMessageTypeSelection> for DetailMessageType {
-    fn from(value: DetailMessageTypeSelection) -> Self {
+impl From<DetailPrimaryTabSelection> for DetailPrimaryTab {
+    fn from(value: DetailPrimaryTabSelection) -> Self {
         match value {
-            DetailMessageTypeSelection::Request => Self::Request,
-            DetailMessageTypeSelection::Response => Self::Response,
+            DetailPrimaryTabSelection::Request => Self::Request,
+            DetailPrimaryTabSelection::Response => Self::Response,
+            DetailPrimaryTabSelection::SslTls => Self::SslTls,
+            DetailPrimaryTabSelection::Info => Self::Info,
         }
     }
 }
@@ -62,6 +63,7 @@ pub struct DetailContent {
     pub request_body: String,
     pub response_meta: String,
     pub response_body: String,
+    pub ssl_tls_info: String,
     pub id: String,
     pub dir: String,
 }
@@ -77,26 +79,27 @@ pub enum UiEvent {
 
 pub struct DetailPane {
     root: Box<Pane>,
-    message_type_id: WidgetId<SegmentedControl>,
+    primary_tab_id: WidgetId<SegmentedControl>,
+    message_part_row_id: WidgetId<Pane>,
     message_part_id: WidgetId<SegmentedControl>,
-    message_info_id: WidgetId<SegmentedControl>,
+    #[allow(unused)]
+    separator_id: WidgetId<Text>,
     text_id: WidgetId<Text>,
     content: DetailContent,
-    message_type: DetailMessageType,
+    primary_tab: DetailPrimaryTab,
     message_part: DetailMessagePart,
-    message_info: Option<DetailMessageInfo>,
     highlight_query: Option<String>,
 }
 
 impl DetailPane {
     pub(crate) fn new() -> Box<Self> {
-        let mut message_type_id = WidgetId::EMPTY;
+        let mut primary_tab_id = WidgetId::EMPTY;
+        let mut message_part_row_id = WidgetId::EMPTY;
         let mut message_part_id = WidgetId::EMPTY;
-        let mut message_info_id = WidgetId::EMPTY;
+        let separator_id = WidgetId::EMPTY;
         let mut text_id = WidgetId::EMPTY;
 
         let row = |label: &str, ctrl: Box<dyn Widget>| -> Box<Pane> {
-
             Pane::new()
                 .horizontal()
                 .gap(0)
@@ -111,30 +114,29 @@ impl DetailPane {
                 ])
         };
 
-        let controls = Pane::new()
+        let primary_controls = Pane::new()
             .horizontal()
             .gap(0)
             .children([
                 row(
                     "",
-                    SegmentedControl::new(&["request", "response"])
+                    SegmentedControl::new(&["request", "response", "ssl/tls", "info"])
                         .selected(0)
-                        .id(&mut message_type_id),
+                        .id(&mut primary_tab_id),
                 ) as Box<dyn Widget>,
-                Text::new().content("|"),
+            ]);
+
+        let part_controls = Pane::new()
+            .horizontal()
+            .gap(0)
+            .id(&mut message_part_row_id)
+            .children([
                 row(
                     "",
                     SegmentedControl::new(&["meta", "body"])
                         .selected(0)
                         .id(&mut message_part_id),
-                ),
-                Text::new().content("|"),
-                row(
-                    "",
-                    SegmentedControl::new(&["info"])
-                        .selected(0)
-                        .id(&mut message_info_id),
-                ),
+                ) as Box<dyn Widget>,
             ]);
 
         let root = Pane::new()
@@ -142,36 +144,37 @@ impl DetailPane {
             .flex(1)
             .gap(0)
             .children([
-                row("",controls as Box<dyn Widget>),
+                row("", primary_controls as Box<dyn Widget>),
+                part_controls as Box<dyn Widget>,
+                // Text::new()
+                //     .content("--".fg(Color::grey256(8)))
+                //     .id(&mut separator_id) as Box<dyn Widget>,
                 Pane::new()
                     .horizontal()
                     .gap(0)
                     .children([Text::new()
-                    .content(DETAIL_PLACEHOLDER_TEXT.dim())
-                    .overflow(TextOverflow::WRAP)
-                    .id(&mut text_id)
-                    .flex(1)])
+                        .content(DETAIL_PLACEHOLDER_TEXT.dim())
+                        .overflow(TextOverflow::WRAP)
+                        .id(&mut text_id)
+                        .flex(1)])
                     .flex(1)
                     .y_scroll(AutoHide) as Box<dyn Widget>,
             ]);
 
         let mut this = Box::new(Self {
             root,
-            message_type_id,
+            primary_tab_id,
+            message_part_row_id,
             message_part_id,
-            message_info_id,
+            separator_id,
             text_id,
             content: DetailContent::default(),
-            message_type: DetailMessageType::Request,
+            primary_tab: DetailPrimaryTab::Request,
             message_part: DetailMessagePart::Meta,
-            message_info: None,
             highlight_query: None,
         });
 
-        if let Some(ctrl) = this.root.get_widget_mut(this.message_info_id) {
-            ctrl.clear_selected();
-        }
-
+        this.sync_message_part_visibility();
         this
     }
 
@@ -188,18 +191,20 @@ impl DetailPane {
             self.select_tab(tab_selection);
         }
 
+        self.sync_message_part_visibility();
         self.refresh_text();
     }
 
     fn select_tab(&mut self, tab_selection: DetailTabSelection) {
-        self.message_type = tab_selection.message_type.into();
+        self.primary_tab = tab_selection.primary_tab.into();
         self.message_part = tab_selection.message_part.into();
-        self.message_info = None;
 
-        if let Some(ctrl) = self.root.get_widget_mut(self.message_type_id) {
-            ctrl.set_selected(match self.message_type {
-                DetailMessageType::Request => 0,
-                DetailMessageType::Response => 1,
+        if let Some(ctrl) = self.root.get_widget_mut(self.primary_tab_id) {
+            ctrl.set_selected(match self.primary_tab {
+                DetailPrimaryTab::Request => 0,
+                DetailPrimaryTab::Response => 1,
+                DetailPrimaryTab::SslTls => 2,
+                DetailPrimaryTab::Info => 3,
             });
         }
 
@@ -209,33 +214,31 @@ impl DetailPane {
                 DetailMessagePart::Body => 1,
             });
         }
-
-        if let Some(ctrl) = self.root.get_widget_mut(self.message_info_id) {
-            ctrl.clear_selected();
-        }
     }
 
     fn selected_text(&self) -> String {
-        if matches!(self.message_info, Some(DetailMessageInfo::Info)) {
-            return format!(
-                "id  : {}\ndir : {}",
-                self.content.id,
-                self.content.dir,
-            );
-        }
-
-        match (self.message_type, self.message_part) {
-            (DetailMessageType::Request, DetailMessagePart::Meta) => {
-                self.content.request_meta.clone()
+        match self.primary_tab {
+            DetailPrimaryTab::Request => {
+                match self.message_part {
+                    DetailMessagePart::Meta => self.content.request_meta.clone(),
+                    DetailMessagePart::Body => self.content.request_body.clone(),
+                }
             }
-            (DetailMessageType::Request, DetailMessagePart::Body) => {
-                self.content.request_body.clone()
+            DetailPrimaryTab::Response => {
+                match self.message_part {
+                    DetailMessagePart::Meta => self.content.response_meta.clone(),
+                    DetailMessagePart::Body => self.content.response_body.clone(),
+                }
             }
-            (DetailMessageType::Response, DetailMessagePart::Meta) => {
-                self.content.response_meta.clone()
+            DetailPrimaryTab::SslTls => {
+                self.content.ssl_tls_info.clone()
             }
-            (DetailMessageType::Response, DetailMessagePart::Body) => {
-                self.content.response_body.clone()
+            DetailPrimaryTab::Info => {
+                format!(
+                    "id  : {}\ndir : {}",
+                    self.content.id,
+                    self.content.dir,
+                )
             }
         }
     }
@@ -253,10 +256,12 @@ impl DetailPane {
     }
 
     fn sync_from_controls(&mut self) {
-        if let Some(ctrl) = self.root.get_widget(self.message_type_id) {
-            self.message_type = match ctrl.get_selected() {
-                1 => DetailMessageType::Response,
-                _ => DetailMessageType::Request,
+        if let Some(ctrl) = self.root.get_widget(self.primary_tab_id) {
+            self.primary_tab = match ctrl.get_selected() {
+                1 => DetailPrimaryTab::Response,
+                2 => DetailPrimaryTab::SslTls,
+                3 => DetailPrimaryTab::Info,
+                _ => DetailPrimaryTab::Request,
             };
         }
 
@@ -267,23 +272,36 @@ impl DetailPane {
             };
         }
 
-        self.message_info = None;
-
-        if let Some(ctrl) = self.root.get_widget_mut(self.message_info_id) {
-            ctrl.clear_selected();
-        }
-
+        self.sync_message_part_visibility();
         self.refresh_text();
     }
 
-    fn sync_info_from_control(&mut self) {
-        self.message_info = Some(DetailMessageInfo::Info);
+    fn sync_message_part_visibility(&mut self) {
+        let show_message_part = matches!(
+            self.primary_tab,
+            DetailPrimaryTab::Request | DetailPrimaryTab::Response
+        );
 
-        if let Some(ctrl) = self.root.get_widget_mut(self.message_info_id) {
-            ctrl.set_selected(0);
+        if let Some(row) = self.root.get_widget_mut(self.message_part_row_id) {
+            if show_message_part {
+                row.set_height(Some(1));
+            } else {
+                row.set_height(Some(0));
+            }
         }
 
-        self.refresh_text();
+        if let Some(ctrl) = self.root.get_widget_mut(self.message_part_id) {
+            if show_message_part {
+                ctrl.set_selected(match self.message_part {
+                    DetailMessagePart::Meta => 0,
+                    DetailMessagePart::Body => 1,
+                });
+            } else {
+                ctrl.clear_selected();
+            }
+        }
+
+        tuie::dirty_layout();
     }
 }
 
@@ -297,9 +315,7 @@ impl DelegateWidget for DetailPane {
     }
 
     fn after_on_event(&mut self, event: &mut WidgetEvent) {
-        if event.get_by::<ChangeEvent<usize>>(self.message_info_id).is_some() {
-            self.sync_info_from_control();
-        } else if event.get_by::<ChangeEvent<usize>>(self.message_type_id).is_some()
+        if event.get_by::<ChangeEvent<usize>>(self.primary_tab_id).is_some()
             || event.get_by::<ChangeEvent<usize>>(self.message_part_id).is_some()
         {
             self.sync_from_controls();
