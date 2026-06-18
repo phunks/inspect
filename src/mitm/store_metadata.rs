@@ -27,6 +27,7 @@ pub struct RequestMetadata {
     pub uri: String,
     pub query_str: String,
     pub version: String,
+    pub tls_sni: Option<String>,
     pub headers: Value,
     pub body_size: i64,
     pub body_saved_size: i64,
@@ -46,6 +47,7 @@ pub struct ResponseMetadata {
     pub status: u16,
     pub upstream_status: Option<u16>,
     pub version: String,
+    pub tls_upstream: Option<Value>,
     pub headers: Value,
     pub body_size: i64,
     pub body_saved_size: i64,
@@ -102,6 +104,7 @@ impl DbState {
                 uri TEXT,
                 query_str TEXT,
                 version TEXT,
+                tls_sni TEXT,
                 headers TEXT,
                 body_size INTEGER,
                 body_saved_size INTEGER,
@@ -123,6 +126,7 @@ impl DbState {
                 status INTEGER,
                 upstream_status INTEGER,
                 version TEXT,
+                tls_upstream TEXT,
                 headers TEXT,
                 body_size INTEGER,
                 body_saved_size INTEGER,
@@ -179,9 +183,9 @@ where
     sqlx::query(
         "INSERT INTO requests (
             id, seq, flow_key, flow_dir, request_head_path, request_body_path,
-            time, epoch_ms, method, protocol, host, uri, query_str, version, headers,
+            time, epoch_ms, method, protocol, host, uri, query_str, version, tls_sni, headers,
             body_size, body_saved_size, body_truncated, body_save_limit
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(&metadata.id)
         .bind(metadata.seq)
@@ -197,6 +201,7 @@ where
         .bind(&metadata.uri)
         .bind(&metadata.query_str)
         .bind(&metadata.version)
+        .bind(&metadata.tls_sni)
         .bind(metadata.headers.to_string())
         .bind(metadata.body_size)
         .bind(metadata.body_saved_size)
@@ -215,9 +220,9 @@ where
     sqlx::query(
         "INSERT INTO responses (
             id, seq, flow_key, flow_dir, response_head_path, response_body_path,
-            elapsed, status, upstream_status, version, headers,
+            elapsed, status, upstream_status, version, tls_upstream, headers,
             body_size, body_saved_size, body_truncated, body_save_limit
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(&metadata.id)
         .bind(metadata.seq)
@@ -229,6 +234,7 @@ where
         .bind(metadata.status as i64)
         .bind(metadata.upstream_status.map(|s| s as i64))
         .bind(&metadata.version)
+        .bind(metadata.tls_upstream.as_ref().map(|v| v.to_string()))
         .bind(metadata.headers.to_string())
         .bind(metadata.body_size)
         .bind(metadata.body_saved_size)

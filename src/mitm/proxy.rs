@@ -55,8 +55,14 @@ use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
 use chrono::{DateTime, Utc};
+use rama::extensions::Extensions;
 use rama::http::ws::handshake::server::WebSocketMatcher;
 use rama::matcher::Matcher;
+use rama::net::tls::client::NegotiatedTlsParameters;
+use rama::net::tls::DataEncoding;
+use rama::net::tls::server::SniRouter;
+use rama::tls::boring::core::hash::MessageDigest;
+use rama::tls::boring::core::x509::X509;
 use tracing::{info, info_span};
 use tracing_futures::Instrument;
 use tokio::sync::watch;
@@ -64,6 +70,7 @@ use crate::mitm::capture::CapturePaths;
 use crate::mitm::store_metadata::{DbState, RequestMetadata, RequestResponseEvent, ResponseMetadata};
 use crate::mitm::dynamic_ca::DynamicIssuer;
 use crate::mitm::client::{new_upstream_client, UpstreamClient};
+use crate::mitm::tls_sni::{ConnectSniRouterService, IngressSNI};
 use crate::options::{ProxyMode, UaProfile};
 
 const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -345,7 +352,11 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
             .with_store_client_hello(true)
             .into_layer(http_transport_service);
 
-        if let Err(err) = https_service.serve(upgraded).await {
+        let sni_router = SniRouter::new(ConnectSniRouterService {
+            https_service,
+        });
+
+        if let Err(err) = sni_router.serve(upgraded).await {
             tracing::error!("error serving HTTPS connection: {err:?}");
         }
 
@@ -478,6 +489,8 @@ async fn http_mitm_proxy (
     let capture_paths = state.capture_paths.clone();
     let seq = state.seq.fetch_add(1, Ordering::Relaxed) + 1;
 
+    let tls_sni = tls_sni_from_extensions(parts.extensions());
+
     let req_ctx = match RequestContext::try_from(&parts) {
         Ok(ctx) => ctx,
         Err(err) => {
@@ -507,7 +520,7 @@ async fn http_mitm_proxy (
     let res_head_path = flow_dir.join("response.head");
     let res_body_path = flow_dir.join("response.body");
 
-    let req_head_text = build_request_head_text(&parts);
+    let req_head_text = build_request_head_text(&parts, tls_sni.as_deref());
     let _ = tokio::fs::write(&req_head_path, req_head_text).await;
 
     let req_method = parts.method.to_string().clone();
@@ -561,6 +574,7 @@ async fn http_mitm_proxy (
         uri: uri.path().to_string(),
         query_str: uri.query().unwrap_or_default().into(),
         version: version_to_string(parts.version),
+        tls_sni: tls_sni.clone(),
         headers: headers_to_json(&parts.headers),
         body_size: req_body_bytes.len() as i64,
         body_saved_size: req_storage_info.saved_size as i64,
@@ -577,6 +591,8 @@ async fn http_mitm_proxy (
         state.upstream_client.serve(req).await;
 
     let elapsed_ms = started_at.elapsed().as_millis() as i64;
+
+    let tls_upstream = upstream_tls_info_from_extensions(res.extensions());
 
     let (parts, body) = res.into_parts();
     let proxy_status = parts.status.as_u16();
@@ -631,6 +647,7 @@ async fn http_mitm_proxy (
         status: proxy_status,
         upstream_status,
         version: version_to_string(parts.version),
+        tls_upstream,
         headers: headers_to_json(&parts.headers),
         body_size,
         body_saved_size,
@@ -656,6 +673,8 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
     let tui_callback = state.tui_callback.clone();
     let capture_paths = state.capture_paths.clone();
     let seq = state.seq.fetch_add(1, Ordering::Relaxed) + 1;
+
+    let tls_sni = tls_sni_from_extensions(req.extensions());
 
     let req_ctx = match RequestContext::try_from(&req) {
         Ok(ctx) => ctx,
@@ -689,7 +708,7 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let req_method = parts.method.to_string();
 
-    let req_head_text = build_request_head_text(&parts);
+    let req_head_text = build_request_head_text(&parts, tls_sni.as_deref());
     let _ = tokio::fs::write(&req_head_path, req_head_text).await;
     let _ = tokio::fs::write(&req_body_path, "<empty>\n").await;
 
@@ -708,6 +727,7 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
         uri: uri.path().to_string(),
         query_str: uri.query().unwrap_or_default().into(),
         version: version_to_string(parts.version),
+        tls_sni,
         headers: headers_to_json(&parts.headers),
         body_size: 0,
         body_saved_size: 0,
@@ -757,6 +777,7 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
         status: proxy_status,
         upstream_status: Some(proxy_status),
         version: version_to_string(parts.version),
+        tls_upstream: None,
         headers: headers_to_json(&parts.headers),
         body_size: 0,
         body_saved_size: WEBSOCKET_NOT_CAPTURED_MESSAGE.len() as i64,
@@ -849,6 +870,101 @@ fn version_to_string(v: Version) -> String {
     }
 }
 
+fn tls_sni_from_extensions(extensions: &Extensions) -> Option<String> {
+    extensions
+        .get::<IngressSNI>()
+        .map(|sni| sni.0.to_string())
+}
+
+fn upstream_tls_info_from_extensions(extensions: &Extensions) -> Option<Value> {
+    let params = extensions.get::<NegotiatedTlsParameters>()?;
+
+    let certificates = match params.peer_certificate_chain.as_ref() {
+        Some(DataEncoding::DerStack(chain)) => chain
+            .iter()
+            .filter_map(|der| certificate_der_to_json(der).ok())
+            .collect::<Vec<_>>(),
+        Some(DataEncoding::Der(der)) => certificate_der_to_json(der)
+            .ok()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        Some(DataEncoding::Pem(_)) | None => Vec::new(),
+    };
+
+    Some(json!({
+        "secure_protocol": format!("{:?}", params.protocol_version),
+        "alpn": params
+            .application_layer_protocol
+            .as_ref()
+            .map(|proto| proto.to_string()),
+        "certificate_chain": certificates,
+    }))
+}
+
+pub fn certificate_der_to_json(der: &[u8]) -> anyhow::Result<Value> {
+    let cert = X509::from_der(der)?;
+
+    let subject = x509_name_to_string(cert.subject_name());
+    let issuer = x509_name_to_string(cert.issuer_name());
+
+    let serial_number = cert
+        .serial_number()
+        .to_bn()?
+        .to_hex_str()?
+        .to_string();
+
+    let not_before = cert.not_before().to_string();
+    let not_after = cert.not_after().to_string();
+
+    let sha256 = cert.digest(MessageDigest::sha256())?;
+    let thumbprint_sha256 = sha256
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join("");
+
+    let subject_alt_names = cert
+        .subject_alt_names()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.dnsname().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(json!({
+        "subject": subject,
+        "issuer": issuer,
+        "serial_number": serial_number,
+        "not_before": not_before,
+        "not_after": not_after,
+        "thumbprint_sha256": thumbprint_sha256,
+        "subject_alt_names": subject_alt_names,
+    }))
+}
+
+fn x509_name_to_string(name: &rama::tls::boring::core::x509::X509NameRef) -> String {
+    name.entries()
+        .map(|entry| {
+            let key = entry
+                .object()
+                .nid()
+                .short_name()
+                .unwrap_or("UNKNOWN");
+
+            let value = entry
+                .data()
+                .as_utf8()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| STANDARD.encode(entry.data().as_slice()));
+
+            format!("{key}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn headers_to_json(headers: &http::HeaderMap) -> Value {
     let mut map = serde_json::Map::new();
     for (name, value) in headers {
@@ -876,8 +992,13 @@ fn headers_to_json(headers: &http::HeaderMap) -> Value {
     Value::Object(map)
 }
 
-fn build_request_head_text(parts: &rama::http::request::Parts) -> String {
+fn build_request_head_text(parts: &rama::http::request::Parts, tls_sni: Option<&str>) -> String {
     let mut out = String::new();
+
+    if let Some(tls_sni) = tls_sni {
+        out.push_str(&format!("X-Inspect-TLS-SNI: {tls_sni}\r\n"));
+    }
+
     out.push_str(&format!(
         "{} {} {}\r\n",
         parts.method,
