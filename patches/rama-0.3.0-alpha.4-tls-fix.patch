@@ -1,0 +1,179 @@
+diff --git a/rama-tls-boring/src/client/connector.rs b/rama-tls-boring/src/client/connector.rs
+index 1704f5e8..82990fe7 100644
+--- a/rama-tls-boring/src/client/connector.rs
++++ b/rama-tls-boring/src/client/connector.rs
+@@ -16,6 +16,20 @@ use std::sync::Arc;
+ use super::{AutoTlsStream, TlsConnectorData, TlsConnectorDataBuilder, TlsStream};
+ use crate::types::TlsTunnel;
+ 
++#[derive(Debug, Clone)]
++pub struct ExtendedTlsParameters {
++    pub negotiated: NegotiatedTlsParameters,
++    pub protocol_version: Option<String>,
++    pub cipher: Option<String>,
++    pub cipher_standard_name: Option<String>,
++    pub cipher_description: Option<String>,
++    pub bits: Option<u32>,
++    pub algorithm_bits: Option<u32>,
++    pub curve_name: Option<String>,
++    pub client_random: Vec<u8>,
++    pub server_random: Vec<u8>,
++}
++
+ #[cfg(feature = "http")]
+ use rama_http_types::{Version, conn::TargetHttpVersion};
+ 
+@@ -225,7 +239,7 @@ where
+         let host = transport_ctx.authority.host.clone();
+ 
+         let connector_data = self.connector_data(input.extensions_mut())?;
+-        let (stream, negotiated_params) = handshake(connector_data, host, conn).await?;
++        let (stream, negotiated_params, extended_tls_params) = handshake(connector_data, host, conn).await?;
+ 
+         tracing::trace!(
+             server.address = %transport_ctx.authority.host,
+@@ -233,6 +247,8 @@ where
+             "TlsConnector(auto): protocol secure, established tls connection",
+         );
+ 
++        input.extensions_mut().insert(extended_tls_params.clone());
++
+         let mut conn = AutoTlsStream::secure(stream);
+ 
+         #[cfg(feature = "http")]
+@@ -243,6 +259,7 @@ where
+         )?;
+ 
+         conn.extensions_mut().insert(negotiated_params);
++        conn.extensions_mut().insert(extended_tls_params);
+         Ok(EstablishedClientConnection { input, conn })
+     }
+ }
+@@ -276,7 +293,9 @@ where
+         let host = transport_ctx.authority.host.clone();
+ 
+         let connector_data = self.connector_data(input.extensions_mut())?;
+-        let (conn, negotiated_params) = handshake(connector_data, host, conn).await?;
++        let (conn, negotiated_params, extended_tls_params) = handshake(connector_data, host, conn).await?;
++        input.extensions_mut().insert(extended_tls_params.clone());
++
+         let mut conn = TlsStream::new(conn);
+ 
+         #[cfg(feature = "http")]
+@@ -287,6 +306,7 @@ where
+         )?;
+ 
+         conn.extensions_mut().insert(negotiated_params);
++        conn.extensions_mut().insert(extended_tls_params);
+         Ok(EstablishedClientConnection { input, conn })
+     }
+ }
+@@ -322,7 +342,9 @@ where
+         };
+ 
+         let connector_data = self.connector_data(input.extensions_mut())?;
+-        let (stream, negotiated_params) = handshake(connector_data, host, conn).await?;
++        let (stream, negotiated_params, extended_tls_params) = handshake(connector_data, host, conn).await?;
++        input.extensions_mut().insert(extended_tls_params.clone());
++
+         let mut conn = AutoTlsStream::secure(stream);
+ 
+         #[cfg(feature = "http")]
+@@ -333,6 +355,7 @@ where
+         )?;
+ 
+         conn.extensions_mut().insert(negotiated_params);
++        conn.extensions_mut().insert(extended_tls_params);
+         tracing::trace!("TlsConnector(tunnel): connection secured");
+         Ok(EstablishedClientConnection { input, conn })
+     }
+@@ -430,7 +453,7 @@ async fn handshake<T>(
+     connector_data: TlsConnectorData,
+     server_host: Host,
+     stream: T,
+-) -> Result<(SslStream<T>, NegotiatedTlsParameters), BoxError>
++) -> Result<(SslStream<T>, NegotiatedTlsParameters, ExtendedTlsParameters), BoxError>
+ where
+     T: Stream + Unpin + ExtensionsMut,
+ {
+@@ -438,7 +461,9 @@ where
+     let TlsStream { inner: stream } =
+         tls_connect(server_host, stream, Some(connector_data)).await?;
+ 
+-    let params = match stream.ssl().session() {
++    let ssl = stream.ssl();
++
++    let params = match ssl.session() {
+         Some(ssl_session) => {
+             let protocol_version = ssl_session
+                 .protocol_version()
+@@ -447,8 +472,7 @@ where
+                     OpaqueError::from_display(format!("protocol version {v}"))
+                         .context("boring ssl connector: min proto version")
+                 })?;
+-            let application_layer_protocol = stream
+-                .ssl()
++            let application_layer_protocol = ssl
+                 .selected_alpn_protocol()
+                 .map(ApplicationProtocol::from);
+             if let Some(ref proto) = application_layer_protocol {
+@@ -456,7 +480,7 @@ where
+             }
+ 
+             let server_certificate_chain = match store_server_certificate_chain
+-                .then(|| stream.ssl().peer_cert_chain())
++                .then(|| ssl.peer_cert_chain())
+                 .flatten()
+             {
+                 Some(chain) => Some(chain.rama_try_into()?),
+@@ -473,11 +497,33 @@ where
+             return Err(OpaqueError::from_display(
+                 "boring ssl connector: failed to establish session...",
+             )
+-            .into_boxed());
++                .into_boxed());
+         }
+     };
+ 
+-    Ok((stream, params))
++    let cipher = ssl.current_cipher();
++
++    let mut client_random = vec![0u8; ssl.client_random(&mut [])];
++    ssl.client_random(&mut client_random);
++
++    let mut server_random = vec![0u8; ssl.server_random(&mut [])];
++    ssl.server_random(&mut server_random);
++
++    let extended_params = ExtendedTlsParameters {
++        negotiated: params.clone(),
++        protocol_version: Some(ssl.version_str().to_string()),
++        cipher: cipher.map(|cipher| cipher.name().to_string()),
++        cipher_standard_name: cipher
++            .and_then(|cipher| cipher.standard_name().map(str::to_string)),
++        cipher_description: cipher.map(|cipher| cipher.description()),
++        bits: cipher.map(|cipher| cipher.bits().secret as u32),
++        algorithm_bits: cipher.map(|cipher| cipher.bits().algorithm as u32),
++        curve_name: ssl.curve_name().map(str::to_string),
++        client_random,
++        server_random,
++    };
++
++    Ok((stream, params, extended_params))
+ }
+ 
+ #[non_exhaustive]
+diff --git a/rama-tls-boring/src/client/mod.rs b/rama-tls-boring/src/client/mod.rs
+index 3478baaf..09e2d954 100644
+--- a/rama-tls-boring/src/client/mod.rs
++++ b/rama-tls-boring/src/client/mod.rs
+@@ -14,8 +14,8 @@ pub use rama_boring_tokio::SslStream as BoringTlsStream;
+ mod connector;
+ #[doc(inline)]
+ pub use connector::{
+-    ConnectorKindAuto, ConnectorKindSecure, ConnectorKindTunnel, TlsConnector, TlsConnectorLayer,
+-    tls_connect,
++    ConnectorKindAuto, ConnectorKindSecure, ConnectorKindTunnel, ExtendedTlsParameters,
++    TlsConnector, TlsConnectorLayer, tls_connect,
+ };
+ 
+ mod connector_data;

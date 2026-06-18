@@ -44,6 +44,14 @@ jobs:
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@cargo-zigbuild
 
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Setup patched vendored dependencies
+        shell: bash
+        run: |
+          just setup-ext
+
       - name: Build
         shell: bash
         env:

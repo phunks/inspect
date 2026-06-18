@@ -58,10 +58,10 @@ index 17565c4..9f6f688 100644
 +}
 \ No newline at end of file
 diff --git a/src/widget/widgets/pane.rs b/src/widget/widgets/pane.rs
-index 0c41e7e..01639d2 100644
+index 0c41e7e..0820474 100644
 --- a/src/widget/widgets/pane.rs
 +++ b/src/widget/widgets/pane.rs
-@@ -227,15 +227,22 @@ impl Pane {
+@@ -227,13 +227,20 @@ impl Pane {
          }
          let axis = self.orientation;
          let cross = axis.flip();
@@ -82,11 +82,8 @@ index 0c41e7e..01639d2 100644
 -            .map(|c| c.get_outer_size()[cross] as u32)
 +            .map(|c| child_extent(c, cross))
              .max()
--            .unwrap_or(0);
-+            .unwrap_or(0) as u32;
+             .unwrap_or(0);
          extent
-     }
- 
 @@ -1417,6 +1424,22 @@ impl Widget for Pane {
      fn after_layout(&mut self) {
          if self.resolve_bar_visibility() {

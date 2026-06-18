@@ -26,7 +26,7 @@ use rama::{
     tcp::{server::TcpListener},
     telemetry::tracing,
     tls::boring::{
-        client::EmulateTlsProfileLayer,
+        client::EmulateTlsProfileLayer, client::ExtendedTlsParameters,
         server::{TlsAcceptorData, TlsAcceptorLayer},
     },
     ua::{
@@ -55,10 +55,9 @@ use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
 use chrono::{DateTime, Utc};
-use rama::extensions::Extensions;
+use rama::extensions::{Extensions, InputExtensions};
 use rama::http::ws::handshake::server::WebSocketMatcher;
 use rama::matcher::Matcher;
-use rama::net::tls::client::NegotiatedTlsParameters;
 use rama::net::tls::DataEncoding;
 use rama::net::tls::server::SniRouter;
 use rama::tls::boring::core::hash::MessageDigest;
@@ -877,14 +876,22 @@ fn tls_sni_from_extensions(extensions: &Extensions) -> Option<String> {
 }
 
 fn upstream_tls_info_from_extensions(extensions: &Extensions) -> Option<Value> {
-    let params = extensions.get::<NegotiatedTlsParameters>()?;
+    let params = extensions
+        .get::<ExtendedTlsParameters>()
+        .or_else(|| {
+            extensions
+                .get::<InputExtensions>()
+                .and_then(|input| input.0.get::<ExtendedTlsParameters>())
+        })?;
 
-    let certificates = match params.peer_certificate_chain.as_ref() {
+    let negotiated = &params.negotiated;
+
+    let certificates = match negotiated.peer_certificate_chain.as_ref() {
         Some(DataEncoding::DerStack(chain)) => chain
             .iter()
             .filter_map(|der| certificate_der_to_json(der).ok())
             .collect::<Vec<_>>(),
-        Some(DataEncoding::Der(der)) => certificate_der_to_json(der)
+        Some(DataEncoding::Der(der)) => certificate_der_to_json(&der)
             .ok()
             .into_iter()
             .collect::<Vec<_>>(),
@@ -892,13 +899,32 @@ fn upstream_tls_info_from_extensions(extensions: &Extensions) -> Option<Value> {
     };
 
     Some(json!({
-        "secure_protocol": format!("{:?}", params.protocol_version),
-        "alpn": params
+        "secure_protocol": params
+            .protocol_version
+            .clone()
+            .unwrap_or_else(|| format!("{:?}", negotiated.protocol_version)),
+        "alpn": negotiated
             .application_layer_protocol
             .as_ref()
             .map(|proto| proto.to_string()),
+        "cipher": params.cipher,
+        "cipher_standard_name": params.cipher_standard_name,
+        "cipher_description": params.cipher_description,
+        "bits": params.bits,
+        "algorithm_bits": params.algorithm_bits,
+        "key_exchange_curve": params.curve_name,
+        "client_random": hex_upper(&params.client_random),
+        "server_random": hex_upper(&params.server_random),
         "certificate_chain": certificates,
     }))
+}
+
+fn hex_upper(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 pub fn certificate_der_to_json(der: &[u8]) -> anyhow::Result<Value> {

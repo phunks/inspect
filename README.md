@@ -17,14 +17,38 @@ It captures request/response metadata into SQLite and stores raw headers/bodies 
 - Optional SSL key log file output for TLS debugging
 - File-based structured logging via `tracing_subscriber`
 
+## Setup
 
-## Build
+### Vendored dependencies
+
+This project uses patched local copies of some dependencies under `ext/`.
+
+Initialize them before building:
+
 ```bash
-cargo install cargo-zigbuild
-cargo zigbuild --release
+just setup-ext
 ```
 
-## Setup
+This clones and patches:
+
+- `ext/rama`
+  - `patches/rama-0.3.0-alpha.4-tls-fix.patch`
+- `ext/tuie`
+  - `patches/tuie-0.2.3-scroll-fix.patch`
+
+Useful maintenance commands:
+```bash
+just check-patches
+just reset-ext
+just recreate-ext
+```
+
+If you modify the vendored dependencies, update the patch files with:
+```bash
+just update-rama-patch
+just update-tuie-patch
+```
+
 ### CA
 Generate a local CA certificate for client trust setup:
 ```text
@@ -33,6 +57,14 @@ $HOME/.inspect/mitm-root-ca.crt
 
 ```bash
 cargo run -- --generate-ca
+```
+
+Initialize patched vendored dependencies first:
+
+## Build
+```bash
+cargo install cargo-zigbuild
+cargo zigbuild --release
 ```
 
 ## Run
