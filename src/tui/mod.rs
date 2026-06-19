@@ -1514,7 +1514,7 @@ impl DelegateWidget for PacketListDelegate {
                 self.show_detail();
                 return InputResult::Handled;
             }
-            chord!(Enter|l) => {
+            chord!(Enter) => {
                 queue.next();
                 self.show_detail();
                 return InputResult::Handled;

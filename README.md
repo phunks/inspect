@@ -154,14 +154,18 @@ Viewer mode is read-only:
 - Existing `flows/` files are used for detail view and full text search.
 
 ## TUI keys
-- `h` / `help`:
+- `?` / `help`: show / close help
 - `q` / `Ctrl+C`: quit
 - `j` / `Down`: move down
 - `k` / `Up`: move up
 - `J` / `Shift+Down`: page down
 - `K` / `Shift+Up`: page up
+- `h` / `Left`: move left
+- `l` / `Right`: move right
 - `G`: jump to bottom
-- `Enter` / `l`: open details
+- `Enter`: open details
+- `Tab`: move to next focus
+- `Shift+Tab`: move to previous focus
 - `f`: filter packets
 - `g`: full text search
 - `n`: jump to the next retained full text search result

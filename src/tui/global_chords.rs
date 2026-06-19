@@ -9,17 +9,22 @@ const HELP_TEXT: &str = "\
 Key bindings
 
   q / Ctrl+C        quit
-  h                 show / close this help
+  ?                 show / close this help
 
 Navigation
   j / Down          move down
   k / Up            move up
+  h / Left          move left
+  l / Right         move right
+  Tab               move to next focus
+  Shift+Tab         move to previous focus
   J / Shift+Down    page down
   K / Shift+Up      page up
   G                 jump to bottom
+  Esc               close popup
 
 Packet
-  Enter / l         open details
+  Enter             open details
 
 Search
   f                 filter packets
@@ -35,26 +40,21 @@ Filter query examples
   method:POST && status:4xx
 ";
 
-#[derive(Clone, Debug)]
-struct HelpLineContext {
-    lines: Vec<String>,
-}
-
 struct HelpPopup {
     root: Box<Pane>,
-    list_id: WidgetId<List>,
+    scroll_id: WidgetId<Pane>,
     popup_id: Rc<Cell<Option<WidgetId>>>,
 }
 
 impl HelpPopup {
     fn new(
         root: Box<Pane>,
-        list_id: WidgetId<List>,
+        scroll_id: WidgetId<Pane>,
         popup_id: Rc<Cell<Option<WidgetId>>>,
     ) -> Box<Self> {
         Box::new(Self {
             root,
-            list_id,
+            scroll_id,
             popup_id,
         })
     }
@@ -65,10 +65,16 @@ impl HelpPopup {
         }
     }
 
-    fn scroll_by(&mut self, delta: f32) {
-        if let Some(list) = self.root.get_widget_mut(self.list_id) {
-            let next = (list.get_scroll_progress(Axis2D::Y) + delta).clamp(0.0, 1.0);
-            list.set_scroll_progress(Axis2D::Y, next);
+    fn scroll_by(&mut self, delta: i32) {
+        if let Some(pane) = self.root.get_widget_mut(self.scroll_id) {
+            pane.scroll_by(delta);
+        }
+        tuie::dirty_layout();
+    }
+
+    fn scroll_to(&mut self, progress: f32) {
+        if let Some(pane) = self.root.get_widget_mut(self.scroll_id) {
+            pane.set_scroll_progress(Axis2D::Y, progress);
         }
         tuie::dirty_layout();
     }
@@ -96,30 +102,27 @@ impl DelegateWidget for HelpPopup {
             }
             chord!(Down|j) => {
                 queue.next();
-                self.scroll_by(0.08);
+                self.scroll_by(1);
                 InputResult::Handled
             }
             chord!(Up|k) => {
                 queue.next();
-                self.scroll_by(-0.08);
+                self.scroll_by(-1);
                 InputResult::Handled
             }
             chord!(Shift+Down|J|PageDown) => {
                 queue.next();
-                self.scroll_by(0.35);
+                self.scroll_by(8);
                 InputResult::Handled
             }
             chord!(Shift+Up|K|PageUp) => {
                 queue.next();
-                self.scroll_by(-0.35);
+                self.scroll_by(-8);
                 InputResult::Handled
             }
             chord!(G) => {
                 queue.next();
-                if let Some(list) = self.root.get_widget_mut(self.list_id) {
-                    list.set_scroll_progress(Axis2D::Y, 1.0);
-                }
-                tuie::dirty_layout();
+                self.scroll_to(1.0);
                 InputResult::Handled
             }
             _ => InputResult::Rejected,
@@ -130,42 +133,12 @@ impl DelegateWidget for HelpPopup {
 
 fn open_help_popup() {
     let popup_id: Rc<Cell<Option<WidgetId>>> = Rc::new(Cell::new(None));
-    let mut list_id = WidgetId::EMPTY;
-
-    let lines = HELP_TEXT
-        .lines()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    let context = HelpLineContext {
-        lines,
-    };
-
-    let mut help_list = List::new()
-        .vertical()
-        .flex(1)
-        .min_height(15)
-        .gap(0)
-        .scroll(Scrollbar::AutoHide)
-        .id(&mut list_id);
-
-    help_list.set_item_count(context.lines.len());
-    help_list.set_renderer(
-        context,
-        |ctx: &mut HelpLineContext, idx: usize| -> Option<Box<dyn Widget>> {
-            let line = ctx.lines.get(idx)?.clone();
-
-            Some(
-                Text::new()
-                    .content(line.fg(Color::Foreground)) as Box<dyn Widget>
-            )
-        },
-    );
+    let mut scroll_id = WidgetId::EMPTY;
 
     let body = Pane::new()
         .style(Style::new().bg(Color::grey256(3)).blend(95))
         .width(64)
-        .max_height(20)
+        .height(24)
         .vertical()
         .padding(Spacing::balanced(2))
         .gap(1)
@@ -175,8 +148,12 @@ fn open_help_popup() {
             Pane::new()
                 .vertical()
                 .flex(1)
+                .id(&mut scroll_id)
+                .y_scroll(Scrollbar::AutoHide)
                 .children([
-                    help_list,
+                    Text::new()
+                        .content(HELP_TEXT.fg(Color::Foreground))
+                        .overflow(TextOverflow::WRAP) as Box<dyn Widget>,
                 ]),
             Text::new()
                 .content("Esc/h/q: close  j/k: scroll  J/K: page"
@@ -184,7 +161,7 @@ fn open_help_popup() {
                 .align(Align::End),
         ]);
 
-    let host = HelpPopup::new(body, list_id, popup_id.clone());
+    let host = HelpPopup::new(body, scroll_id, popup_id.clone());
 
     popup_id.set(Some(host.get_id().untyped()));
 
@@ -230,7 +207,7 @@ impl DelegateWidget for GlobalChords {
                 queue.next();
                 tuie::suspend();
             }
-            chord!(h) if queue.is_unhandled() => {
+            chord!('?') if queue.is_unhandled() => {
                 queue.next();
                 open_help_popup();
             }
