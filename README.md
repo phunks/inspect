@@ -140,6 +140,7 @@ capture/
     request.body
     response.head
     response.body
+    ssl_tls.json
 ```
 ## Viewer mode
 Use --view-capture to open an existing capture directory without starting the proxy.

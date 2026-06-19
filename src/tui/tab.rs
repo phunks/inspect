@@ -82,6 +82,7 @@ pub struct DetailPane {
     primary_tab_id: WidgetId<SegmentedControl>,
     message_part_row_id: WidgetId<Pane>,
     message_part_id: WidgetId<SegmentedControl>,
+    text_scroll_id: WidgetId<Pane>,
     #[allow(unused)]
     separator_id: WidgetId<Text>,
     text_id: WidgetId<Text>,
@@ -96,6 +97,7 @@ impl DetailPane {
         let mut primary_tab_id = WidgetId::EMPTY;
         let mut message_part_row_id = WidgetId::EMPTY;
         let mut message_part_id = WidgetId::EMPTY;
+        let mut text_scroll_id = WidgetId::EMPTY;
         let separator_id = WidgetId::EMPTY;
         let mut text_id = WidgetId::EMPTY;
 
@@ -146,12 +148,10 @@ impl DetailPane {
             .children([
                 row("", primary_controls as Box<dyn Widget>),
                 part_controls as Box<dyn Widget>,
-                // Text::new()
-                //     .content("--".fg(Color::grey256(8)))
-                //     .id(&mut separator_id) as Box<dyn Widget>,
                 Pane::new()
-                    .horizontal()
+                    .vertical()
                     .gap(0)
+                    .id(&mut text_scroll_id)
                     .children([Text::new()
                         .content(DETAIL_PLACEHOLDER_TEXT.dim())
                         .overflow(TextOverflow::WRAP)
@@ -166,6 +166,7 @@ impl DetailPane {
             primary_tab_id,
             message_part_row_id,
             message_part_id,
+            text_scroll_id,
             separator_id,
             text_id,
             content: DetailContent::default(),
@@ -255,6 +256,12 @@ impl DetailPane {
         }
     }
 
+    fn scroll_text_by(&mut self, delta: i32) {
+        if let Some(pane) = self.root.get_widget_mut(self.text_scroll_id) {
+            pane.scroll_by(delta);
+        }
+    }
+
     fn sync_from_controls(&mut self) {
         if let Some(ctrl) = self.root.get_widget(self.primary_tab_id) {
             self.primary_tab = match ctrl.get_selected() {
@@ -278,9 +285,9 @@ impl DetailPane {
 
     fn sync_message_part_visibility(&mut self) {
         let show_message_part = matches!(
-            self.primary_tab,
-            DetailPrimaryTab::Request | DetailPrimaryTab::Response
-        );
+                self.primary_tab,
+                DetailPrimaryTab::Request | DetailPrimaryTab::Response
+            );
 
         if let Some(row) = self.root.get_widget_mut(self.message_part_row_id) {
             if show_message_part {
@@ -291,6 +298,8 @@ impl DetailPane {
         }
 
         if let Some(ctrl) = self.root.get_widget_mut(self.message_part_id) {
+            ctrl.set_control_disabled(!show_message_part);
+
             if show_message_part {
                 ctrl.set_selected(match self.message_part {
                     DetailMessagePart::Meta => 0,
@@ -312,6 +321,36 @@ impl DelegateWidget for DetailPane {
 
     fn get_delegate_mut(&mut self) -> &mut dyn Widget {
         self.root.as_mut()
+    }
+
+    fn override_on_input(&mut self, queue: &mut InputQueue) -> InputResult {
+        let Some(event) = queue.peek() else {
+            return InputResult::Rejected;
+        };
+
+        match &event.chord {
+            chord!(Up | k) => {
+                queue.next();
+                self.scroll_text_by(-1);
+                InputResult::Handled
+            }
+            chord!(Down | j) => {
+                queue.next();
+                self.scroll_text_by(1);
+                InputResult::Handled
+            }
+            chord!(Shift + Up | K) => {
+                queue.next();
+                self.scroll_text_by(-10);
+                InputResult::Handled
+            }
+            chord!(Shift + Down | J) => {
+                queue.next();
+                self.scroll_text_by(10);
+                InputResult::Handled
+            }
+            _ => self.root.on_input(queue),
+        }
     }
 
     fn after_on_event(&mut self, event: &mut WidgetEvent) {

@@ -5,7 +5,7 @@ RAMA_TAG := "rama-0.3.0-alpha.4"
 RAMA_DIR := "ext/rama"
 RAMA_PATCH := "patches/rama-0.3.0-alpha.4-tls-fix.patch"
 
-TUIE_REPO := "https://github.com/phunks/tuie.git"
+TUIE_REPO := "https://github.com/jake-stewart/tuie.git"
 TUIE_REV := "665f2b223ec237a1eb51ccf562d004ce888affaf"
 TUIE_DIR := "ext/tuie"
 TUIE_PATCH := "patches/tuie-0.2.3-scroll-fix.patch"

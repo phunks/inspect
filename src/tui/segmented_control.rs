@@ -13,6 +13,7 @@ pub struct SegmentedControl {
     selected: Cell<usize>,
     pressed: Cell<Option<usize>>,
     disabled: Cell<u32>,
+    control_disabled: Cell<bool>,
 }
 
 impl SegmentedControl {
@@ -37,6 +38,10 @@ impl SegmentedControl {
             self.pressed.set(pressed);
             tuie::dirty_paint();
         }
+    }
+
+    fn is_control_disabled(&self) -> bool {
+        self.control_disabled.get()
     }
 
     fn is_disabled(&self, index: usize) -> bool {
@@ -87,7 +92,10 @@ impl Widget for SegmentedControl {
     fn render(&self, mut ctx: RenderContext) {
         let selected = self.selected.get();
         let pressed = self.pressed.get();
-        let base = self.layout.style;
+        let mut base = self.layout.style;
+        if self.is_control_disabled() {
+            base = base.dim();
+        }
         let accent = Color::Foreground;
         let selected_style = if self.in_focus_chain() {
             Style::new().fg(Color::BLACK).bg(accent).bold()
@@ -102,7 +110,7 @@ impl Widget for SegmentedControl {
         for (i, label) in self.labels.iter().enumerate() {
             let is_pressed = pressed == Some(i);
             let is_selected = i == selected;
-            let is_disabled = self.is_disabled(i);
+            let is_disabled = self.is_control_disabled() || self.is_disabled(i);
             let needs_separator = i > 0 && !is_selected && i - 1 != selected;
             let mut style = if is_selected {
                 selected_style
@@ -138,10 +146,14 @@ impl Widget for SegmentedControl {
     }
 
     fn is_focusable(&self) -> bool {
-        true
+        !self.is_control_disabled()
     }
 
     fn on_input(&mut self, queue: &mut InputQueue) -> InputResult {
+        if self.is_control_disabled() {
+            return InputResult::Rejected;
+        }
+
         let Some(event) = queue.next() else {
             return InputResult::Rejected;
         };
@@ -188,6 +200,7 @@ impl SegmentedControl {
             selected: Cell::new(0),
             pressed: Cell::new(None),
             disabled: Cell::new(0),
+            control_disabled: Cell::new(false),
         })
     }
 
@@ -203,6 +216,15 @@ impl SegmentedControl {
     pub fn selected(self: Box<Self>, index: usize) -> Box<Self> {
         self.selected.set(index);
         self
+    }
+
+    /// Sets whether the whole control is disabled.
+    pub fn set_control_disabled(&mut self, disabled: bool) {
+        if self.control_disabled.get() != disabled {
+            self.control_disabled.set(disabled);
+            self.set_pressed(None);
+            tuie::dirty_layout();
+        }
     }
 
     /// Sets whether the segment at `index` is disabled.
