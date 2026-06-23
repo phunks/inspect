@@ -48,6 +48,7 @@ pub struct ResponseMetadata {
     pub upstream_status: Option<u16>,
     pub version: String,
     pub tls_upstream: Option<Value>,
+    pub upstream_remote_addr: Option<String>,
     pub headers: Value,
     pub body_size: i64,
     pub body_saved_size: i64,
@@ -127,6 +128,7 @@ impl DbState {
                 upstream_status INTEGER,
                 version TEXT,
                 tls_upstream TEXT,
+                upstream_remote_addr TEXT,
                 headers TEXT,
                 body_size INTEGER,
                 body_saved_size INTEGER,
@@ -220,9 +222,9 @@ where
     sqlx::query(
         "INSERT INTO responses (
             id, seq, flow_key, flow_dir, response_head_path, response_body_path,
-            elapsed, status, upstream_status, version, tls_upstream, headers,
+            elapsed, status, upstream_status, version, tls_upstream, upstream_remote_addr, headers,
             body_size, body_saved_size, body_truncated, body_save_limit
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(&metadata.id)
         .bind(metadata.seq)
@@ -235,6 +237,7 @@ where
         .bind(metadata.upstream_status.map(|s| s as i64))
         .bind(&metadata.version)
         .bind(metadata.tls_upstream.as_ref().map(|v| v.to_string()))
+        .bind(&metadata.upstream_remote_addr)
         .bind(metadata.headers.to_string())
         .bind(metadata.body_size)
         .bind(metadata.body_saved_size)

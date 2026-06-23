@@ -6,6 +6,8 @@ mod focus_pane;
 pub mod time;
 pub mod tab;
 mod segmented_control;
+mod har;
+pub mod body;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,6 +25,8 @@ use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTex
 use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
 use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketStarted};
 use crate::mitm::capture::CapturePaths;
+use crate::tui::body::format_body_for_display_with_headers;
+use crate::tui::har::open_har_export_popup;
 use crate::tui::read_metadata::PacketSummary;
 use crate::tui::tab::{DetailContent, DetailMessagePartSelection, DetailPane, DetailPrimaryTabSelection, DetailTabSelection};
 
@@ -919,10 +923,12 @@ impl PacketListDelegate {
                     }
 
                     let req_body = read_body_file(
-                        req.request_body_path.as_deref()
+                        req.request_body_path.as_deref(),
+                        &req.headers,
                     ).await;
                     let res_body = read_body_file(
-                        res.response_body_path.as_deref()
+                        res.response_body_path.as_deref(),
+                        &res.headers,
                     ).await;
                     let req_body = format_body_with_size(req.body_size_line(), req_body);
                     let res_body = format_body_with_size(res.body_size_line(), res_body);
@@ -949,7 +955,8 @@ impl PacketListDelegate {
                     }
 
                     let req_body = read_body_file(
-                        req.request_body_path.as_deref()
+                        req.request_body_path.as_deref(),
+                        &req.headers,
                     ).await;
                     let req_body = format_body_with_size(req.body_size_line(), req_body);
                     let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
@@ -1104,6 +1111,10 @@ impl PacketListDelegate {
                 query,
             });
         });
+    }
+
+    fn open_har_export_dialog(&mut self) {
+        open_har_export_popup();
     }
 
     fn poll_search_requests(&mut self) {
@@ -1288,13 +1299,13 @@ impl PacketListDelegate {
     }
 }
 
-async fn read_body_file(path: Option<&str>) -> String {
+async fn read_body_file(path: Option<&str>, headers: &serde_json::Value) -> String {
     let Some(path) = path else {
         return "<no path>".to_string();
     };
 
     match tokio::fs::read(path).await {
-        Ok(bytes) => format_body_for_display(&bytes),
+        Ok(bytes) => format_body_for_display_with_headers(headers, &bytes),
         Err(e) => format!("<read error: {e}>"),
     }
 }
@@ -1319,137 +1330,6 @@ fn format_ssl_tls_info(tls_sni: Option<&str>, tls_upstream: Option<&str>) -> Str
 
     serde_json::to_string_pretty(&value)
         .unwrap_or_else(|_| value.to_string())
-}
-
-pub fn format_body_for_display(bytes: &[u8]) -> String {
-    if let Some(kind) = binary_magic_kind(bytes) {
-        return format!("<binary body detected by magic number: {kind}>\n\n{}", hexdump_with_ascii(bytes));
-    }
-
-    if let Ok(text) = std::str::from_utf8(bytes)
-        && looks_like_text(text) {
-        return text.to_string();
-    }
-
-    hexdump_with_ascii(bytes)
-}
-
-fn binary_magic_kind(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        return Some("png");
-    }
-
-    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        return Some("jpeg");
-    }
-
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Some("gif");
-    }
-
-    if bytes.starts_with(b"%PDF-") {
-        return Some("pdf");
-    }
-
-    if bytes.starts_with(b"PK\x03\x04")
-        || bytes.starts_with(b"PK\x05\x06")
-        || bytes.starts_with(b"PK\x07\x08") {
-        return Some("zip");
-    }
-
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        return Some("gzip");
-    }
-
-    if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        return Some("zstd");
-    }
-
-    if bytes.starts_with(b"\x00asm") {
-        return Some("wasm");
-    }
-
-    if bytes.starts_with(b"\x7fELF") {
-        return Some("elf");
-    }
-
-    if bytes.starts_with(b"BM") {
-        return Some("bmp");
-    }
-
-    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        return Some("webp");
-    }
-
-    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {
-        return Some("wav");
-    }
-
-    if bytes.starts_with(b"OggS") {
-        return Some("ogg");
-    }
-
-    if bytes.len() >= 12 && bytes.get(4..12) == Some(b"ftypavif") {
-        return Some("avif");
-    }
-
-    if bytes.len() >= 12 && bytes.get(4..8) == Some(b"ftyp") {
-        return Some("mp4");
-    }
-
-    None
-}
-
-fn looks_like_text(text: &str) -> bool {
-    let mut total = 0usize;
-    let mut control = 0usize;
-
-    for ch in text.chars() {
-        total += 1;
-
-        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
-            control += 1;
-        }
-    }
-
-    total == 0 || control * 100 / total <= 5
-}
-
-fn hexdump_with_ascii(bytes: &[u8]) -> String {
-    const WIDTH: usize = 16;
-    let mut out = String::new();
-
-    for (line, chunk) in bytes.chunks(WIDTH).enumerate() {
-        let offset = line * WIDTH;
-        out.push_str(&format!("{offset:08x}  "));
-        for i in 0..WIDTH {
-            if i < chunk.len() {
-                out.push_str(&format!("{:02x} ", chunk[i]));
-            } else {
-                out.push_str("   ");
-            }
-            if i == 7 {
-                out.push(' ');
-            }
-        }
-
-        out.push_str(" |");
-        for &b in chunk {
-            let ch = match b {
-                0x20..=0x7e => b as char, // printable ASCII
-                _ => '.',
-            };
-            out.push(ch);
-        }
-        for _ in chunk.len()..WIDTH {
-            out.push(' ');
-        }
-        out.push('|');
-        if offset + chunk.len() < bytes.len() {
-            out.push('\n');
-        }
-    }
-    out
 }
 
 impl DelegateWidget for PacketListDelegate {
@@ -1491,6 +1371,12 @@ impl DelegateWidget for PacketListDelegate {
             chord!(Char('g')) if queue.is_unhandled() => {
                 queue.next();
                 self.open_full_text_search();
+                return InputResult::Handled;
+            }
+            // HAR export shortcut
+            chord!(Char('S')) if queue.is_unhandled() => {
+                queue.next();
+                self.open_har_export_dialog();
                 return InputResult::Handled;
             }
             chord!(Char('n')) if queue.is_unhandled() => {

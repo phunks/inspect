@@ -108,6 +108,8 @@ Options:
           Maximum bytes to save per captured body [default: 3072]
       --body-save-unlimited
           Save captured bodies without truncation
+      --body-omit-content-types <BODY_OMIT_CONTENT_TYPES>
+          Do not save bodies for matching Content-Type prefixes
       --generate-ca
           Generate (or reuse) persistent local MITM root CA and exit
       --force-regenerate-ca
@@ -154,7 +156,7 @@ Viewer mode is read-only:
 - Existing `flows/` files are used for detail view and full text search.
 
 ## TUI keys
-- `?` / `help`: show / close help
+- `?`: show / close help
 - `q` / `Ctrl+C`: quit
 - `j` / `Down`: move down
 - `k` / `Up`: move up
@@ -167,9 +169,10 @@ Viewer mode is read-only:
 - `Tab`: move to next focus
 - `Shift+Tab`: move to previous focus
 - `f`: filter packets
-- `g`: full text search
-- `n`: jump to the next retained full text search result
-- `p`: jump to the previous retained full text search result
+- `g`: full-text search
+- `S`: export HAR
+- `n`: jump to the next retained full-text search result
+- `p`: jump to the previous retained full-text search result
 
 ## Filtering
 

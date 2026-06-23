@@ -48,6 +48,7 @@ struct FileConfig {
     upstream_request_timeout_sec: Option<u64>,
     body_save_limit_bytes: Option<usize>,
     body_save_unlimited: Option<bool>,
+    body_omit_content_types: Option<Vec<String>>,
     generate_ca: Option<bool>,
     force_regenerate_ca: Option<bool>,
     preshared_key_log: Option<String>,
@@ -102,6 +103,9 @@ pub struct Opt {
 
     #[arg(long, help = "Save captured bodies without truncation")]
     pub body_save_unlimited: bool,
+
+    #[arg(long, value_delimiter = ',', help = "Do not save bodies for matching Content-Type prefixes")]
+    pub body_omit_content_types: Vec<String>,
 
     #[arg(long, help = "Generate (or reuse) persistent local MITM root CA and exit")]
     pub generate_ca: bool,
@@ -212,6 +216,11 @@ impl Opt {
             self.body_save_unlimited = value;
         }
 
+        if !cli_specified(matches, "body_omit_content_types")
+            && let Some(value) = config.body_omit_content_types {
+            self.body_omit_content_types = value;
+        }
+
         if !cli_specified(matches, "generate_ca")
             && let Some(value) = config.generate_ca {
             self.generate_ca = value;
@@ -263,29 +272,30 @@ impl Opt {
 
     pub fn log_effective_config(&self) {
         info!(
-                config = %self.config.display(),
-                ip = %self.ip,
-                port = self.port,
-                view_capture = ?self.view_capture,
-                verbosity = self.verbosity,
-                upstream_proxy = ?self.upstream_proxy,
-                ua_profile = ?self.ua_profile,
-                connect_ua_profile = ?self.connect_ua_profile,
-                proxy_mode = ?self.proxy_mode,
-                upstream_handshake_timeout_ms = self.upstream_handshake_timeout_ms,
-                upstream_request_timeout_sec = self.upstream_request_timeout_sec,
-                body_save_limit_bytes = self.body_save_limit_bytes,
-                body_save_unlimited = self.body_save_unlimited,
-                effective_body_save_limit_bytes = ?self.effective_body_save_limit_bytes(),
-                generate_ca = self.generate_ca,
-                force_regenerate_ca = self.force_regenerate_ca,
-                preshared_key_log_enabled = self.is_preshared_key_log_enabled(),
-                preshared_key_log_file = ?self.preshared_key_log_file(),
-                tui_time_mode = ?self.tui_time_mode,
-                tui_time_format = %self.tui_time_format,
-                tui_time_tz = %self.tui_time_tz,
-                "effective inspect config"
-            );
+            config = %self.config.display(),
+            ip = %self.ip,
+            port = self.port,
+            view_capture = ?self.view_capture,
+            verbosity = self.verbosity,
+            upstream_proxy = ?self.upstream_proxy,
+            ua_profile = ?self.ua_profile,
+            connect_ua_profile = ?self.connect_ua_profile,
+            proxy_mode = ?self.proxy_mode,
+            upstream_handshake_timeout_ms = self.upstream_handshake_timeout_ms,
+            upstream_request_timeout_sec = self.upstream_request_timeout_sec,
+            body_save_limit_bytes = self.body_save_limit_bytes,
+            body_save_unlimited = self.body_save_unlimited,
+            effective_body_save_limit_bytes = ?self.effective_body_save_limit_bytes(),
+            body_omit_content_types = ?self.body_omit_content_types,
+            generate_ca = self.generate_ca,
+            force_regenerate_ca = self.force_regenerate_ca,
+            preshared_key_log_enabled = self.is_preshared_key_log_enabled(),
+            preshared_key_log_file = ?self.preshared_key_log_file(),
+            tui_time_mode = ?self.tui_time_mode,
+            tui_time_format = %self.tui_time_format,
+            tui_time_tz = %self.tui_time_tz,
+            "effective inspect config"
+        );
     }
 
     pub fn effective_body_save_limit_bytes(&self) -> Option<usize> {

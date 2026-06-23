@@ -119,6 +119,18 @@ body_save_limit_bytes = 3072
 # - This can increase memory and disk usage significantly.
 body_save_unlimited = false
 
+# Do not save bodies for matching Content-Type prefixes.
+# Matching is case-insensitive and ignores parameters after ';'.
+body_omit_content_types = [
+    "video/",
+    "audio/",
+    "image/",
+    "font/",
+    "application/octet-stream",
+    "application/wasm",
+    "application/vnd.yt-ump",
+]
+
 # Generate or reuse persistent local MITM root CA and exit.
 # CLI: --generate-ca
 # Default: false

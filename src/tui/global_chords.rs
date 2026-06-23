@@ -25,12 +25,13 @@ Navigation
 
 Packet
   Enter             open details
+  S                 export HAR
 
 Search
   f                 filter packets
-  g                 full text search
-  n                 next full text search result
-  p                 previous full text search result
+  g                 full-text search
+  n                 next full-text search result
+  p                 previous full-text search result
 
 Filter query examples
   example.com
@@ -95,7 +96,7 @@ impl DelegateWidget for HelpPopup {
         };
 
         match &event.chord {
-            chord!(Esc|h|q) => {
+            chord!(Esc|q) => {
                 queue.next();
                 self.close();
                 InputResult::Handled
@@ -156,7 +157,7 @@ fn open_help_popup() {
                         .overflow(TextOverflow::WRAP) as Box<dyn Widget>,
                 ]),
             Text::new()
-                .content("Esc/h/q: close  j/k: scroll  J/K: page"
+                .content("Esc/q: close  j/k: scroll  J/K: page"
                     .fg(Color::BRIGHT_BLACK))
                 .align(Align::End),
         ]);

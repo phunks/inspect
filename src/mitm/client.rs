@@ -21,14 +21,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use http::header::USER_AGENT;
 use http::HeaderValue;
+use rama::extensions::{ExtensionsRef, InputExtensions};
 use rama::http::client::proxy::layer::HttpProxyConnector;
 use rama::http::layer::timeout::TimeoutLayer;
+use rama::net::stream::ClientSocketInfo;
 use rama::net::tls::client::ServerVerifyMode;
 use crate::options::{ProxyMode, UaProfile};
 use crate::mitm::websocket::mitm_websocket;
 
+#[derive(Debug)]
+pub(crate) struct UpstreamResult {
+    pub response: Response,
+    pub upstream_err: Option<String>,
+    pub upstream_status: Option<u16>,
+    pub upstream_remote_addr: Option<String>,
+}
+
 type UpstreamCall = Arc<
-    dyn Fn(Request) -> Pin<Box<dyn Future<Output = (Response, Option<String>, Option<u16>)> + Send>>
+    dyn Fn(Request) -> Pin<Box<dyn Future<Output = UpstreamResult> + Send>>
     + Send
     + Sync,
 >;
@@ -46,7 +56,7 @@ pub struct UpstreamClient {
 }
 
 impl UpstreamClient {
-    pub(crate) async fn serve(&self, req: Request) -> (Response, Option<String>, Option<u16>) {
+    pub(crate) async fn serve(&self, req: Request) -> UpstreamResult {
         (self.call)(req).await
     }
 
@@ -60,6 +70,19 @@ impl UpstreamClient {
             websocket_call,
         }
     }
+}
+
+fn upstream_remote_addr_from_response(res: &Response) -> Option<String> {
+    let socket_info = res.extensions()
+        .get()
+        .and_then(|InputExtensions(egress)| egress.get::<ClientSocketInfo>())?;
+
+    let peer = socket_info.peer_addr();
+
+    let ip = peer.ip();
+    let port = peer.port();
+
+    Some(format!("{ip}:{port}"))
 }
 
 #[derive(Clone)]
@@ -172,7 +195,13 @@ pub fn new_upstream_client(
                     match client.serve(req).await {
                         Ok(res) => {
                             let status = Some(res.status().as_u16());
-                            (res, None, status)
+                            let upstream_remote_addr = upstream_remote_addr_from_response(&res);
+                            UpstreamResult {
+                                response: res,
+                                upstream_err: None,
+                                upstream_status: status,
+                                upstream_remote_addr,
+                            }
                         }
                         Err(err) => {
                             let err_text = format!("{err:#}");
@@ -182,7 +211,13 @@ pub fn new_upstream_client(
                             let fallback_status = Some(res.status().as_u16());
 
                             let msg = format!("upstream error: {err_text}");
-                            (res, Some(msg), upstream_status.or(fallback_status))
+                            // (res, Some(msg), upstream_status.or(fallback_status))
+                            UpstreamResult {
+                                response: res,
+                                upstream_err: Some(msg),
+                                upstream_status: upstream_status.or(fallback_status),
+                                upstream_remote_addr: None,
+                            }
                         }
                     }
                 })
@@ -233,7 +268,13 @@ pub fn new_upstream_client(
                     match client.serve(req).await {
                         Ok(res) => {
                             let status = Some(res.status().as_u16());
-                            (res, None, status)
+                            // (res, None, status)
+                            UpstreamResult {
+                                response: res,
+                                upstream_err: None,
+                                upstream_status: status,
+                                upstream_remote_addr: None,
+                            }
                         }
                         Err(err) => {
                             let err_text = format!("{err:#}");
@@ -243,7 +284,13 @@ pub fn new_upstream_client(
                             let fallback_status = Some(res.status().as_u16());
 
                             let msg = format!("upstream error: {err_text}");
-                            (res, Some(msg), upstream_status.or(fallback_status))
+                            // (res, Some(msg), upstream_status.or(fallback_status))
+                            UpstreamResult {
+                                response: res,
+                                upstream_err: Some(msg),
+                                upstream_status: upstream_status.or(fallback_status),
+                                upstream_remote_addr: None,
+                            }
                         }
                     }
                 })

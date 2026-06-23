@@ -165,6 +165,7 @@ pub struct ResponseMetadata {
     pub upstream_status: Option<i64>,
     pub version: Option<String>,
     pub tls_upstream: Option<String>,
+    pub upstream_remote_addr: Option<String>,
     pub headers: Value,
     pub body_size: Option<i64>,
     pub body_saved_size: Option<i64>,
@@ -201,6 +202,7 @@ impl From<ResponseMetadataLegacy> for ResponseMetadata {
             upstream_status: value.upstream_status,
             version: value.version,
             tls_upstream: None,
+            upstream_remote_addr: None,
             headers: value.headers,
             body_size: None,
             body_saved_size: None,
@@ -225,15 +227,7 @@ impl fmt::Display for ResponseMetadata {
         )?;
         writeln!(f, "{:<width$}: {} ms", "elapsed", self.elapsed.map_or("-".into(), |d| d.to_string()))?;
         writeln!(f, "{:<width$}: {}", "protocol", opt_str(self.version.as_deref()))?;
-
-        // if let Some(tls_upstream) = self.tls_upstream.as_deref() {
-        //     writeln!(f, "{:<width$}:", "upstream tls")?;
-        //     let tls_value = serde_json::from_str::<Value>(tls_upstream)
-        //         .unwrap_or_else(|_| Value::String(tls_upstream.to_string()));
-        //     let tls_pretty = serde_json::to_string_pretty(&tls_value)
-        //         .unwrap_or_else(|_| tls_upstream.to_string());
-        //     writeln!(f, "{}", indent_lines(&tls_pretty, "  "))?;
-        // }
+        writeln!(f, "{:<width$}: {}", "remote", opt_str(self.upstream_remote_addr.as_deref()))?;
 
         writeln!(f, "{:<width$}:", "headers")?;
         write!(f, "{}", indent_lines(&headers_pretty, "  "))
@@ -515,26 +509,27 @@ where
     E: Executor<'e, Database = Sqlite> + Copy,
 {
     let with_body_columns = sqlx::query_as!(
-        ResponseMetadata,
-        r#"SELECT id,
-                seq,
-                flow_key,
-                flow_dir,
-                response_head_path,
-                response_body_path,
-                elapsed,
-                status,
-                upstream_status,
-                version,
-                tls_upstream,
-                headers,
-                body_size,
-                body_saved_size,
-                body_truncated,
-                body_save_limit
-            FROM responses WHERE id = ?"#,
-        id
-    )
+            ResponseMetadata,
+            r#"SELECT id,
+                    seq,
+                    flow_key,
+                    flow_dir,
+                    response_head_path,
+                    response_body_path,
+                    elapsed,
+                    status,
+                    upstream_status,
+                    version,
+                    tls_upstream,
+                    upstream_remote_addr,
+                    headers,
+                    body_size,
+                    body_saved_size,
+                    body_truncated,
+                    body_save_limit
+                FROM responses WHERE id = ?"#,
+            id
+        )
         .fetch_one(exec)
         .await;
 

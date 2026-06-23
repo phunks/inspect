@@ -59,6 +59,7 @@ async fn main() -> Result<(), AnyError> {
     let upstream_handshake_timeout_ms = opt.upstream_handshake_timeout_ms;
     let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
     let body_save_limit_bytes = opt.effective_body_save_limit_bytes();
+    let body_omit_content_types = opt.body_omit_content_types.clone();
     let (quit_tx, quit_rx) = watch::channel(false);
 
     let proxy_task = tokio::spawn(async move {
@@ -71,6 +72,7 @@ async fn main() -> Result<(), AnyError> {
             upstream_handshake_timeout_ms,
             upstream_request_timeout_sec,
             body_save_limit_bytes,
+            body_omit_content_types,
             Some(callback),
             quit_rx,
         ).await {

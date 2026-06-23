@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS responses (
     upstream_status INTEGER,
     version TEXT,
     tls_upstream TEXT,
+    upstream_remote_addr TEXT,
     headers TEXT,
     body_size INTEGER,
     body_saved_size INTEGER,

@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use rama::net::address::{Host, HostWithPort, ProxyAddress};
 use flate2::read;
@@ -52,7 +53,6 @@ use http::HeaderValue;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
 use chrono::{DateTime, Utc};
 use rama::extensions::{Extensions, InputExtensions};
@@ -78,23 +78,6 @@ const WEBSOCKET_NOT_CAPTURED_MESSAGE: &str =
 
 pub type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub type AnyResult<T> = Result<T, AnyError>;
-
-
-// #[derive(Debug, Clone, Serialize)]
-// pub struct PacketSummary {
-//     pub id: String,
-//     pub flow_key: String,
-//     pub time: String,
-//     pub epoch_ms: i64,
-//     pub method: String,
-//     pub protocol: String,
-//     pub host: String,
-//     pub uri: String,
-//     pub query_str: String,
-//     pub status: u16,
-//     pub version: String,
-//     // pub elapsed:
-// }
 
 #[derive(Debug, Clone, Serialize)]
 pub enum PacketEvent {
@@ -133,6 +116,7 @@ struct State {
     dbstate: DbState,
     capture_paths: CapturePaths,
     body_save_limit_bytes: Option<usize>,
+    body_omit_content_types: Arc<[String]>,
     proxy_body_limit_bytes: Option<usize>,
     seq: Arc<AtomicU64>,
     tui_callback: Option<Arc<dyn Fn(PacketEvent) + Send + Sync>>,
@@ -167,6 +151,7 @@ pub async fn mitm_proxy_main(
     upstream_handshake_timeout_ms: u64,
     upstream_request_timeout_sec: u64,
     body_save_limit_bytes: Option<usize>,
+    body_omit_content_types: Vec<String>,
     packet_callback: Option<Arc<dyn Fn(PacketEvent) + Send + Sync>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
@@ -204,6 +189,12 @@ pub async fn mitm_proxy_main(
         dbstate: DbState::new().await.expect("dbstate"),
         capture_paths: CapturePaths::new(),
         body_save_limit_bytes,
+        body_omit_content_types: body_omit_content_types
+            .into_iter()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .into(),
         proxy_body_limit_bytes: body_save_limit_bytes
             .map(|limit| limit.max(PROXY_BODY_LIMIT_BYTES)),
         seq: Arc::new(AtomicU64::new(0)),
@@ -549,14 +540,42 @@ async fn http_mitm_proxy (
         }
     };
 
-    let stored_req_body_bytes = request_body_for_storage(&parts, &req_body_bytes);
-    let req_storage_info =
-        body_storage_info(stored_req_body_bytes.len(), state.body_save_limit_bytes);
+    let req_omit_reason = body_omit_reason_by_content_type(
+        &parts.headers,
+        &state.body_omit_content_types,
+    );
+
+    let stored_req_body_bytes = if let Some(reason) = req_omit_reason.as_deref() {
+        Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
+    } else if state.body_save_limit_bytes.is_none() {
+        req_body_bytes.clone()
+    } else {
+        request_body_for_storage(&parts, &req_body_bytes)
+    };
+
+    let req_storage_info = if req_omit_reason.is_some() {
+        BodyStorageInfo {
+            saved_size: stored_req_body_bytes.len(),
+            truncated: true,
+        }
+    } else {
+        body_storage_info(stored_req_body_bytes.len(), state.body_save_limit_bytes)
+    };
+
+    let req_body_save_limit = if req_omit_reason.is_some() {
+        Some(0)
+    } else {
+        state.body_save_limit_bytes.map(|limit| limit as i64)
+    };
 
     let _ = write_body_for_storage(
         &req_body_path,
         &stored_req_body_bytes,
-        state.body_save_limit_bytes,
+        if req_omit_reason.is_some() {
+            None
+        } else {
+            state.body_save_limit_bytes
+        },
     ).await;
 
     dbstate.event_sender.send(RequestResponseEvent::Request(RequestMetadata{
@@ -579,7 +598,7 @@ async fn http_mitm_proxy (
         body_size: req_body_bytes.len() as i64,
         body_saved_size: req_storage_info.saved_size as i64,
         body_truncated: req_storage_info.truncated,
-        body_save_limit: state.body_save_limit_bytes.map(|limit| limit as i64),
+        body_save_limit: req_body_save_limit,
     })).unwrap_or_else(|e|
         tracing::error!("error sending request event: {e:?}"));
 
@@ -587,8 +606,14 @@ async fn http_mitm_proxy (
 
     let started_at = std::time::Instant::now();
 
-    let (res, upstream_err, upstream_status): (Response, Option<String>, Option<u16>) =
-        state.upstream_client.serve(req).await;
+    // let (res, upstream_err, upstream_status): (Response, Option<String>, Option<u16>) =
+    //     state.upstream_client.serve(req).await;
+
+    let upstream_result = state.upstream_client.serve(req).await;
+    let res = upstream_result.response;
+    let upstream_err = upstream_result.upstream_err;
+    let upstream_status = upstream_result.upstream_status;
+    let upstream_remote_addr = upstream_result.upstream_remote_addr;
 
     let elapsed_ms = started_at.elapsed().as_millis() as i64;
 
@@ -626,12 +651,13 @@ async fn http_mitm_proxy (
     let body_size = res_body_bytes.len() as i64;
     let body_saved_size;
     let body_truncated;
-    let body_save_limit = state.body_save_limit_bytes.map(|limit| limit as i64);
+    let body_save_limit;
 
     if let Some(msg) = upstream_err.as_deref() {
         let storage_info = body_storage_info(msg.len(), state.body_save_limit_bytes);
         body_saved_size = storage_info.saved_size as i64;
         body_truncated = storage_info.truncated;
+        body_save_limit = state.body_save_limit_bytes.map(|limit| limit as i64);
 
         let _ = write_body_for_storage(
             &res_body_path,
@@ -639,15 +665,44 @@ async fn http_mitm_proxy (
             state.body_save_limit_bytes,
         ).await;
     } else {
-        let stored_body_bytes = body_for_storage(&parts, &res_body_bytes);
-        let storage_info = body_storage_info(stored_body_bytes.len(), state.body_save_limit_bytes);
+        let res_omit_reason = body_omit_reason_by_content_type(
+            &parts.headers,
+            &state.body_omit_content_types,
+        );
+
+        let stored_body_bytes = if let Some(reason) = res_omit_reason.as_deref() {
+            Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
+        } else if state.body_save_limit_bytes.is_none() {
+            res_body_bytes.clone()
+        } else {
+            body_for_storage(&parts, &res_body_bytes)
+        };
+
+        let storage_info = if res_omit_reason.is_some() {
+            BodyStorageInfo {
+                saved_size: stored_body_bytes.len(),
+                truncated: true,
+            }
+        } else {
+            body_storage_info(stored_body_bytes.len(), state.body_save_limit_bytes)
+        };
+
         body_saved_size = storage_info.saved_size as i64;
         body_truncated = storage_info.truncated;
+        body_save_limit = if res_omit_reason.is_some() {
+            Some(0)
+        } else {
+            state.body_save_limit_bytes.map(|limit| limit as i64)
+        };
 
         let _ = write_body_for_storage(
             &res_body_path,
             &stored_body_bytes,
-            state.body_save_limit_bytes,
+            if res_omit_reason.is_some() {
+                None
+            } else {
+                state.body_save_limit_bytes
+            },
         ).await;
     }
 
@@ -663,6 +718,7 @@ async fn http_mitm_proxy (
         upstream_status,
         version: version_to_string(parts.version),
         tls_upstream,
+        upstream_remote_addr,
         headers: headers_to_json(&parts.headers),
         body_size,
         body_saved_size,
@@ -681,6 +737,30 @@ async fn http_mitm_proxy (
     }
 
     Ok(Response::from_parts(parts, Body::from(res_body_bytes)))
+}
+
+fn body_omit_reason_by_content_type(
+    headers: &http::HeaderMap,
+    omit_content_types: &[String],
+) -> Option<String> {
+    let content_type = normalized_content_type(headers)?;
+
+    omit_content_types
+        .iter()
+        .find(|pattern| content_type.starts_with(pattern.as_str()))
+        .map(|pattern| {
+            format!("content-type {content_type} matched omit rule {pattern}")
+        })
+}
+
+fn normalized_content_type(headers: &http::HeaderMap) -> Option<String> {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 async fn capture_websocket_handshake(state: State, req: Request) -> Response {
@@ -809,6 +889,7 @@ async fn capture_websocket_handshake(state: State, req: Request) -> Response {
         upstream_status: Some(proxy_status),
         version: version_to_string(parts.version),
         tls_upstream: None,
+        upstream_remote_addr: None,
         headers: headers_to_json(&parts.headers),
         body_size: 0,
         body_saved_size: WEBSOCKET_NOT_CAPTURED_MESSAGE.len() as i64,
