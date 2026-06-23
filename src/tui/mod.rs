@@ -367,7 +367,7 @@ fn detail_tab_selection_from_search_path(path: &str) -> Option<DetailTabSelectio
         return None;
     };
 
-    let message_part = if file_name.ends_with(".body") {
+    let message_part = if is_body_file_name(file_name) {
         DetailMessagePartSelection::Body
     } else {
         DetailMessagePartSelection::Meta
@@ -377,6 +377,15 @@ fn detail_tab_selection_from_search_path(path: &str) -> Option<DetailTabSelectio
         primary_tab,
         message_part,
     })
+}
+
+fn is_body_file_name(file_name: &str) -> bool {
+    file_name.ends_with(".body")
+        || file_name.ends_with(".body.gz")
+        || file_name.ends_with(".body.br")
+        || file_name.ends_with(".body.zst")
+        || file_name.ends_with(".body.zstd")
+        || file_name.ends_with(".body.deflate")
 }
 
 impl PacketListDelegate {

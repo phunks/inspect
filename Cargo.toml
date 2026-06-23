@@ -4,7 +4,6 @@ version = "0.5.0"
 edition = "2024"
 
 [dependencies]
-#rama = { version = "0.3.0-alpha.4", features = ["http", "boring", "http-full", "ua", "compression"]  }
 rama = { path = "ext/rama", version = "0.3.0-alpha.4", features = ["http", "boring", "http-full", "ua", "compression"]  }
 bytes = "1.11"
 serde = { version = "1.0", features = ["derive"] }
@@ -15,7 +14,6 @@ sqlx = { version = "0.9", features = ["sqlite", "json", "chrono", "_sqlite", "ru
 http = "1.4"
 http-body-util = "0.1"
 tokio = { version = "1.52", features = ["full"] }
-rustls = "0.23"
 time = "0.3"
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1.1"
@@ -27,8 +25,6 @@ tracing-subscriber = "0.3"
 tracing-appender = "0.2"
 tracing-futures = "0.2"
 chrono = "0.4"
-#tuie = "0.2"
-#tuie = { git = "https://github.com/phunks/tuie", tag = "v0.2.1" }
 tuie = { path = "ext/tuie" }
 chord_macro = "0.1"
 parking_lot = "0.12"
@@ -36,7 +32,6 @@ regex = "1.12"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
-itertools = "0"
 toml = "1.1"
 
 [patch.crates-io]

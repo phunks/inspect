@@ -144,6 +144,28 @@ capture/
     response.body
     ssl_tls.json
 ```
+
+`ssl_tls.json` contains TLS-related metadata observed by inspect. When
+`--upstream-proxy` is used, the upstream remote address recorded in metadata is
+the upstream proxy endpoint inspect connected to. It should not be interpreted as
+the final origin server or CDN edge IP chosen by the upstream proxy.
+
+If a captured body has `Content-Encoding`, the saved body file may include an encoding
+suffix while still preserving the original bytes:
+```text
+response.body.gz
+response.body.br
+response.body.zst
+response.body.deflate
+```
+
+Full-text search supports encoded body files with `.gz`, `.br`, and `.zst`
+suffixes. `.deflate` files are preserved but deflate search is best-effort.
+HTTP `Content-Encoding: deflate` is rarely seen in modern traffic: historically,
+some implementations interpreted it as zlib-wrapped deflate while others used
+raw deflate, so gzip/br/zstd are generally more predictable in practice.
+
+
 ## Viewer mode
 Use --view-capture to open an existing capture directory without starting the proxy.
 ```bash
@@ -265,7 +287,8 @@ Example:
 re:(?i)region
 ```
 
-After selecting a result and closing the search popup, the search results are retained until the next full text search selection.
+After selecting a result and closing the search popup, the search results are
+retained until the next full text search selection.
 
 Use:
 - `n`: jump to the next retained search result
@@ -282,7 +305,7 @@ Use:
 - Non-text bodies may be rendered as hex for inspection.
 - The packet detail view includes the flow directory for easier correlation with on-disk captures.
 - Auto-scroll follows appended items even when scrollbar remains at top. [^1]
-
+- Upstream TLS metadata in `ssl_tls.json` depends on the local rama TLS patch. [^2]
 
 ## WebSocket / WSS handling
 
@@ -292,7 +315,8 @@ WebSocket connections are handled as follows:
 2. After `101 Switching Protocols`, the upgraded WebSocket stream is relayed transparently.
 3. WebSocket payload frames are not captured by inspect.
 
-This is intentional. WebSocket connections can be long-lived and may produce unbounded bidirectional traffic, which does not fit well into inspect's request/response based capture model.
+This is intentional. WebSocket connections can be long-lived and may produce unbounded bidirectional
+traffic, which does not fit well into inspect's request/response based capture model.
 
 If you need to inspect WebSocket payloads, use packet capture tools together with TLS key logging, for example:
 ```bash
@@ -321,3 +345,4 @@ Depending on where you capture packets and which TLS session you want to decrypt
 
 
 [^1]: Temporary patch applied to tuie 0.2 crate `patches/tuie-0.2-scroll-fix.patch`
+[^2]: Temporary patch applied to rama 0.3.0-alpha.4 crate `patches/rama-0.3.0-alpha.4-tls-fix.patch`

@@ -506,9 +506,8 @@ async fn http_mitm_proxy (
     }
 
     let req_head_path = flow_dir.join("request.head");
-    let req_body_path = flow_dir.join("request.body");
+    let req_body_path = flow_dir.join(body_file_name("request.body", &parts.headers));
     let res_head_path = flow_dir.join("response.head");
-    let res_body_path = flow_dir.join("response.body");
     let ssl_tls_path = flow_dir.join("ssl_tls.json");
 
     let req_head_text = build_request_head_text(&parts, tls_sni.as_deref());
@@ -640,6 +639,8 @@ async fn http_mitm_proxy (
     let res_head_text = build_response_head_text(&parts);
     let _ = tokio::fs::write(&res_head_path, res_head_text).await;
 
+    let res_body_path = flow_dir.join(body_file_name("response.body", &parts.headers));
+
     let res_body_bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
@@ -737,6 +738,35 @@ async fn http_mitm_proxy (
     }
 
     Ok(Response::from_parts(parts, Body::from(res_body_bytes)))
+}
+
+fn body_file_name(base: &str, headers: &http::HeaderMap) -> String {
+    let Some(content_encoding) = headers
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return base.to_string();
+    };
+
+    let suffixes = content_encoding
+        .split(',')
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter_map(|encoding| match encoding.as_str() {
+            "gzip" | "x-gzip" => Some("gz"),
+            "br" => Some("br"),
+            "zstd" => Some("zst"),
+            "deflate" => Some("deflate"),
+            "identity" => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if suffixes.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}.{}", suffixes.join("."))
+    }
 }
 
 fn body_omit_reason_by_content_type(

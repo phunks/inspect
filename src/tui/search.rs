@@ -6,8 +6,10 @@ use grep_regex::RegexMatcher;
 use grep_searcher::{Searcher, Sink, SinkMatch};
 use ignore::WalkBuilder;
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use flate2::read::{DeflateDecoder, GzDecoder};
 use crate::tui::button::Button;
 use crate::tui::focus_pane::FocusPane;
 
@@ -368,7 +370,11 @@ pub fn search_capture_files(
         };
 
         let mut searcher = Searcher::new();
-        let _ = searcher.search_path(&matcher, path, &mut sink);
+        if let Ok(Some(reader)) = open_decompressed_search_reader(path) {
+            let _ = searcher.search_reader(&matcher, reader, &mut sink);
+        } else {
+            let _ = searcher.search_path(&matcher, path, &mut sink);
+        }
 
         results.extend(sink.results);
     }
@@ -383,6 +389,64 @@ pub fn search_capture_files(
 
     Ok(results)
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompressedKind {
+    Gzip,
+    Brotli,
+    Zstd,
+    Deflate,
+}
+
+fn compressed_kind(path: &Path) -> Option<CompressedKind> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())?
+        .to_ascii_lowercase();
+
+    if file_name.ends_with(".body.gz") || file_name.ends_with(".gz") {
+        return Some(CompressedKind::Gzip);
+    }
+
+    if file_name.ends_with(".body.br") || file_name.ends_with(".br") {
+        return Some(CompressedKind::Brotli);
+    }
+
+    if file_name.ends_with(".body.zst")
+        || file_name.ends_with(".body.zstd")
+        || file_name.ends_with(".zst")
+        || file_name.ends_with(".zstd")
+    {
+        return Some(CompressedKind::Zstd);
+    }
+
+    if file_name.ends_with(".body.deflate") || file_name.ends_with(".deflate") {
+        return Some(CompressedKind::Deflate);
+    }
+
+    None
+}
+
+fn open_decompressed_search_reader(path: &Path) -> io::Result<Option<Box<dyn Read>>> {
+    let Some(kind) = compressed_kind(path) else {
+        return Ok(None);
+    };
+
+    let file = std::fs::File::open(path)?;
+
+    let reader: Box<dyn Read> = match kind {
+        CompressedKind::Gzip => Box::new(GzDecoder::new(file)),
+        CompressedKind::Brotli => Box::new(brotli::Decompressor::new(file, 4096)),
+        CompressedKind::Zstd => {
+            let reader = std::io::BufReader::new(file);
+            Box::new(zstd::stream::read::Decoder::new(reader)?)
+        }
+        CompressedKind::Deflate => Box::new(DeflateDecoder::new(file)),
+    };
+
+    Ok(Some(reader))
+}
+
 
 fn remember_search_query(history: &Arc<parking_lot::Mutex<Vec<String>>>, query: &str) {
     let query = query.trim();
