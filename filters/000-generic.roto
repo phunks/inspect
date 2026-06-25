@@ -1,0 +1,24 @@
+//! +++
+//! name = "generic"
+//! enabled = true
+//!
+//! [trigger]
+//! host = ["*"]
+//! path = ["*"]
+//! phase = ["response"]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+
+fn response_action(res: Response) -> ResponseAction {
+    if res.status() >= 400 {
+        ResponseAction.pass()
+            .mark("4xx-action")
+            .set_header("x-roto-status-class", "4xx")
+            .set_body_text("rewritten by response_action\n", "text/plain; charset=utf-8")
+    } else {
+        ResponseAction.pass()
+    }
+}

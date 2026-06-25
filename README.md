@@ -272,6 +272,12 @@ Match URL regex and status `200`.
 re:/api/v\d+ && stat:200
 ```
 
+## Roto filters
+
+Request/response filtering and rewriting can be configured with Roto scripts.
+
+See [Roto filters documentation](docs/roto-filters.md).
+
 
 ## Full text search
 

@@ -10,6 +10,7 @@ mod har;
 pub mod body;
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +24,7 @@ use tuie::prelude::*;
 use read_metadata::DbState;
 use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTextMatcher, FullTextSearchResult};
 use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
-use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketStarted};
+use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketMarked, PacketStarted};
 use crate::mitm::capture::CapturePaths;
 use crate::tui::body::format_body_for_display_with_headers;
 use crate::tui::har::open_har_export_popup;
@@ -54,7 +55,14 @@ struct PacketRow {
     host: String,
     uri: String,
     query_str: String,
+    marks: Vec<RowMark>,
     line: Arc<str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RowMark {
+    label: String,
+    color: Option<String>,
 }
 
 impl PacketRow {
@@ -73,35 +81,53 @@ impl PacketRow {
     }
 
     fn refresh_line(&mut self) {
-        let status = self
-            .status
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "----".to_string());
+        let mut line = String::with_capacity(
+            32
+                + self.time.len()
+                + self.method.len()
+                + self.protocol.len()
+                + self.host.len()
+                + self.uri.len()
+                + self.query_str.len(),
+        );
 
-        let elapsed = self
-            .elapsed_ms
-            .map(|ms| format!("{ms:>5}ms"))
-            .unwrap_or_else(|| "       ".to_string());
+        let status = self.status.map_or("----".to_string(), |s| s.to_string());
 
-        let query_suffix = if self.query_str.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", self.query_str)
-        };
-
-        self.line = format!(
-            "#{:06} {} {:<6} {:<4} {} {}://{}{}{}",
+        let _ = write!(
+            &mut line,
+            "#{:06} {} {:<6} {:<4} ",
             self.seq,
             self.time,
             self.method,
             status,
-            elapsed,
+        );
+
+        if let Some(ms) = self.elapsed_ms {
+            let _ = write!(&mut line, "{ms:>5}ms ");
+        } else {
+            line.push_str("        ");
+        }
+
+        for mark in &self.marks {
+            let _ = write!(&mut line, "[{}] ", mark.label);
+        }
+
+        let _ = write!(
+            &mut line,
+            "{}://{}{}",
             self.protocol,
             self.host,
             self.uri,
-            query_suffix,
-        )
-            .into();
+        );
+
+        if !self.query_str.is_empty() {
+            line.push('?');
+            line.push_str(&self.query_str);
+        }
+
+        if self.line.as_ref() != line {
+            self.line = Arc::<str>::from(line);
+        }
     }
 }
 
@@ -310,7 +336,7 @@ enum PacketListMode {
 
 pub struct PacketListDelegate {
     rows: Vec<PacketRow>,
-    search_indices: Vec<usize>,
+    search_row_ids: Vec<String>,
     mode: PacketListMode,
     _tui_mode: TuiMode,
     main_selected: usize,
@@ -425,6 +451,7 @@ impl PacketListDelegate {
                 host: String::new(),
                 uri: String::new(),
                 query_str: String::new(),
+                marks: Vec::new(),
                 line: Arc::<str>::from(Self::WAITING_ROW_TEXT),
             }],
         };
@@ -500,7 +527,7 @@ impl PacketListDelegate {
 
         let mut this = Box::new(Self {
             rows,
-            search_indices: Vec::new(),
+            search_row_ids: Vec::new(),
             mode: PacketListMode::Main,
             _tui_mode: tui_mode,
             main_selected: selected,
@@ -554,6 +581,7 @@ impl PacketListDelegate {
             host: summary.host.unwrap_or_default(),
             uri: summary.uri.unwrap_or_default(),
             query_str: summary.query_str.unwrap_or_default(),
+            marks: Vec::new(),
             line: Arc::<str>::from(""),
         };
 
@@ -661,6 +689,7 @@ impl PacketListDelegate {
     fn poll_incoming(&mut self) {
         let mut changed = false;
         let was_at_bottom = self.is_list_at_bottom();
+        let old_visible_len = self.visible_rows_len();
 
         while let Ok(event) = self.rx.try_recv() {
             self.remove_waiting_row_if_needed();
@@ -672,6 +701,9 @@ impl PacketListDelegate {
                 PacketEvent::Completed(pkt) => {
                     self.on_packet_completed(pkt);
                 }
+                PacketEvent::Marked(pkt) => {
+                    self.on_packet_marked(pkt);
+                }
             }
 
             changed = true;
@@ -681,6 +713,12 @@ impl PacketListDelegate {
             self.trim_rows_if_needed();
             self.clamp_current_selected();
             self.sync_list();
+
+            let new_visible_len = self.visible_rows_len();
+
+            if new_visible_len > old_visible_len {
+                self.invalidate_visible_range(old_visible_len..new_visible_len);
+            }
 
             if was_at_bottom {
                 self.follow_list_bottom();
@@ -703,6 +741,7 @@ impl PacketListDelegate {
             host: pkt.host,
             uri: pkt.uri,
             query_str: pkt.query_str,
+            marks: Vec::new(),
             line: Arc::<str>::from(""),
         };
         row.refresh_line();
@@ -716,10 +755,22 @@ impl PacketListDelegate {
             .as_ref()
             .is_some_and(|matcher| matcher.matches(&row))
         {
-            self.search_indices.push(idx);
+            self.search_row_ids.push(row.id.clone());
         }
 
         self.rows.push(row);
+    }
+
+    fn visible_index_for_row_index(&self, row_index: usize) -> Option<usize> {
+        match self.mode {
+            PacketListMode::Main => Some(row_index),
+            PacketListMode::Search => {
+                let id = self.rows.get(row_index)?.id.as_str();
+                self.search_row_ids
+                    .iter()
+                    .position(|search_id| search_id == id)
+            }
+        }
     }
 
     fn on_packet_completed(&mut self, pkt: PacketCompleted) {
@@ -736,6 +787,10 @@ impl PacketListDelegate {
         row.refresh_line();
 
         self.rebuild_search_rows_if_needed();
+
+        if let Some(visible_idx) = self.visible_index_for_row_index(idx) {
+            self.invalidate_visible_rows([visible_idx]);
+        }
     }
 
     fn rebuild_search_rows_if_needed(&mut self) {
@@ -744,16 +799,16 @@ impl PacketListDelegate {
         }
 
         if let Some(matcher) = self.search_matcher.as_ref() {
-            self.search_indices = self
+            self.search_row_ids = self
                 .rows
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, row)| matcher.matches(row).then_some(idx))
+                .filter(|row| !row.id.is_empty() && matcher.matches(row))
+                .map(|row| row.id.clone())
                 .collect();
 
             self.search_selected = self
                 .search_selected
-                .min(self.search_indices.len().saturating_sub(1));
+                .min(self.search_row_ids.len().saturating_sub(1));
         }
     }
 
@@ -763,7 +818,7 @@ impl PacketListDelegate {
             && self.rows[0].line.as_ref() == Self::WAITING_ROW_TEXT
         {
             self.rows.clear();
-            self.search_indices.clear();
+            self.search_row_ids.clear();
             self.main_selected = 0;
             self.search_selected = 0;
             self.selected = 0;
@@ -785,9 +840,10 @@ impl PacketListDelegate {
                 .collect::<Vec<_>>()
                 .into(),
             PacketListMode::Search => self
-                .search_indices
+                .search_row_ids
                 .iter()
-                .filter_map(|&row_index| {
+                .filter_map(|id| {
+                    let row_index = self.id_to_row_index.get(id).copied()?;
                     self.rows.get(row_index).map(|row| PacketListItem {
                         _row_index: row_index,
                         line: row.line.clone(),
@@ -821,7 +877,6 @@ impl PacketListDelegate {
                     )
                 },
             );
-            list.invalidate_all();
         }
     }
 
@@ -858,19 +913,23 @@ impl PacketListDelegate {
 
         self.main_selected = self.main_selected.saturating_sub(drain_count);
 
-        if self.mode == PacketListMode::Search
-            && let Some(matcher) = self.search_matcher.as_ref() {
-            self.search_indices = self
-                .rows
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, row)| matcher.matches(row).then_some(idx))
-                .collect();
+        if self.mode == PacketListMode::Search {
+            self.search_row_ids
+                .retain(|id| self.id_to_row_index.contains_key(id));
+
+            if let Some(matcher) = self.search_matcher.as_ref() {
+                self.search_row_ids = self
+                    .rows
+                    .iter()
+                    .filter(|row| !row.id.is_empty() && matcher.matches(row))
+                    .map(|row| row.id.clone())
+                    .collect();
+            }
 
             self.search_selected = self
                 .search_selected
-                .min(self.search_indices.len().saturating_sub(1));
-        };
+                .min(self.search_row_ids.len().saturating_sub(1));
+        }
 
         self.clamp_current_selected();
     }
@@ -888,6 +947,7 @@ impl PacketListDelegate {
             host: "test host".to_string(),
             uri: "test url".to_string(),
             query_str: String::new(),
+            marks: Vec::new(),
             line: Arc::<str>::from(line.into()),
         });
 
@@ -1045,8 +1105,13 @@ impl PacketListDelegate {
     fn visible_rows_len(&self) -> usize {
         match self.mode {
             PacketListMode::Main => self.rows.len(),
-            PacketListMode::Search => self.search_indices.len(),
+            PacketListMode::Search => self.search_row_ids.len(),
         }
+    }
+
+    fn search_row_index_at(&self, visible_idx: usize) -> Option<usize> {
+        let id = self.search_row_ids.get(visible_idx)?;
+        self.id_to_row_index.get(id).copied()
     }
 
     fn current_row_index(&self) -> Option<usize> {
@@ -1055,10 +1120,7 @@ impl PacketListDelegate {
                 let idx = self.main_selected;
                 (idx < self.rows.len()).then_some(idx)
             }
-            PacketListMode::Search => self
-                .search_indices
-                .get(self.search_selected)
-                .copied(),
+            PacketListMode::Search => self.search_row_index_at(self.search_selected),
         }
     }
 
@@ -1074,7 +1136,39 @@ impl PacketListDelegate {
         }
     }
 
+    fn invalidate_visible_rows(&mut self, rows: impl IntoIterator<Item = usize>) {
+        let len = self.visible_rows_len();
+
+        if len == 0 {
+            return;
+        }
+
+        if let Some(list) = self.list.get_widget_mut(self.list_id) {
+            for row in rows {
+                if row < len {
+                    list.invalidate_range(row..row + 1);
+                }
+            }
+        }
+    }
+
+    fn invalidate_visible_range(&mut self, range: std::ops::Range<usize>) {
+        let len = self.visible_rows_len();
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+
+        if start >= end {
+            return;
+        }
+
+        if let Some(list) = self.list.get_widget_mut(self.list_id) {
+            list.invalidate_range(start..end);
+        }
+    }
+
     fn set_current_selected(&mut self, selected: usize) {
+        let previous = self.current_selected();
+
         match self.mode {
             PacketListMode::Main => {
                 self.main_selected = selected;
@@ -1085,6 +1179,7 @@ impl PacketListDelegate {
         }
 
         self.selected = selected;
+        self.invalidate_visible_rows([previous, selected]);
     }
 
     fn clamp_current_selected(&mut self) {
@@ -1224,11 +1319,11 @@ impl PacketListDelegate {
         };
 
         self.search_query = matcher.label().to_owned();
-        self.search_indices = self
+        self.search_row_ids = self
             .rows
             .iter()
-            .enumerate()
-            .filter_map(|(idx, row)| matcher.matches(row).then_some(idx))
+            .filter(|row| !row.id.is_empty() && matcher.matches(row))
+            .map(|row| row.id.clone())
             .collect();
 
         self.search_matcher = Some(matcher);
@@ -1237,6 +1332,7 @@ impl PacketListDelegate {
         self.search_selected = 0;
         self.clamp_current_selected();
         self.sync_list_and_reveal_selected();
+        self.invalidate_visible_range(0..self.visible_rows_len());
         self.reset_detail();
     }
 
@@ -1245,9 +1341,10 @@ impl PacketListDelegate {
         self.search_query.clear();
         self.search_matcher = None;
         self.search_error = None;
-        self.search_indices.clear();
+        self.search_row_ids.clear();
         self.clamp_current_selected();
         self.sync_list_and_reveal_selected();
+        self.invalidate_visible_range(0..self.visible_rows_len());
         self.reset_detail();
     }
 
@@ -1264,7 +1361,7 @@ impl PacketListDelegate {
                     .span(" [filter: ".fg(Color::YELLOW))
                     .span(self.search_query.as_str().fg(Color::YELLOW).bold())
                     .span("]".fg(Color::YELLOW))
-                    .span(format!(" {}/{}", self.search_indices.len(), self.rows.len()).dim())
+                    .span(format!(" {}/{}", self.search_row_ids.len(), self.rows.len()).dim())
             }
         }
     }
@@ -1293,7 +1390,7 @@ impl PacketListDelegate {
         };
 
         self.mode = PacketListMode::Main;
-        self.search_indices.clear();
+        self.search_row_ids.clear();
         self.search_query.clear();
         self.search_matcher = None;
         self.search_error = None;
@@ -1301,9 +1398,44 @@ impl PacketListDelegate {
         self.main_selected = idx;
         self.selected = idx;
         self.sync_list_and_reveal_selected();
+        self.invalidate_visible_range(0..self.visible_rows_len());
 
         if let Some(id) = self.selected_packet_id().map(str::to_owned) {
             self.on_select_packet_with_highlight(id, highlight_query, tab_selection);
+        }
+    }
+
+    fn on_packet_marked(&mut self, pkt: PacketMarked) {
+        let idx = self
+            .id_to_row_index
+            .get(&pkt.id)
+            .copied()
+            .or_else(|| {
+                self.rows
+                    .iter()
+                    .position(|row| row.flow_key == pkt.flow_key)
+            });
+
+        let Some(idx) = idx else {
+            return;
+        };
+
+        let Some(row) = self.rows.get_mut(idx) else {
+            return;
+        };
+
+        let mark = RowMark {
+            label: pkt.label,
+            color: pkt.color,
+        };
+
+        if !row.marks.contains(&mark) {
+            row.marks.push(mark);
+            row.refresh_line();
+        }
+
+        if let Some(visible_idx) = self.visible_index_for_row_index(idx) {
+            self.invalidate_visible_rows([visible_idx]);
         }
     }
 }

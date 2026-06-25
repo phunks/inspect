@@ -788,7 +788,6 @@ impl FullTextSearchPopupHost {
                     )
                 },
             );
-            list.invalidate_all();
         }
         tuie::dirty_layout();
     }

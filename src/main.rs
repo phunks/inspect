@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::info;
+use inspect::filters::FilterManager;
 use inspect::mitm::proxy::{mitm_proxy_main, PacketEvent};
 use inspect::tui::{run_tui, TuiMode, TUI_EVENT_BUFFER};
 use inspect::tui::time::TimeDisplayConfig;
@@ -60,7 +61,16 @@ async fn main() -> Result<(), AnyError> {
     let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
     let body_save_limit_bytes = opt.effective_body_save_limit_bytes();
     let body_omit_content_types = opt.body_omit_content_types.clone();
+    let filter_manager = FilterManager::new("./filters");
     let (quit_tx, quit_rx) = watch::channel(false);
+
+    let filter_reload_manager = filter_manager.clone();
+    let filter_reload_quit_rx = quit_rx.clone();
+    let filter_reload_task = tokio::spawn(async move {
+        filter_reload_manager
+            .reload_loop(filter_reload_quit_rx)
+            .await;
+    });
 
     let proxy_task = tokio::spawn(async move {
         if let Err(e) = mitm_proxy_main(
@@ -73,6 +83,7 @@ async fn main() -> Result<(), AnyError> {
             upstream_request_timeout_sec,
             body_save_limit_bytes,
             body_omit_content_types,
+            filter_manager,
             Some(callback),
             quit_rx,
         ).await {
@@ -87,5 +98,6 @@ async fn main() -> Result<(), AnyError> {
     let _ = quit_tx.send(true);
 
     let _ = proxy_task.await;
+    let _ = filter_reload_task.await;
     Ok(())
 }

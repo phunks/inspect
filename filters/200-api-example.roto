@@ -1,0 +1,14 @@
+//! +++
+//! name = "example api"
+//! enabled = true
+//!
+//! [trigger]
+//! host = ["api.example.com", "*.api.example.com"]
+//! path = ["/v1/*", "/graphql"]
+//! method = ["GET", "POST"]
+//! phase = ["request", "response"]
+//! +++
+
+fn ping() -> bool {
+    true
+}

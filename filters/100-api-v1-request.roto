@@ -1,0 +1,32 @@
+//! +++
+//! name = "api v1 request"
+//! enabled = true
+//!
+//! [trigger]
+//! host = ["*"]
+//! path = ["/v1/*", "/mock"]
+//! method = ["GET", "POST"]
+//! phase = ["request"]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+
+fn request_action(req: Request) -> RequestAction {
+    if req.path() == "/mock" {
+        RequestAction.pass()
+            .mark("mocked")
+            .synthetic_response(
+                200,
+                "<!doctype html><html><body><h1>Hello from Roto</h1><p>synthetic response</p></body></html>",
+                "text/html; charset=utf-8",
+            )
+    } else if req.path() == "/v1/test" {
+        RequestAction.pass()
+            .mark("api-v1-action")
+            .set_header("x-roto-api-v1", "matched-by-action")
+    } else {
+        RequestAction.pass()
+    }
+}
