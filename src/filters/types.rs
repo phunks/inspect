@@ -232,7 +232,7 @@ pub struct RequestAction {
     pub marks: Vec<FilterMark>,
     pub tags: Vec<String>,
     pub notes: Vec<String>,
-    pub outbound_http: Vec<FilterHttpRequest>,
+    pub outbound_http: Vec<OutboundHttpJob>,
     pub continue_filters: bool,
 }
 
@@ -256,7 +256,7 @@ pub struct ResponseAction {
     pub marks: Vec<FilterMark>,
     pub tags: Vec<String>,
     pub notes: Vec<String>,
-    pub outbound_http: Vec<FilterHttpRequest>,
+    pub outbound_http: Vec<OutboundHttpJob>,
     pub continue_filters: bool,
 }
 
@@ -279,7 +279,7 @@ pub struct CompletedAction {
     pub marks: Vec<FilterMark>,
     pub tags: Vec<String>,
     pub notes: Vec<String>,
-    pub outbound_http: Vec<FilterHttpRequest>,
+    pub outbound_http: Vec<OutboundHttpJob>,
     pub continue_filters: bool,
 }
 
@@ -332,6 +332,31 @@ pub struct FilterSyntheticResponse {
 pub struct FilterMark {
     pub label: String,
     pub color: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutboundHttpJob {
+    pub client: String,
+    pub method: String,
+    pub path: String,
+    pub headers: Vec<FilterHeader>,
+    pub body: OutboundHttpBodySource,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutboundHttpBodySource {
+    Bytes(Vec<u8>),
+    CapturedRequest,
+    CapturedResponse,
+    CapturedRequestJson,
+    CapturedResponseJson,
+    CapturedFlowJson,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OutboundHttpBody {
+    pub bytes: Vec<u8>,
+    pub content_type: Option<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -1,0 +1,24 @@
+//! +++
+//! name = "post json example"
+//! enabled = true
+//!
+//! [trigger]
+//! host = ["api.example.com", "*.api.example.com"]
+//! path = ["/v1/*", "/graphql"]
+//! method = ["GET", "POST"]
+//! phase = ["request", "response"]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+
+fn response_action(res: Response) -> ResponseAction {
+    if res.status() >= 500 {
+        ResponseAction.pass()
+            .mark("send-to-logstash")
+            .post_json("logstash", "/inspect/error", "{\"kind\":\"5xx\"}")
+    } else {
+        ResponseAction.pass()
+    }
+}

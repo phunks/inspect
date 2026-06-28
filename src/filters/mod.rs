@@ -3,6 +3,7 @@ pub mod manager;
 pub mod roto_api;
 pub mod runtime;
 pub mod types;
+pub mod json;
 
 pub use manager::FilterManager;
 pub use runtime::{CompiledFilter, CompiledFilterSet};

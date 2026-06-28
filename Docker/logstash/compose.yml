@@ -1,0 +1,18 @@
+services:
+  logstash:
+    image: docker.elastic.co/logstash/logstash-oss:9.4.2-arm64
+    container_name: logstash
+    environment:
+      - "LS_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - ./config/logstash.yml:/usr/share/logstash/config/logstash.yml
+      - ./pipeline:/usr/share/logstash/pipeline
+    ports:
+      - "5044:5044"
+      - "9600:9600"
+    networks:
+      - elk
+
+networks:
+  elk:
+    driver: bridge

@@ -1,0 +1,26 @@
+//! +++
+//! name = "post response to logstash"
+//! enabled = true
+//!
+//! [trigger]
+//! host = ["*"]
+//! path = ["*"]
+//! phase = ["response"]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+
+fn response_action(res: Response) -> ResponseAction {
+    ResponseAction.pass()
+        .mark("logstash")
+        .post_flow_json("logstash", "/")
+}
+
+//fn response_action(res: Response) -> ResponseAction {
+//    ResponseAction.pass()
+//        .mark("logstash")
+//        .post_request_json("logstash", "/request")
+//        .post_response_json("logstash", "/response")
+//}

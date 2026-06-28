@@ -7,6 +7,21 @@ It captures request/response metadata into SQLite and stores raw headers/bodies 
 
 <img src=".github/images/capture.png" width="70%" height="70%">
 
+## Overview
+```mermaid
+flowchart LR
+    client[Client / Browser] --> proxy[inspect MITM proxy]
+    proxy --> upstream[Upstream server]
+
+    proxy --> filters[Roto filters<br/>mark / rewrite / mock]
+    filters --> proxy
+
+    proxy --> capture[Capture storage<br/>SQLite + flow files]
+    proxy --> tui[Terminal UI]
+
+    filters -. fire-and-forget .-> sinks[Optional HTTP sinks<br/>Logstash / webhook / local collector]
+```
+
 ## Features
 - HTTP and HTTPS proxying
 - MITM inspection for TLS traffic
@@ -16,6 +31,7 @@ It captures request/response metadata into SQLite and stores raw headers/bodies 
 - Optional upstream proxy support
 - Optional SSL key log file output for TLS debugging
 - File-based structured logging via `tracing_subscriber`
+- Roto-based request/response filtering and rewriting
 
 ## Setup
 
@@ -23,7 +39,7 @@ It captures request/response metadata into SQLite and stores raw headers/bodies 
 
 This project uses patched local copies of some dependencies under `ext/`.
 
-Initialize them before building:
+Initialize patched vendored dependencies first:
 
 ```bash
 just setup-ext
@@ -59,9 +75,9 @@ $HOME/.inspect/mitm-root-ca.crt
 cargo run -- --generate-ca
 ```
 
-Initialize patched vendored dependencies first:
 
 ## Build
+Initialize patched vendored dependencies first:
 ```bash
 cargo install cargo-zigbuild
 cargo zigbuild --release
@@ -144,6 +160,7 @@ capture/
     response.body
     ssl_tls.json
 ```
+Depending on the flow type and available TLS metadata, `ssl_tls.json` may also be written.
 
 `ssl_tls.json` contains TLS-related metadata observed by inspect. When
 `--upstream-proxy` is used, the upstream remote address recorded in metadata is
@@ -276,6 +293,10 @@ re:/api/v\d+ && stat:200
 
 Request/response filtering and rewriting can be configured with Roto scripts.
 
+Response filters can also enqueue fire-and-forget outbound HTTP jobs to named
+clients configured in `config.toml`, for example to send captured data to
+Logstash, a webhook receiver, or a local HTTP ingestion service.
+
 See [Roto filters documentation](docs/roto-filters.md).
 
 
@@ -324,10 +345,15 @@ WebSocket connections are handled as follows:
 This is intentional. WebSocket connections can be long-lived and may produce unbounded bidirectional
 traffic, which does not fit well into inspect's request/response based capture model.
 
+Use `--preshared-key-log` without a value to write TLS secrets to `/tmp/sslkeys.log`,
+or pass a path to use a custom SSL key log file.
+
 If you need to inspect WebSocket payloads, use packet capture tools together with TLS key logging, for example:
 ```bash
 SSLKEYLOGFILE=/tmp/sslkeys.log inspect --preshared-key-log /tmp/sslkeys.log ...
 ```
+
+
 Then capture packets in another terminal:
 ```bash
 sudo tcpdump -i any -w /tmp/ws.pcap
@@ -350,5 +376,5 @@ client <-> inspect <-> upstream
 Depending on where you capture packets and which TLS session you want to decrypt, you may need the corresponding key log.
 
 
-[^1]: Temporary patch applied to tuie 0.2 crate `patches/tuie-0.2-scroll-fix.patch`
+[^1]: Temporary patch applied to tuie 0.2 crate `patches/tuie-0.2.3-scroll-fix.patch`
 [^2]: Temporary patch applied to rama 0.3.0-alpha.4 crate `patches/rama-0.3.0-alpha.4-tls-fix.patch`

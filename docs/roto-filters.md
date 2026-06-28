@@ -1,8 +1,8 @@
 # Roto Filters
 
-Inspect can load Roto scripts from the `filters/` directory and use them to filter, mark, and rewrite HTTP request/response flows.
+Inspect can load Roto scripts from the `filters/` directory and use them to filter, mark, rewrite, and optionally emit outbound HTTP jobs for HTTP request/response flows.
 
-This feature is currently under active development.
+This feature is under active development. This document describes the currently exposed Roto runtime API and calls out known gaps separately.
 
 ## Overview
 
@@ -14,15 +14,44 @@ filters/*.roto
 
 Each file can define metadata in TOML front matter and one or more Roto functions.
 
-Filters can currently run in these phases:
+Filters can currently match these phases:
 
 - `request`
 - `response`
 - `completed`
 
+The currently useful script entry points are:
+
+```text
+fn request_action(req: Request) -> RequestAction
+fn response_action(res: Response) -> ResponseAction
+```
+
+Legacy/simple entry points such as `on_request`, `on_response`, `request_mark`,
+`response_mark`, `request_header_name`, `request_header_value`,
+`response_header_name`, `response_header_value`, `request_body`,
+`request_body_content_type`, `response_body`, and `response_body_content_type`
+may also be detected by the runtime, but new filters should prefer
+`request_action` and `response_action`.
+
+Every executable `.roto` filter must currently define:
+
+```rust
+fn ping() -> bool {
+    true
+}
+```
+
 ## Where filters run
 
 Roto filters run inside the HTTP MITM flow after request/response bodies are collected.
+
+Synthetic responses follow the same response dispatch/capture path as upstream
+responses: the request is captured first, then the synthetic response is filtered,
+captured, and returned to the client.
+
+Completed filters are invoked after response capture, but completed-phase action
+side effects are still limited; see the completed phase section below.
 
 ```mermaid
 flowchart TD
@@ -32,13 +61,16 @@ flowchart TD
 
     collect_req[Collect request body]
     request_filter[Request filters<br/>phase = request]
-    apply_req[Apply RequestAction<br/>headers / path / query / body]
+    apply_req[Apply RequestAction<br/>headers / body / synthetic response]
     save_req[Capture request<br/>request.head / request.body / DB metadata]
 
     synthetic_check{Synthetic response?}
 
     synthetic_res[Build synthetic response]
-    save_synthetic[Capture synthetic response<br/>response.head / response.body / DB metadata]
+    collect_synthetic[Collect synthetic response body]
+    response_filter_synthetic[Response filters<br/>phase = response]
+    apply_synthetic_res[Apply ResponseAction<br/>status / headers / body]
+    save_synthetic[Capture synthetic response<br/>response.head / response.body / ssl_tls.json / DB metadata]
     completed_synthetic[Completed filters<br/>phase = completed]
     return_synthetic[Return response to client]
 
@@ -47,7 +79,8 @@ flowchart TD
     collect_res[Collect upstream response body]
     response_filter[Response filters<br/>phase = response]
     apply_res[Apply ResponseAction<br/>status / headers / body]
-    save_res[Capture response<br/>response.head / response.body / DB metadata]
+    outbound_jobs[Resolve and enqueue outbound HTTP jobs]
+    save_res[Capture response<br/>response.head / response.body / ssl_tls.json / DB metadata]
     completed[Completed filters<br/>phase = completed]
     return_res[Return response to client]
 
@@ -61,27 +94,31 @@ flowchart TD
     save_req --> synthetic_check
 
     request_filter -. marks/tags/notes .-> tui
+    save_req -. started event .-> tui
 
     synthetic_check -- yes --> synthetic_res
-    synthetic_res --> save_synthetic
+    synthetic_res --> collect_synthetic
+    collect_synthetic --> response_filter_synthetic
+    response_filter_synthetic --> apply_synthetic_res
+    apply_synthetic_res --> save_synthetic
     save_synthetic --> completed_synthetic
     completed_synthetic --> return_synthetic
     return_synthetic --> client
 
-    completed_synthetic -. marks/tags/notes .-> tui
+    response_filter_synthetic -. marks/tags/notes .-> tui
     save_synthetic -. completed event .-> tui
 
     synthetic_check -- no --> upstream
     upstream --> collect_res
     collect_res --> response_filter
     response_filter --> apply_res
-    apply_res --> save_res
+    apply_res --> outbound_jobs
+    outbound_jobs --> save_res
     save_res --> completed
     completed --> return_res
     return_res --> client
 
     response_filter -. marks/tags/notes .-> tui
-    completed -. marks/tags/notes .-> tui
     save_res -. completed event .-> tui
 ```
 
@@ -89,20 +126,19 @@ Current filtering points:
 
 | Phase | Can inspect | Can modify | Can synthesize response | Typical use |
 | --- | --- | --- | --- | --- |
-| `request` | request metadata, headers, body | request method/path/query/headers/body | yes | mock, request rewrite, marking |
-| `response` | response metadata, headers, body | response status/headers/body | no | response rewrite, marking |
-| `completed` | completed flow | no request/response rewrite | no | final marks/tags/notes, future outbound jobs |
+| `request` | request method/scheme/host/path/query | request headers/body | yes | mock, request rewrite, marking |
+| `response` | response status/version/content type/body text | response status/headers/body | no | response rewrite, marking, outbound HTTP jobs |
+| `completed` | completed flow internally | no request/response rewrite | no | currently matched/invoked only; user-defined completed action side effects are not yet wired |
 
+The main current use cases are:
 
-The main use cases are:
-
-- mark matching flows in the TUI
+- mark matching request/response flows in the TUI
 - add/remove request headers
 - rewrite request body
 - return a synthetic response without upstream access
 - add/remove response headers
 - rewrite response status/body
-- run completed-flow hooks
+- enqueue outbound HTTP jobs from response filters
 
 ## File format
 
@@ -192,7 +228,7 @@ If both TOML `priority` and file name priority are present, TOML wins.
 
 ### `trigger`
 
-Controls when a filter runs.
+Controls when a filter matches.
 
 ```toml
 [trigger]
@@ -210,6 +246,8 @@ If a trigger field is omitted, it is treated as matching all values.
 
 Supports simple glob-like patterns.
 
+Host matching is case-insensitive.
+
 Examples:
 
 ```text
@@ -221,6 +259,8 @@ host = ["*.example.com"]
 ### Path
 
 Supports simple glob-like patterns.
+
+Path matching is case-insensitive in the current glob implementation.
 
 Examples:
 
@@ -255,6 +295,8 @@ Multiple phases can be specified:
 ```text
 phase = ["request", "response"]
 ```
+
+If `phase` is omitted or empty, the filter can match all phases.
 
 ## Roto syntax notes
 
@@ -293,7 +335,7 @@ The goals are:
 - fail the filter early during reload instead of failing later during request handling
 - keep runtime request/response processing free from repeated "missing function" checks
 
-If `ping()` is missing or returns an error, the filter file should be treated as invalid and skipped during reload.
+If `ping()` is missing or returns an error, the filter file is treated as invalid and skipped during reload when possible.
 
 TODO:
 
@@ -301,23 +343,18 @@ TODO:
 - [ ] Consider replacing `ping()` with a more descriptive required function name, such as `inspect_filter()` or `validate()`.
 - [ ] Consider allowing metadata-only filters without `ping()`.
 
-
 ## Request API
 
 The `Request` object is available in request filters.
 
-Methods:
+Currently exposed methods:
 
 ```text
-req.id()
 req.method()
 req.scheme()
 req.host()
 req.path()
 req.query()
-req.content_type()
-req.body_text()
-req.header("name")
 ```
 
 Example:
@@ -332,18 +369,29 @@ fn request_action(req: Request) -> RequestAction {
 }
 ```
 
+The underlying Rust filter model contains additional request data such as ID,
+headers, body, content type, and TLS SNI, but those fields are not all exposed as
+Roto methods yet.
+
+TODO:
+
+- [ ] Expose and document request ID access.
+- [ ] Expose and document request header lookup.
+- [ ] Expose and document request body text access.
+- [ ] Expose and document request content type access.
+- [ ] Expose and document request TLS SNI access if needed.
+
 ## Response API
 
 The `Response` object is available in response filters.
 
-Methods:
+Currently exposed methods:
 
 ```text
 res.status()
 res.version()
 res.content_type()
 res.body_text()
-res.header("name")
 ```
 
 Example:
@@ -360,6 +408,14 @@ fn response_action(res: Response) -> ResponseAction {
 }
 ```
 
+Header lookup is not currently exposed as a Roto method.
+
+TODO:
+
+- [ ] Expose and document response header lookup.
+- [ ] Expose and document upstream status if needed.
+- [ ] Expose and document elapsed time if needed.
+
 ## RequestAction API
 
 Preferred request filter function:
@@ -368,22 +424,32 @@ Preferred request filter function:
 fn request_action(req: Request) -> RequestAction
 ```
 
-Available methods:
+Currently exposed methods:
 
 ```text
 RequestAction.pass()
     .mark("label")
-    .mark_color("label", "green")
     .set_header("name", "value")
     .remove_header("name")
-    .set_path("/new-path")
-    .set_query("a=1&b=2")
     .set_body_text("body", "text/plain; charset=utf-8")
     .synthetic_response(200, "body", "text/plain; charset=utf-8")
     .stop()
 ```
 
+The Rust patch model has fields for path and query rewrites, but `set_path()` and
+`set_query()` are not currently exposed in the Roto runtime API.
+
+TODO:
+
+- [ ] Expose `set_path("/new-path")`.
+- [ ] Expose `set_query("a=1&b=2")`.
+- [ ] Expose `mark_color("label", "color")` or remove it from the public design.
+- [ ] Add richer action APIs for tags and notes.
+
 ### Marking
+
+Marks are currently mainly UI annotations, but are intended to remain lightweight
+flow metadata that future processing stages may use for routing or policy decisions.
 
 ```rust
 fn request_action(req: Request) -> RequestAction {
@@ -399,6 +465,10 @@ Example:
 ```text
 #000123 ... [matched] https://example.com/path
 ```
+At the moment, marks are mainly a UI annotation mechanism. They are also intended
+to remain lightweight flow metadata, so future processing stages may use them for
+routing, policy decisions, or L7-switch/mangle-like behavior.
+
 
 ### Header rewrite
 
@@ -419,7 +489,7 @@ fn request_action(req: Request) -> RequestAction {
 }
 ```
 
-When a body is rewritten, Inspect removes body integrity/encoding headers such as:
+When a request body is rewritten, Inspect removes body integrity/encoding headers such as:
 
 - `content-length`
 - `content-encoding`
@@ -450,12 +520,14 @@ Synthetic responses stop further request filters.
 
 Current behavior:
 
-- response is returned to the browser
-- response metadata/body should be captured like normal responses
+- request metadata/body/head are captured before returning the synthetic response
 - upstream access is skipped
-- upstream metadata should be stored as absent/null
-
-Known TODOs are listed below.
+- the synthetic response follows the normal response dispatch path
+- response filters can run against the synthetic response
+- response patches are applied before response capture
+- `response.head`, `response.body`, response DB metadata, and `ssl_tls.json` are written
+- upstream metadata is stored as absent/null
+- elapsed time is measured from request start to synthetic response generation, so it may be `0ms`
 
 ### Stop filter chain
 
@@ -467,7 +539,9 @@ fn request_action(req: Request) -> RequestAction {
 }
 ```
 
-When `stop()` is used, later matching filters are not executed.
+When `stop()` is used, later matching request filters are not executed.
+
+Synthetic responses also stop request filter processing.
 
 ## ResponseAction API
 
@@ -477,18 +551,32 @@ Preferred response filter function:
 fn response_action(res: Response) -> ResponseAction
 ```
 
-Available methods:
+Currently exposed methods:
 
 ```text
 ResponseAction.pass()
     .mark("label")
-    .mark_color("label", "red")
+    .post_json("client-name", "/path", "{\"ok\":true}")
+    .post_text("client-name", "/path", "body")
+    .post_request_raw("client-name", "/request")
+    .post_response_raw("client-name", "/response")
     .set_status(418)
     .set_header("name", "value")
     .remove_header("name")
     .set_body_text("body", "text/plain; charset=utf-8")
     .stop()
 ```
+
+Outbound HTTP jobs require named outbound HTTP clients configured by Inspect in
+`config.toml`. Roto scripts do not specify destination URLs directly; they refer
+to a configured client by name.
+
+Response actions can also rewrite the response returned to the browser by changing
+the status, headers, or body.
+
+They are fire-and-forget from the proxied flow's point of view: destination
+responses are logged for diagnostics but are not passed back to Roto and do not
+affect the browser response.
 
 ### Response status rewrite
 
@@ -524,6 +612,152 @@ When a response body is rewritten, Inspect removes body integrity/encoding heade
 - `etag`
 - `content-md5`
 
+### Outbound HTTP jobs
+
+Response filters can enqueue outbound HTTP jobs to named clients configured by Inspect.
+
+This is a fire-and-forget integration mechanism for sending structured or raw
+HTTP data to external systems such as Logstash, webhook receivers, local test
+servers, or other HTTP ingestion services.
+
+The destination must be registered in `config.toml` before it can be used from
+Roto. Roto scripts refer to the configured destination by `name`; they do not
+directly define the destination URL.
+
+Example `config.toml`:
+
+```toml
+[[outbound_http_clients]]
+name = "webhook"
+base_url = "http://127.0.0.1:3000"
+timeout_ms = 5000
+
+[[outbound_http_clients]]
+name = "logstash"
+base_url = "http://localhost:5044"
+timeout_ms = 5000
+```
+
+The Roto client name must match one of these configured `name` values.
+
+For example, this sends a text payload to:
+
+```text
+http://localhost:5044/http-error
+```
+
+when `logstash` is configured with `base_url = "http://localhost:5044"`.
+
+```rust
+fn response_action(res: Response) -> ResponseAction {
+    if res.status() >= 400 {
+        ResponseAction.pass()
+            .mark("send-error")
+            .post_text("logstash", "/http-error", "upstream returned an error")
+    } else {
+        ResponseAction.pass()
+    }
+}
+```
+
+Payload behavior:
+
+| Method | Sent content type | Payload |
+| --- | --- | --- |
+| `.post_json(...)` | `application/json` | JSON string provided by the Roto script |
+| `.post_text(...)` | `text/plain; charset=utf-8` | text string provided by the Roto script |
+| `.post_request_raw(...)` | `application/octet-stream` | decrypted captured request head/body bytes |
+| `.post_response_raw(...)` | `application/octet-stream` | decrypted captured response head/body bytes |
+| `.post_request_json(...)` | `application/json` | decrypted captured request converted to JSON |
+| `.post_response_json(...)` | `application/json` | decrypted captured response converted to JSON |
+| `.post_flow_json(...)` | `application/json` | decrypted captured request and response converted to one JSON document |
+
+Captured JSON export notes:
+
+- captured JSON export uses decrypted HTTP data already collected by Inspect
+- the export intentionally favors the observed plaintext HTTP snapshot over Roto-mutated output
+- this makes it useful for SIEM/search pipelines such as Logstash, where enrichment, redaction, normalization, indexing, routing, and alert-specific shaping can be handled downstream
+- request/response headers are exported as arrays of `{ "name": "...", "value": "..." }`
+- UTF-8 bodies are exported as `body.text`
+- non-UTF-8 bodies are exported as `body.base64`
+- body metadata such as `content_type`, `encoding`, and `truncated` is included where available
+- `.post_flow_json(...)` is intended for Logstash/webhook-style ingestion where one event should contain both request and response data
+- outbound export does not change the captured flow or the browser response
+
+In other words, outbound JSON export is a decrypted observation/export hook. It is
+not designed to be a "final rewritten wire image" API. If the exported data needs
+redaction, enrichment, field mapping, filtering, or destination-specific shaping,
+that should normally be done in the receiving pipeline such as Logstash.
+
+
+URL resolution:
+
+- if `path` is relative, Inspect sends to `base_url + "/" + path`
+- if `path` starts with `http://` or `https://`, it is used as the full URL
+- `base_url` is still required because the client must be registered by name
+
+Behavior:
+
+- jobs are queued after response filters run
+- jobs are queued before response capture completes
+- outbound HTTP is fire-and-forget from the proxied flow's point of view
+- outbound HTTP responses are only logged and are not exposed back to Roto
+- outbound HTTP success/failure does not modify the captured flow
+- outbound HTTP success/failure does not modify the response sent to the browser
+- captured raw request/response jobs are resolved to bytes before being sent
+- request export is based on the request snapshot available before request patches are applied
+- response export is resolved after response actions are applied, so it can include response rewrites
+- unknown client names are dropped and logged
+- jobs are dropped and logged if no outbound HTTP clients are configured
+- jobs can be dropped and logged if the outbound queue is full or closed
+- outbound HTTP runs outside Roto; Roto only creates structured jobs
+
+Specialized packet-inspection or IDS/IPS test setups can also be built on top of
+this mechanism, but those setups are environment-specific and are intentionally
+not covered here.
+
+Security boundary:
+
+- Roto scripts do not get arbitrary filesystem access
+- Roto scripts do not get arbitrary process execution
+- Roto scripts do not get arbitrary network access
+- outbound HTTP is limited to named clients configured by Inspect
+
+### Outbound HTTP sink filter
+
+This example posts raw captured request/response bytes to a named outbound HTTP
+client.
+
+The client name is just a configured sink name. It can point to Logstash, a local
+HTTP test server, a webhook receiver, or any other HTTP ingestion service.
+
+It requires a matching named outbound HTTP client in `config.toml`. If the client
+is not configured, the jobs are dropped and logged.
+
+```toml
+[[outbound_http_clients]]
+name = "logstash"
+base_url = "http://localhost:5044"
+timeout_ms = 5000
+```
+
+Use `.post_request_json(...)` or `.post_response_json(...)` instead when the sink
+should receive request and response records separately.
+
+```rust
+fn response_action(res: Response) -> ResponseAction {
+    ResponseAction.pass()
+        .mark("logstash")
+        .post_request_json("logstash", "/request")
+        .post_response_json("logstash", "/response")
+}
+```
+
+JSON export is based on Inspect's decrypted captured/filter data and intentionally
+stays close to the observed plaintext HTTP traffic. This is useful for Logstash-like
+pipelines because downstream tools can perform their own redaction, enrichment,
+normalization, field mapping, routing, and indexing.
+
 ## Header rewrite behavior
 
 ### `set_header`
@@ -544,7 +778,7 @@ Current behavior:
 - invalid header names are ignored and logged
 - invalid header values are ignored and logged
 - setting a header uses replacement semantics for that header name
-- if the same header is set multiple times, the last value wins
+- if the same header is set multiple times within the same patch, the last value wins at HTTP header-map level
 
 Example:
 
@@ -616,7 +850,10 @@ TODO:
 
 ## Path and query rewrite behavior
 
-Request filters can rewrite path and query.
+The Rust patch model supports request path and query rewrites internally, but the
+current Roto runtime API does not expose `set_path()` or `set_query()`.
+
+Planned API shape:
 
 ```rust
 fn request_action(req: Request) -> RequestAction {
@@ -626,7 +863,7 @@ fn request_action(req: Request) -> RequestAction {
 }
 ```
 
-Current behavior:
+Intended behavior once exposed:
 
 - `set_path()` replaces the URI path component
 - `set_query()` replaces the URI query component
@@ -634,34 +871,10 @@ Current behavior:
 - if only query is set, the original path is preserved
 - invalid path/query combinations are ignored and logged
 
-### Multiple calls in one action
-
-If the same field is set multiple times in one action, the last value wins.
-
-```rust
-fn request_action(req: Request) -> RequestAction {
-    RequestAction.pass()
-        .set_path("/first")
-        .set_path("/second")
-}
-```
-
-Expected final path:
-
-```text
-/second
-```
-
-### Clearing query
-
-Current API does not clearly distinguish:
-
-- preserve existing query
-- set query to empty
-- remove query entirely
-
 TODO:
 
+- [ ] Expose `set_path()` in the Roto runtime.
+- [ ] Expose `set_query()` in the Roto runtime.
 - [ ] Define exact behavior for `set_query("")`.
 - [ ] Add `remove_query()`.
 - [ ] Add query helper APIs such as `set_query_param`, `remove_query_param`, and `append_query_param`.
@@ -741,25 +954,24 @@ TODO:
 - [ ] Add JSON helper API.
 - [ ] Add HTML helper API.
 
+## Response head after patch
+
+For response rewrites, `response.head` is saved after applying `response_action`
+patches. The captured response head should therefore match the rewritten response
+metadata sent back to the client.
+
 ## Mark colors
 
-Marks can optionally carry a color.
+Internally, marks can carry an optional color.
 
-```rust
-fn request_action(req: Request) -> RequestAction {
-    RequestAction.pass()
-        .mark_color("important", "red")
-}
-```
+Current Roto behavior:
 
-Current behavior:
+- `mark(label)` creates a mark.
+- Marks created by the current Roto API use the default green color.
+- `mark_color(label, color)` is not currently exposed in the Roto runtime API.
+- TUI rendering currently focuses on the label and may not visually apply the color yet.
 
-- `mark(label)` creates a mark without an explicit color
-- `mark_color(label, color)` stores the color string in the action
-- the color string is currently not strictly validated
-- TUI rendering currently focuses on the label and may not visually apply the color yet
-
-Recommended color names for future compatibility:
+Recommended future color names:
 
 ```text
 red
@@ -776,18 +988,18 @@ Current built-in conventions:
 
 | Source | Default color intent |
 | --- | --- |
-| `mark(...)` | none/default |
+| Roto `mark(...)` | green |
 | tags emitted as marks | green |
 | notes emitted as marks | blue |
 
 TODO:
 
+- [ ] Expose `mark_color(label, color)` if colored marks should be scriptable.
 - [ ] Define the official color palette.
 - [ ] Validate color names during action conversion.
 - [ ] Render colors in the packet list.
 - [ ] Render marks/tags/notes in the detail pane.
 - [ ] Decide how unknown colors should behave.
-
 
 ## Action merge and conflict behavior
 
@@ -802,7 +1014,7 @@ Each filter returns an action. Inspect merges these actions into one combined ac
 
 ### Marks, tags, and notes
 
-Marks, tags, and notes are accumulated.
+For request and response filters, marks, tags, and notes are accumulated into the combined action.
 
 Example:
 
@@ -822,9 +1034,11 @@ results in both marks being emitted:
 [a] [b]
 ```
 
+Completed-phase action effects are still under development.
+
 ### `stop()`
 
-Calling `stop()` stops later matching filters.
+Calling `stop()` stops later matching filters in that phase.
 
 ```rust
 fn request_action(req: Request) -> RequestAction {
@@ -844,6 +1058,8 @@ If multiple filters return request patches, later patches can replace earlier pa
 
 For example, if one filter sets a header and a later filter sets a body, the current merge behavior may replace the request patch object instead of combining both changes.
 
+The same caveat applies to response patches.
+
 TODO:
 
 - [ ] Change action merge to deep-merge patches.
@@ -853,18 +1069,22 @@ TODO:
 
 ## Completed phase
 
-The `completed` phase runs after request and response processing has completed.
+The `completed` phase is matched after request and response processing has completed.
 
-It can be used for final marking/tagging/note hooks.
+Current behavior:
 
-Current completed filters can emit:
-
-- marks
-- tags
-- notes
-- outbound HTTP jobs, currently not wired
+- filters with `phase = ["completed"]` can match completed flows
+- Inspect invokes the internal completed hook
+- the current compiled Roto runtime does not expose a user-defined completed action function
+- completed-phase action side effects such as marks, tags, notes, and outbound HTTP jobs are not currently applied to TUI, capture persistence, or outbound queues
 
 Completed filters do not currently rewrite request/response data.
+
+TODO:
+
+- [ ] Define and expose a Roto completed action function.
+- [ ] Decide how completed marks/tags/notes should be shown and persisted.
+- [ ] Decide whether completed filters may enqueue outbound HTTP jobs.
 
 ## Runtime and reload behavior
 
@@ -874,14 +1094,17 @@ Inspect loads filters from:
 ./filters
 ```
 
+This path is currently resolved relative to the process current working directory.
+Resolving it to an absolute path is tracked as a TODO.
+
 The filter manager:
 
 - loads `.roto` files on startup
 - polls the directory for changes
 - reloads changed filters
 - compiles filters at reload time
-- keeps the previous filter set if reload fails
-- skips only the failing file if a single filter fails
+- skips individual failing filter files when possible
+- keeps the previous filter set if building a replacement filter set fails
 - swaps the current filter set atomically enough for active request handling
 
 Compiled function handles are kept after reload, so requests/responses do not recompile scripts per packet.
@@ -901,7 +1124,9 @@ Filter reload logs include useful diagnostics:
 - available functions
 - trigger host/path/method/phase
 
-Request/response matching also logs matched filters.
+Request/response/completed matching also logs matched filters.
+
+Outbound HTTP job drops and failures are logged as warnings.
 
 ## Example filters
 
@@ -971,83 +1196,114 @@ fn response_action(res: Response) -> ResponseAction {
 }
 ```
 
+### Outbound HTTP response filter
+
+This example posts raw captured request/response bytes to a named outbound HTTP
+client called `snort`.
+
+It requires an outbound HTTP client named `snort` in Inspect configuration.
+If the client is not configured, the jobs are dropped and logged.
+
+```rust
+//! +++
+//! name = "snort raw response"
+//! enabled = false
+//!
+//! [trigger]
+//! host = ["*"]
+//! path = ["*"]
+//! phase = ["response"]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+
+fn response_action(res: Response) -> ResponseAction {
+    ResponseAction.pass()
+        .mark("snort")
+        .post_request_raw("snort", "/request")
+        .post_response_raw("snort", "/response")
+}
+```
+
 ## Current limitations
 
-### Synthetic response capture
+### Roto API coverage
 
-Synthetic responses are intended to follow the same capture path as upstream responses.
+The Rust filter model contains more data and patch fields than the current Roto
+runtime exposes.
 
-Expected behavior:
+Currently notable gaps include:
 
-- save `response.head`
-- save `response.body`
-- send response metadata to DB
-- send `PacketEvent::Completed`
-- show final status in TUI
-- allow detail pane to show request/response normally
+- request ID access
+- request header lookup
+- request body text access
+- request content type access
+- request TLS SNI access
+- response header lookup
+- response upstream status access
+- response elapsed time access
+- request path/query rewrite methods
+- scriptable colored marks
+- tags and notes as first-class Roto APIs
 
-Important details:
+### Completed phase
 
-- `upstream_status` should be `None`
-- `upstream_remote_addr` should be `None`
-- `tls_upstream` should be `None`
-- elapsed time should be measured from request start to synthetic response generation
+Completed filters can match completed flows, but user-defined completed Roto
+actions and their side effects are not yet wired.
 
-### Request metadata for synthetic responses
+### Action merge behavior
 
-Synthetic responses must not bypass request metadata capture.
-
-The request should still be saved:
-
-- `request.head`
-- `request.body`
-- request DB metadata
-- TUI started event
-
-### Response head after patch
-
-For response rewrites, `response.head` should be saved after applying `response_action` patches.
-
-Otherwise the captured head can differ from the actual response sent to the client.
+Request and response action merge behavior is intentionally simple. If multiple
+filters return request or response patches, later patches can replace earlier
+patches instead of deeply merging every field.
 
 ### Filter directory path
 
-`FilterManager::new("./filters")` should resolve the directory to an absolute path to avoid current-working-directory surprises.
+The filter directory is currently `./filters` relative to the process current
+working directory. This can be surprising if Inspect is launched from a different
+directory.
 
 ## TODO
 
 ### High priority
 
-- [ ] Ensure synthetic responses always save request metadata before early return.
-- [ ] Ensure synthetic responses save response metadata/body/head.
-- [ ] Ensure synthetic responses write `ssl_tls.json`.
-- [ ] Ensure synthetic responses emit TUI completed events.
-- [ ] Save `response.head` after response patches.
-- [ ] Make synthetic response force `continue_filters = false`.
 - [ ] Resolve filter directory to an absolute path at `FilterManager::new`.
+- [ ] Align this documentation with the exact Roto runtime API whenever the runtime API changes.
+- [ ] Add tests for synthetic response capture path.
+- [ ] Add tests for response patch capture ordering.
 
 ### Medium priority
 
+- [ ] Expose request header/body/content-type access to Roto if needed.
+- [ ] Expose response header lookup to Roto if needed.
+- [ ] Expose request path/query rewrite methods to Roto if needed.
+- [ ] Define whether outbound JSON export should ever support a final post-rewrite wire-image mode.
 - [ ] Persist marks/tags/notes in the capture DB.
 - [ ] Improve TUI mark/tag display to avoid very long packet rows.
 - [ ] Add detail-pane display for marks/tags/notes.
 - [ ] Add more tests for trigger matching.
 - [ ] Add tests for request/response patch application.
-- [ ] Add tests for synthetic response capture path.
-- [ ] Add examples for completed filters.
+- [ ] Add examples for completed filters after completed actions are wired.
 - [ ] Document exact Roto type signatures generated by the runtime.
+- [ ] Document config examples for named outbound HTTP clients.
 
 ### Future work
 
-- [ ] Wire named outbound HTTP jobs.
-- [ ] Add named HTTP clients, e.g. Elasticsearch sink.
-- [ ] Use bounded queues for outbound jobs.
-- [ ] Keep arbitrary filesystem/process/network access unavailable from Roto.
+- [ ] Define and wire completed-phase Roto actions.
+- [ ] Add explicit append support for headers.
+- [ ] Add safer APIs for `set-cookie`, `cookie`, and comma-joined headers.
+- [ ] Add optional export modes only if there is a clear use case beyond decrypted observation snapshots.
+- [ ] Add binary body rewrite API.
+- [ ] Add JSON helper API.
+- [ ] Add HTML helper API.
 - [ ] Add richer action APIs for tags and notes.
 - [ ] Consider color handling for marks in TUI.
 - [ ] Add a filter validation command.
 - [ ] Add CLI option for filters directory.
 - [ ] Add reload status/errors to TUI.
+- [ ] Consider preserving compression by recompressing rewritten bodies, but only as an explicit future feature.
 
 ## Security model
 
@@ -1055,12 +1311,12 @@ Roto filters should be treated as local trusted configuration.
 
 The intended design is:
 
-- Roto can inspect request/response metadata and bodies.
+- Roto can inspect currently exposed request/response metadata and bodies.
 - Roto can return structured actions.
 - Roto should not get arbitrary filesystem access.
 - Roto should not get arbitrary process execution.
 - Roto should not get arbitrary network access.
-- Future outbound HTTP should be limited to named clients configured by Inspect.
+- Outbound HTTP, where available, is limited to named clients configured by Inspect.
 
 ## Design notes
 
@@ -1078,6 +1334,6 @@ This keeps Roto scripts declarative and lets Rust own the actual side effects:
 - synthetic response construction
 - capture persistence
 - TUI events
-- future outbound jobs
+- outbound HTTP jobs
 
 This also keeps the runtime easier to reason about and safer to extend.

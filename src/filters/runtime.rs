@@ -5,26 +5,41 @@ use crate::filters::roto_api::{
     RotoResponseAction,
 };
 use crate::filters::types::{
-    CompletedAction, FilterBodyPatch,
-    FilterDefinition, FilterFlow,
-    FilterHeader, FilterMark,
-    FilterRequest, FilterRequestPatch,
-    FilterRequestView, FilterResponse,
-    FilterResponsePatch, FilterResponseView,
-    RequestAction, ResponseAction,
-    RotoOnRequestFn, RotoOnResponseFn,
-    RotoRequestActionFn, RotoRequestStringFn,
-    RotoResponseActionFn, RotoResponseStringFn
+    CompletedAction,
+    FilterBodyPatch,
+    FilterDefinition,
+    FilterFlow,
+    FilterHeader,
+    FilterMark,
+    FilterRequest,
+    FilterRequestPatch,
+    FilterRequestView,
+    FilterResponse,
+    FilterResponsePatch,
+    FilterResponseView,
+    OutboundHttpJob,
+    RequestAction,
+    ResponseAction,
+    RotoOnRequestFn,
+    RotoOnResponseFn,
+    RotoRequestActionFn,
+    RotoRequestStringFn,
+    RotoResponseActionFn,
+    RotoResponseStringFn,
 };
 use roto::{library, NoCtx, RotoString, Runtime, Val};
 use crate::filters::FilterSyntheticResponse;
+
+fn plain_error(err: impl std::fmt::Display) -> String {
+    console::strip_ansi_codes(&err.to_string()).into_owned()
+}
 
 #[derive(Clone, Debug)]
 pub enum RotoProgram {
     MetadataOnly,
     Compiled {
         script_len: usize,
-        filter: CompiledRotoFilter,
+        filter: Box<CompiledRotoFilter>,
     },
 }
 
@@ -226,6 +241,119 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
                 action
             }
 
+            fn post_json(
+                mut action: Val<RotoResponseActionData>,
+                client: RotoString,
+                path: RotoString,
+                body: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.outbound_http.push(RotoOutboundHttpData {
+                    client,
+                    method: "POST".into(),
+                    path,
+                    body: RotoOutboundHttpBodyData::Text {
+                        body,
+                        content_type: "application/json".into(),
+                    },
+                });
+
+                action
+            }
+
+            fn post_text(
+                mut action: Val<RotoResponseActionData>,
+                client: RotoString,
+                path: RotoString,
+                body: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.outbound_http.push(RotoOutboundHttpData {
+                    client,
+                    method: "POST".into(),
+                    path,
+                    body: RotoOutboundHttpBodyData::Text {
+                        body,
+                        content_type: "text/plain; charset=utf-8".into(),
+                    },
+                });
+
+                action
+            }
+
+            fn post_request_raw(
+                mut action: Val<RotoResponseActionData>,
+                client: RotoString,
+                path: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.outbound_http.push(RotoOutboundHttpData {
+                    client,
+                    method: "POST".into(),
+                    path,
+                    body: RotoOutboundHttpBodyData::CapturedRequest,
+                });
+
+                action
+            }
+
+            fn post_response_raw(
+                mut action: Val<RotoResponseActionData>,
+                client: RotoString,
+                path: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.outbound_http.push(RotoOutboundHttpData {
+                    client,
+                    method: "POST".into(),
+                    path,
+                    body: RotoOutboundHttpBodyData::CapturedResponse,
+                });
+
+                action
+            }
+
+            fn post_request_json(
+                mut action: Val<RotoResponseActionData>,
+                client: RotoString,
+                path: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.outbound_http.push(RotoOutboundHttpData {
+                    client,
+                    method: "POST".into(),
+                    path,
+                    body: RotoOutboundHttpBodyData::CapturedRequestJson,
+                });
+
+                action
+            }
+
+            fn post_response_json(
+                mut action: Val<RotoResponseActionData>,
+                client: RotoString,
+                path: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.outbound_http.push(RotoOutboundHttpData {
+                    client,
+                    method: "POST".into(),
+                    path,
+                    body: RotoOutboundHttpBodyData::CapturedResponseJson,
+                });
+
+                action
+            }
+
+            fn post_flow_json(
+                mut action: Val<RotoResponseActionData>,
+                client: RotoString,
+                path: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.outbound_http.push(RotoOutboundHttpData {
+                    client,
+                    method: "POST".into(),
+                    path,
+                    body: RotoOutboundHttpBodyData::CapturedFlowJson,
+                });
+
+                action
+            }
+
             fn set_status(
                 mut action: Val<RotoResponseActionData>,
                 status: u16,
@@ -302,7 +430,7 @@ impl CompiledFilter {
             priority,
             program: RotoProgram::Compiled {
                 script_len,
-                filter,
+                filter: Box::new(filter),
             },
         }
     }
@@ -413,11 +541,9 @@ impl CompiledFilter {
                 if let (Some(name_fn), Some(value_fn)) = (
                     filter.request_header_name.as_ref(),
                     filter.request_header_value.as_ref(),
-                ) {
-                    if let Some(name) = non_empty_roto_string(name_fn.call(Val(req_data.clone()))) {
+                ) && let Some(name) = non_empty_roto_string(name_fn.call(Val(req_data.clone()))) {
                         let value = value_fn.call(Val(req_data.clone())).to_string();
                         action = action.set_header(name, value);
-                    }
                 }
 
                 if let Some(body_fn) = filter.request_body.as_ref() {
@@ -523,11 +649,9 @@ impl CompiledFilter {
                 if let (Some(name_fn), Some(value_fn)) = (
                     filter.response_header_name.as_ref(),
                     filter.response_header_value.as_ref(),
-                ) {
-                    if let Some(name) = non_empty_roto_string(name_fn.call(Val(res_data.clone()))) {
+                ) && let Some(name) = non_empty_roto_string(name_fn.call(Val(res_data.clone()))) {
                         let value = value_fn.call(Val(res_data.clone())).to_string();
                         action = action.set_header(name, value);
-                    }
                 }
 
                 if let Some(body_fn) = filter.response_body.as_ref() {
@@ -698,11 +822,11 @@ pub fn compile_roto_filter_file(path: &std::path::Path) -> anyhow::Result<Compil
 
     let mut package = runtime
         .compile(path)
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
+        .map_err(|err| anyhow::anyhow!("{}", plain_error(err)))?;
 
     let ping = package
         .get_function::<fn() -> bool>("ping")
-        .map_err(|err| anyhow::anyhow!("{err}"))
+        .map_err(|err| anyhow::anyhow!("{}", plain_error(err)))
         .map_err(|err| {
             anyhow::anyhow!(
                 "compiled roto filter must export `fn ping() -> bool`: {}: {err}",
@@ -775,7 +899,7 @@ pub fn compile_roto_filter_file(path: &std::path::Path) -> anyhow::Result<Compil
     })
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct RotoRequestActionData {
     set_headers: Vec<(RotoString, RotoString)>,
     remove_headers: Vec<RotoString>,
@@ -788,21 +912,6 @@ pub struct RotoRequestActionData {
     stop: bool,
 }
 
-impl Default for RotoRequestActionData {
-    fn default() -> Self {
-        Self {
-            set_headers: Vec::new(),
-            remove_headers: Vec::new(),
-            marks: Vec::new(),
-            body_text: None,
-            body_content_type: None,
-            synthetic_status: None,
-            synthetic_body: None,
-            synthetic_content_type: None,
-            stop: false,
-        }
-    }
-}
 
 impl RotoRequestActionData {
     fn into_request_action(self) -> RequestAction {
@@ -839,22 +948,20 @@ impl RotoRequestActionData {
             || !self.remove_headers.is_empty()
             || self.body_text.is_some()
         {
-            let mut patch = FilterRequestPatch::default();
-
-            patch.set_headers = self
+            let mut patch = FilterRequestPatch { set_headers: self
                 .set_headers
                 .into_iter()
                 .map(|(name, value)| FilterHeader {
                     name: name.to_string(),
                     value: value.to_string(),
                 })
-                .collect();
-
-            patch.remove_headers = self
+                .collect(),
+                remove_headers: self
                 .remove_headers
                 .into_iter()
                 .map(|name| name.to_string())
-                .collect();
+                .collect(), ..Default::default()
+            };
 
             if let Some(body_text) = self.body_text {
                 patch.body = Some(FilterBodyPatch {
@@ -879,7 +986,7 @@ impl RotoRequestActionData {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct RotoResponseActionData {
     status: Option<u16>,
     set_headers: Vec<(RotoString, RotoString)>,
@@ -887,21 +994,29 @@ pub struct RotoResponseActionData {
     marks: Vec<RotoString>,
     body_text: Option<RotoString>,
     body_content_type: Option<RotoString>,
+    outbound_http: Vec<RotoOutboundHttpData>,
     stop: bool,
 }
 
-impl Default for RotoResponseActionData {
-    fn default() -> Self {
-        Self {
-            status: None,
-            set_headers: Vec::new(),
-            remove_headers: Vec::new(),
-            marks: Vec::new(),
-            body_text: None,
-            body_content_type: None,
-            stop: false,
-        }
-    }
+#[derive(Clone, Debug, PartialEq)]
+pub struct RotoOutboundHttpData {
+    client: RotoString,
+    method: RotoString,
+    path: RotoString,
+    body: RotoOutboundHttpBodyData,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RotoOutboundHttpBodyData {
+    Text {
+        body: RotoString,
+        content_type: RotoString,
+    },
+    CapturedRequest,
+    CapturedResponse,
+    CapturedRequestJson,
+    CapturedResponseJson,
+    CapturedFlowJson,
 }
 
 impl RotoResponseActionData {
@@ -915,24 +1030,23 @@ impl RotoResponseActionData {
             || !self.remove_headers.is_empty()
             || self.body_text.is_some()
         {
-            let mut patch = FilterResponsePatch::default();
-
-            patch.status = self.status;
-
-            patch.set_headers = self
-                .set_headers
-                .into_iter()
-                .map(|(name, value)| FilterHeader {
-                    name: name.to_string(),
-                    value: value.to_string(),
-                })
-                .collect();
-
-            patch.remove_headers = self
-                .remove_headers
-                .into_iter()
-                .map(|name| name.to_string())
-                .collect();
+            let mut patch = FilterResponsePatch {
+                status: self.status,
+                set_headers: self
+                    .set_headers
+                    .into_iter()
+                    .map(|(name, value)| FilterHeader {
+                        name: name.to_string(),
+                        value: value.to_string(),
+                    })
+                    .collect(),
+                remove_headers: self
+                    .remove_headers
+                    .into_iter()
+                    .map(|name| name.to_string())
+                    .collect(),
+                ..Default::default()
+            };
 
             if let Some(body_text) = self.body_text {
                 patch.body = Some(FilterBodyPatch {
@@ -950,6 +1064,67 @@ impl RotoResponseActionData {
             .map(|label| FilterMark {
                 label: label.to_string(),
                 color: Some("green".to_string()),
+            })
+            .collect();
+
+        action.outbound_http = self
+            .outbound_http
+            .into_iter()
+            .map(|job| {
+                let (headers, body) = match job.body {
+                    RotoOutboundHttpBodyData::Text { body, content_type } => (
+                        vec![FilterHeader {
+                            name: "content-type".to_string(),
+                            value: content_type.to_string(),
+                        }],
+                        crate::filters::types::OutboundHttpBodySource::Bytes(
+                            body.to_string().into_bytes(),
+                        ),
+                    ),
+                    RotoOutboundHttpBodyData::CapturedRequest => (
+                        vec![FilterHeader {
+                            name: "content-type".to_string(),
+                            value: "application/octet-stream".to_string(),
+                        }],
+                        crate::filters::types::OutboundHttpBodySource::CapturedRequest,
+                    ),
+                    RotoOutboundHttpBodyData::CapturedResponse => (
+                        vec![FilterHeader {
+                            name: "content-type".to_string(),
+                            value: "application/octet-stream".to_string(),
+                        }],
+                        crate::filters::types::OutboundHttpBodySource::CapturedResponse,
+                    ),
+                    RotoOutboundHttpBodyData::CapturedRequestJson => (
+                        vec![FilterHeader {
+                            name: "content-type".to_string(),
+                            value: "application/json".to_string(),
+                        }],
+                        crate::filters::types::OutboundHttpBodySource::CapturedRequestJson,
+                    ),
+                    RotoOutboundHttpBodyData::CapturedResponseJson => (
+                        vec![FilterHeader {
+                            name: "content-type".to_string(),
+                            value: "application/json".to_string(),
+                        }],
+                        crate::filters::types::OutboundHttpBodySource::CapturedResponseJson,
+                    ),
+                    RotoOutboundHttpBodyData::CapturedFlowJson => (
+                        vec![FilterHeader {
+                            name: "content-type".to_string(),
+                            value: "application/json".to_string(),
+                        }],
+                        crate::filters::types::OutboundHttpBodySource::CapturedFlowJson,
+                    ),
+                };
+
+                OutboundHttpJob {
+                    client: job.client.to_string(),
+                    method: job.method.to_string(),
+                    path: job.path.to_string(),
+                    headers,
+                    body,
+                }
             })
             .collect();
 

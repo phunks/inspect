@@ -98,7 +98,7 @@ impl Widget for SegmentedControl {
         }
         let accent = Color::Foreground;
         let selected_style = if self.in_focus_chain() {
-            Style::new().fg(Color::BLACK).bg(accent).bold()
+            Style::new().fg(Color::Background).bg(accent).bold()
         } else {
             base.reverse().bold()
         };

@@ -192,3 +192,57 @@ tui_time_format = "%H:%M:%S%.3f"
 #   "+09:00"
 #   "-05:30"
 tui_time_tz = "utc"
+
+# Outbound HTTP clients used by Roto response filters.
+#
+# Roto filters can enqueue fire-and-forget HTTP jobs with methods such as:
+#
+#   ResponseAction.pass()
+#       .post_json("webhook", "/events", "{\"ok\":true}")
+#       .post_text("logstash", "/inspect", "message")
+#       .post_request_raw("snort", "/request")
+#       .post_response_raw("snort", "/response")
+#
+# The first argument is the client name. It must match one of the
+# [[outbound_http_clients]] entries below.
+#
+# Inspect sends outbound jobs to:
+#
+#   base_url + path
+#
+# For example:
+#
+#   name = "logstash"
+#   base_url = "http://localhost:5044"
+#
+# and this Roto call:
+#
+#   .post_text("logstash", "/inspect", "message")
+#
+# sends a POST request to:
+#
+#   http://localhost:5044/inspect
+#
+# Outbound HTTP is fire-and-forget:
+#
+# - destination responses are logged only
+# - destination responses are not passed back to Roto
+# - destination success/failure does not affect the browser response
+# - unknown client names are dropped and logged
+#
+# Uncomment and edit examples as needed.
+
+# [[outbound_http_clients]]
+# name = "webhook"
+# base_url = "http://127.0.0.1:3000"
+# timeout_ms = 5000
+
+# [[outbound_http_clients]]
+# name = "logstash"
+# base_url = "http://localhost:5044"
+# timeout_ms = 5000
+
+# [[outbound_http_clients]]
+# name = "snort"
+# base_url = "http://127.0.0.1:8081"
+# timeout_ms = 5000

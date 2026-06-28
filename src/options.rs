@@ -7,6 +7,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use crate::filters::http_client::NamedHttpClientConfig;
 use crate::mitm::proxy::AnyResult;
 
 #[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
@@ -49,6 +50,7 @@ struct FileConfig {
     body_save_limit_bytes: Option<usize>,
     body_save_unlimited: Option<bool>,
     body_omit_content_types: Option<Vec<String>>,
+    outbound_http_clients: Option<Vec<NamedHttpClientConfig>>,
     generate_ca: Option<bool>,
     force_regenerate_ca: Option<bool>,
     preshared_key_log: Option<String>,
@@ -106,6 +108,9 @@ pub struct Opt {
 
     #[arg(long, value_delimiter = ',', help = "Do not save bodies for matching Content-Type prefixes")]
     pub body_omit_content_types: Vec<String>,
+
+    #[arg(skip)]
+    pub outbound_http_clients: Vec<NamedHttpClientConfig>,
 
     #[arg(long, help = "Generate (or reuse) persistent local MITM root CA and exit")]
     pub generate_ca: bool,
@@ -221,6 +226,10 @@ impl Opt {
             self.body_omit_content_types = value;
         }
 
+        if let Some(value) = config.outbound_http_clients {
+            self.outbound_http_clients = value;
+        }
+
         if !cli_specified(matches, "generate_ca")
             && let Some(value) = config.generate_ca {
             self.generate_ca = value;
@@ -236,24 +245,20 @@ impl Opt {
             self.preshared_key_log = Some(value);
         }
 
-
         if !cli_specified(matches, "tui_time_mode")
             && let Some(value) = config.tui_time_mode {
             self.tui_time_mode = value;
         }
-
 
         if !cli_specified(matches, "tui_time_format")
             && let Some(value) = config.tui_time_format {
             self.tui_time_format = value;
         }
 
-
         if !cli_specified(matches, "tui_time_tz")
             && let Some(value) = config.tui_time_tz {
             self.tui_time_tz = value;
         }
-
 
         Ok(())
     }
@@ -287,10 +292,10 @@ impl Opt {
             body_save_unlimited = self.body_save_unlimited,
             effective_body_save_limit_bytes = ?self.effective_body_save_limit_bytes(),
             body_omit_content_types = ?self.body_omit_content_types,
+            outbound_http_clients = ?self.outbound_http_clients,
             generate_ca = self.generate_ca,
             force_regenerate_ca = self.force_regenerate_ca,
             preshared_key_log_enabled = self.is_preshared_key_log_enabled(),
-            preshared_key_log_file = ?self.preshared_key_log_file(),
             tui_time_mode = ?self.tui_time_mode,
             tui_time_format = %self.tui_time_format,
             tui_time_tz = %self.tui_time_tz,

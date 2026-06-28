@@ -1,7 +1,12 @@
-use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::sync::{mpsc, watch};
 use tracing::info;
 use inspect::filters::FilterManager;
+use inspect::filters::http_client::{
+    OutboundHttpClientPool,
+    OutboundHttpPoolConfig,
+    run_outbound_http_worker,
+};
 use inspect::mitm::proxy::{mitm_proxy_main, PacketEvent};
 use inspect::tui::{run_tui, TuiMode, TUI_EVENT_BUFFER};
 use inspect::tui::time::TimeDisplayConfig;
@@ -9,6 +14,8 @@ use inspect::mitm::proxy::AnyError;
 use inspect::mitm::capture::CapturePaths;
 use inspect::mitm::dynamic_ca::generate_default_ca_files;
 use inspect::options::{Opt, Logger};
+use inspect::mitm::flow::{FlowEventDispatcher, FlowEventPublisher, TuiSink};
+
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
@@ -48,9 +55,14 @@ async fn main() -> Result<(), AnyError> {
 
     let _ = CapturePaths::initialize_for_process()?;
 
-    let (tx, rx) = mpsc::channel(TUI_EVENT_BUFFER);
-    let callback = Arc::new(move |p: PacketEvent| {
-        let _ = tx.try_send(p);
+    let (tx, rx) = mpsc::channel::<PacketEvent>(TUI_EVENT_BUFFER);
+    let (flow_events, flow_event_rx) = FlowEventPublisher::channel(TUI_EVENT_BUFFER);
+
+    let flow_event_dispatcher = FlowEventDispatcher::new()
+        .with_sink(TuiSink::new(tx));
+
+    let flow_event_dispatcher_task = tokio::spawn(async move {
+        flow_event_dispatcher.run(flow_event_rx).await;
     });
 
     let upstream_proxy = opt.upstream_proxy.clone();
@@ -61,9 +73,31 @@ async fn main() -> Result<(), AnyError> {
     let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
     let body_save_limit_bytes = opt.effective_body_save_limit_bytes();
     let body_omit_content_types = opt.body_omit_content_types.clone();
+    let outbound_http_configs = opt
+        .outbound_http_clients
+        .clone()
+        .into_iter()
+        .map(|config| {
+            let name = config.name.clone();
+            (name, OutboundHttpPoolConfig::from(config))
+        })
+        .collect::<HashMap<_, _>>();
     let filter_manager = FilterManager::new("./filters");
     let (quit_tx, quit_rx) = watch::channel(false);
 
+    let outbound_http_pool = if outbound_http_configs.is_empty() {
+        None
+    } else {
+        let (pool, rx) = OutboundHttpClientPool::new(outbound_http_configs, TUI_EVENT_BUFFER);
+        let configs = pool.configs();
+
+        tokio::spawn(async move {
+            run_outbound_http_worker(rx, configs).await;
+        });
+
+        Some(pool)
+    };
+    
     let filter_reload_manager = filter_manager.clone();
     let filter_reload_quit_rx = quit_rx.clone();
     let filter_reload_task = tokio::spawn(async move {
@@ -83,8 +117,9 @@ async fn main() -> Result<(), AnyError> {
             upstream_request_timeout_sec,
             body_save_limit_bytes,
             body_omit_content_types,
+            outbound_http_pool,
             filter_manager,
-            Some(callback),
+            flow_events,
             quit_rx,
         ).await {
             eprintln!("proxy error: {e}");
@@ -95,9 +130,8 @@ async fn main() -> Result<(), AnyError> {
         eprintln!("tui error: {e}");
     }
 
-    let _ = quit_tx.send(true);
-
     let _ = proxy_task.await;
+    flow_event_dispatcher_task.abort();
     let _ = filter_reload_task.await;
     Ok(())
 }

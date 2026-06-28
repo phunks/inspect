@@ -1,0 +1,8 @@
+api.http.host: 0.0.0.0
+api.http.port: 9600
+node.name: logstash-node-1
+path.config: /usr/share/logstash/pipeline/*.conf
+path.queue: /usr/share/logstash/data/queue
+pipeline.batch.size: 125
+queue.max_bytes: 1gb
+queue.type: persisted

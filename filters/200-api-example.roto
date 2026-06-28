@@ -1,6 +1,6 @@
 //! +++
 //! name = "example api"
-//! enabled = true
+//! enabled = false
 //!
 //! [trigger]
 //! host = ["api.example.com", "*.api.example.com"]
