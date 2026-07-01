@@ -3,6 +3,7 @@ mod global_chords;
 mod search;
 mod button;
 mod focus_pane;
+mod editor_pane;
 pub mod time;
 pub mod tab;
 mod segmented_control;
@@ -29,7 +30,8 @@ use crate::mitm::capture::CapturePaths;
 use crate::tui::body::format_body_for_display_with_headers;
 use crate::tui::har::open_har_export_popup;
 use crate::tui::read_metadata::PacketSummary;
-use crate::tui::tab::{DetailContent, DetailMessagePartSelection, DetailPane, DetailPrimaryTabSelection, DetailTabSelection};
+use crate::tui::tab::{DetailContent, DetailEditState, DetailMessagePartSelection, DetailPane, DetailPrimaryTabSelection, DetailTabSelection, SharedDetailEditState};
+use crate::tui::editor_pane::open_edit_popup;
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
@@ -77,6 +79,18 @@ impl PacketRow {
             format!("{}{}{}", scheme, self.host, self.uri)
         } else {
             format!("{}{}{}?{}", scheme, self.host, self.uri, self.query_str)
+        }
+    }
+
+    fn edit_context(&self) -> PacketRowEditContext {
+        PacketRowEditContext {
+            flow_key: self.flow_key.clone(),
+            method: self.method.clone(),
+            protocol: self.protocol.clone(),
+            host: self.host.clone(),
+            uri: self.uri.clone(),
+            query_str: self.query_str.clone(),
+            status: self.status,
         }
     }
 
@@ -308,6 +322,32 @@ pub enum UiEvent {
         highlight_query: Option<String>,
         tab_selection: Option<DetailTabSelection>,
     },
+    OpenEdit {
+        row: PacketRowEditContext,
+        detail: DetailEditState,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct PacketRowEditContext {
+    pub flow_key: String,
+    pub method: String,
+    pub protocol: String,
+    pub host: String,
+    pub uri: String,
+    pub query_str: String,
+    pub status: Option<u16>,
+}
+
+impl PacketRowEditContext {
+    pub(crate) fn title(&self) -> String {
+        format!(
+            "Edit: {} {} {}",
+            self.method,
+            self.host,
+            self.uri,
+        )
+    }
 }
 
 #[allow(dead_code)]
@@ -352,6 +392,7 @@ pub struct PacketListDelegate {
     task: TaskHandle,
     dbstate: Arc<DbState>,
     detail_tx: UnboundedSender<UiEvent>,
+    detail_edit_state: SharedDetailEditState,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     search_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     full_text_select_requests: Arc<parking_lot::Mutex<Vec<FullTextSelectRequest>>>,
@@ -422,6 +463,7 @@ impl PacketListDelegate {
     pub async fn new(
         rx: mpsc::Receiver<PacketEvent>,
         detail_tx: UnboundedSender<UiEvent>,
+        detail_edit_state: SharedDetailEditState,
         time_display: TimeDisplayConfig,
         tui_mode: TuiMode,
     ) -> Box<Self> {
@@ -543,6 +585,7 @@ impl PacketListDelegate {
             task: TaskHandle::EMPTY,
             dbstate,
             detail_tx,
+            detail_edit_state,
             row_clicks,
             search_requests,
             full_text_select_requests,
@@ -1114,6 +1157,130 @@ impl PacketListDelegate {
         self.id_to_row_index.get(id).copied()
     }
 
+    fn open_edit_for_selected_detail(&mut self) {
+        let Some(row_index) = self.current_row_index() else {
+            self.append_system_line("=== edit unavailable: no selected flow ===");
+            return;
+        };
+
+        let Some(row) = self.rows.get(row_index).cloned() else {
+            self.append_system_line("=== edit unavailable: selected row not found ===");
+            return;
+        };
+
+        let selection = self.detail_edit_state.lock().selection;
+
+        match selection.primary_tab {
+            DetailPrimaryTabSelection::Request | DetailPrimaryTabSelection::Response => {}
+            DetailPrimaryTabSelection::SslTls | DetailPrimaryTabSelection::Info => {
+                self.append_system_line("=== edit unavailable: select request or response ===");
+                return;
+            }
+        }
+
+        if row.id.is_empty() {
+            self.append_system_line("=== edit unavailable: selected row has no capture id ===");
+            return;
+        }
+
+        let db = self.dbstate.clone();
+        let detail_tx = self.detail_tx.clone();
+        let time_formatter = self.time_formatter.clone();
+        let edit_context = row.edit_context();
+        let id = row.id.clone();
+
+        tokio::spawn(async move {
+            let req = db.select_request_by_id(id.clone()).await;
+            let res = db.select_response_by_id(id.clone()).await;
+
+            let detail = match (req, res) {
+                (Ok(mut req), Ok(res)) => {
+                    if let Some(epoch_ms) = req.epoch_ms {
+                        let raw_time = req.time.as_deref().unwrap_or_default();
+                        req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
+                    }
+
+                    let req_body = read_body_file(
+                        req.request_body_path.as_deref(),
+                        &req.headers,
+                    ).await;
+                    let res_body = read_body_file(
+                        res.response_body_path.as_deref(),
+                        &res.headers,
+                    ).await;
+
+                    let req_body = format_body_with_size(req.body_size_line(), req_body);
+                    let res_body = format_body_with_size(res.body_size_line(), res_body);
+                    let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
+                    let ssl_tls_info = format_ssl_tls_info(
+                        req.tls_sni.as_deref(),
+                        res.tls_upstream.as_deref(),
+                    );
+
+                    DetailContent {
+                        request_meta: req.to_string(),
+                        request_body: req_body,
+                        response_meta: res.to_string(),
+                        response_body: res_body,
+                        ssl_tls_info,
+                        id,
+                        dir,
+                    }
+                }
+                (Ok(mut req), Err(e)) => {
+                    if let Some(epoch_ms) = req.epoch_ms {
+                        let raw_time = req.time.as_deref().unwrap_or_default();
+                        req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
+                    }
+
+                    let req_body = read_body_file(
+                        req.request_body_path.as_deref(),
+                        &req.headers,
+                    ).await;
+                    let req_body = format_body_with_size(req.body_size_line(), req_body);
+                    let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
+                    let ssl_tls_info = format_ssl_tls_info(req.tls_sni.as_deref(), None);
+
+                    DetailContent {
+                        request_meta: req.to_string(),
+                        request_body: req_body,
+                        response_meta: format!("response error: {e:#}"),
+                        response_body: String::new(),
+                        ssl_tls_info,
+                        id,
+                        dir,
+                    }
+                }
+                (Err(e1), Err(e2)) => DetailContent {
+                    request_meta: format!("request error: {e1:#}"),
+                    request_body: String::new(),
+                    response_meta: format!("response error: {e2:#}"),
+                    response_body: String::new(),
+                    ssl_tls_info: format_ssl_tls_info(None, None),
+                    id,
+                    dir: String::new(),
+                },
+                (Err(e), _) => DetailContent {
+                    request_meta: format!("request error: {e:#}"),
+                    request_body: String::new(),
+                    response_meta: String::new(),
+                    response_body: String::new(),
+                    ssl_tls_info: format_ssl_tls_info(None, None),
+                    id,
+                    dir: String::new(),
+                },
+            };
+
+            let _ = detail_tx.send(UiEvent::OpenEdit {
+                row: edit_context,
+                detail: DetailEditState {
+                    selection,
+                    content: detail,
+                },
+            });
+        });
+    }
+
     fn current_row_index(&self) -> Option<usize> {
         match self.mode {
             PacketListMode::Main => {
@@ -1520,6 +1687,12 @@ impl DelegateWidget for PacketListDelegate {
                 self.open_har_export_dialog();
                 return InputResult::Handled;
             }
+            // generated filter editor shortcut
+            chord!(Char('E')) if queue.is_unhandled() => {
+                queue.next();
+                self.open_edit_for_selected_detail();
+                return InputResult::Handled;
+            }
             chord!(Char('n')) if queue.is_unhandled() => {
                 queue.next();
                 self.move_retained_full_text_next();
@@ -1608,10 +1781,34 @@ impl RootPane {
                         detail_pane.set_content(detail, highlight_query, tab_selection);
                     }
                 }
+                UiEvent::OpenEdit { row, detail } => {
+                    open_edit_popup(row, detail);
+                    tuie::dirty_layout();
+                }
             }
         }
     }
 }
+
+impl DelegateWidget for RootPane {
+    fn get_delegate(&self) -> &dyn Widget {
+        self.split.as_ref()
+    }
+
+    fn get_delegate_mut(&mut self) -> &mut dyn Widget {
+        self.poll_ui_events();
+        self.split.as_mut()
+    }
+
+    fn after_on_input(&mut self, _result: InputResult) {
+        self.poll_ui_events();
+    }
+
+    fn after_before_layout(&mut self) {
+        self.poll_ui_events();
+    }
+}
+
 
 fn highlight_detail_text(text: &str, query: &str) -> StyledString {
     let Some(matcher) = FullTextMatcher::parse(query) else {
@@ -1658,22 +1855,6 @@ fn highlight_detail_text(text: &str, query: &str) -> StyledString {
     }
 
     styled
-}
-
-impl DelegateWidget for RootPane {
-    fn get_delegate(&self) -> &dyn Widget {
-        self.split.as_ref()
-    }
-
-    fn get_delegate_mut(&mut self) -> &mut dyn Widget {
-        self.poll_ui_events();
-        self.split.as_mut()
-    }
-
-    fn override_on_input(&mut self, _queue: &mut InputQueue) -> InputResult {
-        self.poll_ui_events();
-        InputResult::Rejected
-    }
 }
 
 struct ClickablePacketRow {
@@ -1775,10 +1956,12 @@ pub async fn run_tui(
     tui_mode: TuiMode,
 ) -> anyhow::Result<()> {
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
+    let detail_edit_state = Arc::new(parking_lot::Mutex::new(DetailEditState::default()));
 
     let app: Box<dyn Widget> = PacketListDelegate::new(
         rx,
         detail_tx,
+        detail_edit_state.clone(),
         time_display,
         tui_mode,
     ).await;
@@ -1789,7 +1972,7 @@ pub async fn run_tui(
     };
 
     let mut detail_pane_id = WidgetId::EMPTY;
-    let detail_pane = DetailPane::new()
+    let detail_pane = DetailPane::new(detail_edit_state)
         .id(&mut detail_pane_id);
 
     let split = Pane::new()

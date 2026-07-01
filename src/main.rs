@@ -53,7 +53,7 @@ async fn main() -> Result<(), AnyError> {
 
     let service_port = format!("{}:{}", opt.ip, opt.port);
 
-    let _ = CapturePaths::initialize_for_process()?;
+    let capture_paths = CapturePaths::initialize_for_process()?;
 
     let (tx, rx) = mpsc::channel::<PacketEvent>(TUI_EVENT_BUFFER);
     let (flow_events, flow_event_rx) = FlowEventPublisher::channel(TUI_EVENT_BUFFER);
@@ -82,7 +82,8 @@ async fn main() -> Result<(), AnyError> {
             (name, OutboundHttpPoolConfig::from(config))
         })
         .collect::<HashMap<_, _>>();
-    let filter_manager = FilterManager::new("./filters");
+    let filter_manager = FilterManager::new("./filters")
+        .with_filter_dir(capture_paths.generated_filters_dir.clone());
     let (quit_tx, quit_rx) = watch::channel(false);
 
     let outbound_http_pool = if outbound_http_configs.is_empty() {

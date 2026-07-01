@@ -19,29 +19,45 @@ const FILTER_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
 #[derive(Clone, Debug)]
 pub struct FilterManager {
     filters_dir: PathBuf,
+    filter_dirs: Vec<PathBuf>,
+    quarantine_dir: PathBuf,
     current: Arc<RwLock<Arc<CompiledFilterSet>>>,
 }
 
 
 impl FilterManager {
     pub fn new(filters_dir: impl Into<PathBuf>) -> Self {
-        let filters_dir = filters_dir.into();
-        let filters_dir = if filters_dir.is_absolute() {
-            filters_dir
-        } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(filters_dir)
-        };
+        let filters_dir = absolute_path(filters_dir.into());
+        let quarantine_dir = filters_dir.join("quarantine");
 
         Self {
+            filter_dirs: vec![filters_dir.clone()],
             filters_dir,
+            quarantine_dir,
             current: Arc::new(RwLock::new(Arc::new(CompiledFilterSet::empty()))),
         }
     }
 
+    pub fn with_filter_dir(mut self, filter_dir: impl Into<PathBuf>) -> Self {
+        self.filter_dirs.push(absolute_path(filter_dir.into()));
+        self
+    }
+
     pub fn filters_dir(&self) -> &Path {
         &self.filters_dir
+    }
+
+    pub fn filter_dirs(&self) -> &[PathBuf] {
+        &self.filter_dirs
+    }
+
+    pub fn quarantine_dir(&self) -> &Path {
+        &self.quarantine_dir
+    }
+
+    pub fn ensure_quarantine_dir(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.quarantine_dir)
+            .with_context(|| format!("create quarantine dir {}", self.quarantine_dir.display()))
     }
 
     pub fn current(&self) -> Arc<CompiledFilterSet> {
@@ -49,14 +65,10 @@ impl FilterManager {
     }
 
     pub fn reload(&self) -> Result<()> {
+        self.ensure_quarantine_dir()?;
+
         let cwd = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("<unknown>"));
-
-        let filters_dir_absolute = if self.filters_dir.is_absolute() {
-            self.filters_dir.clone()
-        } else {
-            cwd.join(&self.filters_dir)
-        };
 
         let next = self.load_filter_set().context("load filter set")?;
         let count = next.len();
@@ -105,7 +117,8 @@ impl FilterManager {
 
             info!(
                 filters_dir = %self.filters_dir.display(),
-                filters_dir_absolute = %filters_dir_absolute.display(),
+                filter_dirs = ?self.filter_dirs,
+                quarantine_dir = %self.quarantine_dir.display(),
                 cwd = %cwd.display(),
                 filter = filter.name(),
                 priority = filter.priority,
@@ -134,7 +147,8 @@ impl FilterManager {
 
         info!(
             filters_dir = %self.filters_dir.display(),
-            filters_dir_absolute = %filters_dir_absolute.display(),
+            filter_dirs = ?self.filter_dirs,
+            quarantine_dir = %self.quarantine_dir.display(),
             cwd = %cwd.display(),
             count,
             "reloaded roto filters"
@@ -152,10 +166,11 @@ impl FilterManager {
             );
         }
 
-        if !self.filters_dir.exists() {
+        if !self.filter_dirs.iter().any(|dir| dir.exists()) {
             info!(
                 filters_dir = %self.filters_dir.display(),
-                "filters directory does not exist; watcher disabled"
+                filter_dirs = ?self.filter_dirs,
+                "no filters directory exists; watcher disabled"
             );
 
             let _ = shutdown_rx.changed().await;
@@ -209,42 +224,48 @@ impl FilterManager {
             }
         }
     }
-    
+
     fn snapshot(&self) -> Result<FilterSnapshot> {
-        FilterSnapshot::read(&self.filters_dir)
+        FilterSnapshot::read_many(&self.filter_dirs)
     }
 
     fn load_filter_set(&self) -> Result<CompiledFilterSet> {
-        if !self.filters_dir.exists() {
-            debug!(
-                filters_dir = %self.filters_dir.display(),
-                "filters directory does not exist; using empty filter set"
-            );
-
-            return Ok(CompiledFilterSet::empty());
-        }
-
         let mut filters = Vec::new();
 
-        for entry in std::fs::read_dir(&self.filters_dir)
-            .with_context(|| format!("read filters dir {}", self.filters_dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
+        for filter_dir in &self.filter_dirs {
+            if !filter_dir.exists() {
+                debug!(
+                    filters_dir = %filter_dir.display(),
+                    "filters directory does not exist; skipping"
+                );
 
-            if !is_roto_file(&path) {
                 continue;
             }
 
-            match self.load_filter(&path) {
-                Ok(Some(filter)) => filters.push(filter),
-                Ok(None) => {}
-                Err(err) => {
-                    warn!(
-                        path = %path.display(),
-                        error = ?err,
-                        "failed to load roto filter; skipping this file"
-                    );
+            for entry in std::fs::read_dir(filter_dir)
+                .with_context(|| format!("read filters dir {}", filter_dir.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+
+                if self.is_quarantined_path(&path) {
+                    continue;
+                }
+
+                if !is_roto_file(&path) {
+                    continue;
+                }
+
+                match self.load_filter(&path) {
+                    Ok(Some(filter)) => filters.push(filter),
+                    Ok(None) => {}
+                    Err(err) => {
+                        warn!(
+                            path = %path.display(),
+                            error = ?err,
+                            "failed to load roto filter; skipping this file"
+                        );
+                    }
                 }
             }
         }
@@ -261,9 +282,9 @@ impl FilterManager {
 
         if !metadata.enabled {
             debug!(
-                path = %path.display(),
-                "roto filter disabled"
-            );
+                    path = %path.display(),
+                    "roto filter disabled"
+                );
 
             return Ok(None);
         }
@@ -280,6 +301,87 @@ impl FilterManager {
         };
 
         Ok(Some(compile_filter_definition(definition, priority)?))
+    }
+
+    pub fn validate_filter_file(&self, path: &Path) -> Result<()> {
+        self.load_filter(path)
+            .with_context(|| format!("validate roto filter {}", path.display()))?;
+
+        Ok(())
+    }
+
+    pub fn quarantine_filter_file(&self, path: &Path, reason: &str) -> Result<PathBuf> {
+        self.ensure_quarantine_dir()?;
+
+        let file_name = path
+            .file_name()
+            .context("quarantine filter path has no file name")?;
+
+        let destination = unique_quarantine_path(&self.quarantine_dir, file_name);
+
+        std::fs::rename(path, &destination)
+            .or_else(|_| {
+                std::fs::copy(path, &destination)?;
+                std::fs::remove_file(path)
+            })
+            .with_context(|| {
+                format!(
+                    "move quarantined filter {} to {}",
+                    path.display(),
+                    destination.display()
+                )
+            })?;
+
+        warn!(
+            source = %path.display(),
+            destination = %destination.display(),
+            reason,
+            "quarantined roto filter"
+        );
+
+        Ok(destination)
+    }
+
+    fn is_quarantined_path(&self, path: &Path) -> bool {
+        path.starts_with(&self.quarantine_dir)
+    }
+}
+
+fn unique_quarantine_path(dir: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    let candidate = dir.join(file_name);
+
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("filter");
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("roto");
+
+    for idx in 1.. {
+        let candidate = dir.join(format!("{stem}.quarantine-{idx}.{extension}"));
+
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded quarantine path search should always find a candidate")
+}
+
+fn absolute_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }
 
@@ -341,6 +443,19 @@ struct FilterSnapshot {
 }
 
 impl FilterSnapshot {
+    fn read_many(filter_dirs: &[PathBuf]) -> Result<Self> {
+        let mut files = Vec::new();
+
+        for filter_dir in filter_dirs {
+            let snapshot = Self::read(filter_dir)?;
+            files.extend(snapshot.files);
+        }
+
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        Ok(Self { files })
+    }
+    
     fn read(filters_dir: &Path) -> Result<Self> {
         if !filters_dir.exists() {
             return Ok(Self::default());

@@ -25,10 +25,24 @@ use rama::extensions::{ExtensionsMut, ExtensionsRef};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::filters::{FilterFlow, FilterHeader, FilterManager, FilterRequest, FilterResponseView, FilterSyntheticResponse};
+use crate::filters::{
+    FilterFlow,
+    FilterHeader,
+    FilterManager,
+    FilterRequest,
+    FilterResponseView,
+    FilterSyntheticResponse
+};
 use crate::filters::http_client::OutboundHttpClientPool;
-use crate::filters::json::{json_filter_flow_bytes, json_filter_request_bytes, json_filter_response_bytes};
-use crate::filters::types::{OutboundHttpBodySource, OutboundHttpJob};
+use crate::filters::engine::json::capture::{
+    json_filter_flow_bytes,
+    json_filter_request_bytes,
+    json_filter_response_bytes
+};
+use crate::filters::types::{
+    OutboundHttpBodySource,
+    OutboundHttpJob
+};
 use crate::mitm::flow::{
     CaptureService,
     EffectiveRequestCapture,
@@ -39,7 +53,10 @@ use crate::mitm::flow::{
     ResponseOrigin
 };
 use crate::mitm::flow::capture_service::build_response_head_text;
-use crate::mitm::flow::event_bridge::{publish_request_committed, publish_response_committed};
+use crate::mitm::flow::event_bridge::{
+    publish_request_committed,
+    publish_response_committed
+};
 use crate::mitm::flow::filter_bridge::{
     apply_request_patch,
     apply_response_patch,
@@ -50,8 +67,16 @@ use crate::mitm::flow::filter_bridge::{
     normalized_content_type,
 };
 use crate::mitm::flow::filter_runtime::FlowFilterRuntime;
-use crate::mitm::flow::http_types::{RequestDispatchContext, RequestDispatchOutput, ResponseDispatchInput, ResponseFilterDispatchOutput};
-use crate::mitm::flow::tls_metadata::{tls_sni_from_extensions, upstream_tls_info_from_extensions};
+use crate::mitm::flow::http_types::{
+    RequestDispatchContext,
+    RequestDispatchOutput,
+    ResponseDispatchInput,
+    ResponseFilterDispatchOutput
+};
+use crate::mitm::flow::tls_metadata::{
+    tls_sni_from_extensions,
+    upstream_tls_info_from_extensions
+};
 
 
 pub type FlowDispatchResult<T> = Result<T, FlowDispatchError>;

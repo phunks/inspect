@@ -28,6 +28,7 @@ use crate::filters::types::{
     RotoResponseStringFn,
 };
 use roto::{library, NoCtx, RotoString, Runtime, Val};
+use regex::Regex;
 use crate::filters::FilterSyntheticResponse;
 
 fn plain_error(err: impl std::fmt::Display) -> String {
@@ -57,6 +58,8 @@ pub struct RotoRequestData {
     host: RotoString,
     path: RotoString,
     query: RotoString,
+    content_type: RotoString,
+    body_text: RotoString,
 }
 
 impl RotoRequestData {
@@ -67,6 +70,18 @@ impl RotoRequestData {
             host: req.host.as_str().into(),
             path: req.path.as_str().into(),
             query: req.query.as_str().into(),
+            content_type: req
+                .body
+                .content_type
+                .as_deref()
+                .unwrap_or_default()
+                .into(),
+            body_text: req
+                .body
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .into(),
         }
     }
 }
@@ -100,6 +115,53 @@ impl RotoResponseData {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum RotoBodyRewriteOp {
+    ReplaceTextOnce {
+        old: RotoString,
+        new: RotoString,
+    },
+    ReplaceTextAll {
+        old: RotoString,
+        new: RotoString,
+    },
+    ReplaceRegex {
+        pattern: RotoString,
+        replacement: RotoString,
+    },
+    ReplaceTextWhenContains {
+        anchor: RotoString,
+        old: RotoString,
+        new: RotoString,
+    },
+    ReplaceJsProperty {
+        property: RotoString,
+        old: RotoString,
+        new: RotoString,
+    },
+    ReplaceCssDeclaration {
+        property: RotoString,
+        old: RotoString,
+        new: RotoString,
+    },
+    ReplaceHtmlAttribute {
+        selector: RotoString,
+        attribute: RotoString,
+        old: RotoString,
+        new: RotoString,
+    },
+    ApplyJsonPatch {
+        patch_json: RotoString,
+        content_type: RotoString,
+    },
+}
+
+//TODOを見て
+struct AppliedBodyRewrite {
+    body: String,
+    content_type: Option<String>,
+}
+
 fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
     let lib = library! {
         /// HTTP request metadata exposed to inspect Roto filters.
@@ -124,6 +186,14 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
 
             fn query(req: Val<RotoRequestData>) -> RotoString {
                 req.query.clone()
+            }
+
+            fn content_type(req: Val<RotoRequestData>) -> RotoString {
+                req.content_type.clone()
+            }
+
+            fn body_text(req: Val<RotoRequestData>) -> RotoString {
+                req.body_text.clone()
             }
         }
 
@@ -199,6 +269,124 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
                     action.body_content_type = Some(content_type);
                 }
 
+                action
+            }
+
+            fn replace_body_text(
+                mut action: Val<RotoRequestActionData>,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_text_once(
+                mut action: Val<RotoRequestActionData>,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextOnce {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_text_all(
+                mut action: Val<RotoRequestActionData>,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_regex(
+                mut action: Val<RotoRequestActionData>,
+                pattern: RotoString,
+                replacement: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceRegex {
+                    pattern,
+                    replacement,
+                });
+                action
+            }
+
+            fn replace_body_text_when_contains(
+                mut action: Val<RotoRequestActionData>,
+                anchor: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextWhenContains {
+                    anchor,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_js_property(
+                mut action: Val<RotoRequestActionData>,
+                property: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceJsProperty {
+                    property,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_css_declaration(
+                mut action: Val<RotoRequestActionData>,
+                property: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceCssDeclaration {
+                    property,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_html_attribute(
+                mut action: Val<RotoRequestActionData>,
+                selector: RotoString,
+                attribute: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceHtmlAttribute {
+                    selector,
+                    attribute,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn apply_json_patch(
+                mut action: Val<RotoRequestActionData>,
+                patch_json: RotoString,
+                content_type: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ApplyJsonPatch {
+                    patch_json,
+                    content_type,
+                });
                 action
             }
 
@@ -392,6 +580,124 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
 
                 action
             }
+
+            fn replace_body_text(
+                mut action: Val<RotoResponseActionData>,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_text_once(
+                mut action: Val<RotoResponseActionData>,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextOnce {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_text_all(
+                mut action: Val<RotoResponseActionData>,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_regex(
+                mut action: Val<RotoResponseActionData>,
+                pattern: RotoString,
+                replacement: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceRegex {
+                    pattern,
+                    replacement,
+                });
+                action
+            }
+
+            fn replace_body_text_when_contains(
+                mut action: Val<RotoResponseActionData>,
+                anchor: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextWhenContains {
+                    anchor,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_js_property(
+                mut action: Val<RotoResponseActionData>,
+                property: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceJsProperty {
+                    property,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_css_declaration(
+                mut action: Val<RotoResponseActionData>,
+                property: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceCssDeclaration {
+                    property,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_html_attribute(
+                mut action: Val<RotoResponseActionData>,
+                selector: RotoString,
+                attribute: RotoString,
+                old: RotoString,
+                new: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceHtmlAttribute {
+                    selector,
+                    attribute,
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn apply_json_patch(
+                mut action: Val<RotoResponseActionData>,
+                patch_json: RotoString,
+                content_type: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ApplyJsonPatch {
+                    patch_json,
+                    content_type,
+                });
+                action
+            }
         }
     };
 
@@ -487,7 +793,7 @@ impl CompiledFilter {
                     let action = request_action
                         .call(Val(req_data.clone()))
                         .0
-                        .into_request_action();
+                        .into_request_action(req.body.text.as_deref());
 
                     tracing::info!(
                     filter = self.name(),
@@ -599,7 +905,7 @@ impl CompiledFilter {
                     let action = response_action
                         .call(Val(res_data.clone()))
                         .0
-                        .into_response_action();
+                        .into_response_action(res.body.text.as_deref());
 
                     tracing::info!(
                         filter = self.name(),
@@ -906,6 +1212,7 @@ pub struct RotoRequestActionData {
     marks: Vec<RotoString>,
     body_text: Option<RotoString>,
     body_content_type: Option<RotoString>,
+    body_rewrite_ops: Vec<RotoBodyRewriteOp>,
     synthetic_status: Option<u16>,
     synthetic_body: Option<RotoString>,
     synthetic_content_type: Option<RotoString>,
@@ -914,7 +1221,7 @@ pub struct RotoRequestActionData {
 
 
 impl RotoRequestActionData {
-    fn into_request_action(self) -> RequestAction {
+    fn into_request_action(self, original_body_text: Option<&str>) -> RequestAction {
         let mut action = RequestAction::pass();
 
         action.continue_filters = !self.stop;
@@ -944,9 +1251,15 @@ impl RotoRequestActionData {
             action.continue_filters = false;
         }
 
+        let rewritten_body_text = apply_body_rewrite_ops(
+            original_body_text,
+            &self.body_rewrite_ops,
+        );
+
         if !self.set_headers.is_empty()
             || !self.remove_headers.is_empty()
             || self.body_text.is_some()
+            || rewritten_body_text.is_some()
         {
             let mut patch = FilterRequestPatch { set_headers: self
                 .set_headers
@@ -957,15 +1270,20 @@ impl RotoRequestActionData {
                 })
                 .collect(),
                 remove_headers: self
-                .remove_headers
-                .into_iter()
-                .map(|name| name.to_string())
-                .collect(), ..Default::default()
+                    .remove_headers
+                    .into_iter()
+                    .map(|name| name.to_string())
+                    .collect(), ..Default::default()
             };
 
             if let Some(body_text) = self.body_text {
                 patch.body = Some(FilterBodyPatch {
                     bytes: body_text.to_string().into_bytes(),
+                    content_type: self.body_content_type.map(|value| value.to_string()),
+                });
+            } else if let Some(body_text) = rewritten_body_text {
+                patch.body = Some(FilterBodyPatch {
+                    bytes: body_text.into_bytes(),
                     content_type: self.body_content_type.map(|value| value.to_string()),
                 });
             }
@@ -994,6 +1312,7 @@ pub struct RotoResponseActionData {
     marks: Vec<RotoString>,
     body_text: Option<RotoString>,
     body_content_type: Option<RotoString>,
+    body_rewrite_ops: Vec<RotoBodyRewriteOp>,
     outbound_http: Vec<RotoOutboundHttpData>,
     stop: bool,
 }
@@ -1020,15 +1339,21 @@ pub enum RotoOutboundHttpBodyData {
 }
 
 impl RotoResponseActionData {
-    fn into_response_action(self) -> ResponseAction {
+    fn into_response_action(self, original_body_text: Option<&str>) -> ResponseAction {
         let mut action = ResponseAction::pass();
 
         action.continue_filters = !self.stop;
+
+        let rewritten_body_text = apply_body_rewrite_ops(
+            original_body_text,
+            &self.body_rewrite_ops,
+        );
 
         if self.status.is_some()
             || !self.set_headers.is_empty()
             || !self.remove_headers.is_empty()
             || self.body_text.is_some()
+            || rewritten_body_text.is_some()
         {
             let mut patch = FilterResponsePatch {
                 status: self.status,
@@ -1051,6 +1376,11 @@ impl RotoResponseActionData {
             if let Some(body_text) = self.body_text {
                 patch.body = Some(FilterBodyPatch {
                     bytes: body_text.to_string().into_bytes(),
+                    content_type: self.body_content_type.map(|value| value.to_string()),
+                });
+            } else if let Some(body_text) = rewritten_body_text {
+                patch.body = Some(FilterBodyPatch {
+                    bytes: body_text.into_bytes(),
                     content_type: self.body_content_type.map(|value| value.to_string()),
                 });
             }
@@ -1130,4 +1460,138 @@ impl RotoResponseActionData {
 
         action
     }
+}
+
+fn apply_body_rewrite_ops(
+    original_body_text: Option<&str>,
+    ops: &[RotoBodyRewriteOp],
+) -> Option<String> {
+    if ops.is_empty() {
+        return None;
+    }
+
+    let mut body = original_body_text?.to_string();
+    let mut changed = false;
+
+    for op in ops {
+        match op {
+            RotoBodyRewriteOp::ReplaceTextOnce { old, new } => {
+                let old = old.to_string();
+
+                if old.is_empty() || !body.contains(&old) {
+                    continue;
+                }
+
+                body = body.replacen(&old, &new.to_string(), 1);
+                changed = true;
+            }
+            RotoBodyRewriteOp::ReplaceTextAll { old, new } => {
+                let old = old.to_string();
+
+                if old.is_empty() || !body.contains(&old) {
+                    continue;
+                }
+
+                body = body.replace(&old, &new.to_string());
+                changed = true;
+            }
+            RotoBodyRewriteOp::ReplaceRegex {
+                pattern,
+                replacement,
+            } => {
+                let pattern = pattern.to_string();
+                let Ok(regex) = Regex::new(&pattern) else {
+                    tracing::warn!(
+                        pattern,
+                        "invalid replace_body_regex pattern in roto filter action"
+                    );
+                    continue;
+                };
+
+                let next = regex
+                    .replace_all(&body, replacement.to_string().as_str())
+                    .to_string();
+
+                if next != body {
+                    body = next;
+                    changed = true;
+                }
+            }
+            RotoBodyRewriteOp::ReplaceTextWhenContains { anchor, old, new } => {
+                let anchor = anchor.to_string();
+                let old = old.to_string();
+
+                if anchor.is_empty()
+                    || old.is_empty()
+                    || !body.contains(&anchor)
+                    || !body.contains(&old)
+                {
+                    continue;
+                }
+
+                body = body.replacen(&old, &new.to_string(), 1);
+                changed = true;
+            }
+            RotoBodyRewriteOp::ReplaceJsProperty { property, old, new }
+            | RotoBodyRewriteOp::ReplaceCssDeclaration { property, old, new } => {
+                let property = property.to_string();
+                let old = old.to_string();
+
+                if property.is_empty()
+                    || old.is_empty()
+                    || !body.contains(&property)
+                    || !body.contains(&old)
+                {
+                    continue;
+                }
+
+                body = body.replacen(&old, &new.to_string(), 1);
+                changed = true;
+            }
+            RotoBodyRewriteOp::ReplaceHtmlAttribute {
+                selector,
+                attribute,
+                old,
+                new,
+            } => {
+                let selector = selector.to_string();
+                let attribute = attribute.to_string();
+                let old = old.to_string();
+
+                if selector.is_empty()
+                    || attribute.is_empty()
+                    || old.is_empty()
+                    || !body.contains(&selector)
+                    || !body.contains(&attribute)
+                    || !body.contains(&old)
+                {
+                    continue;
+                }
+
+                body = body.replacen(&old, &new.to_string(), 1);
+                changed = true;
+            }
+            RotoBodyRewriteOp::ApplyJsonPatch {
+                patch_json,
+                content_type: _,
+            } => {
+                let Some(next) = crate::filters::engine::json::patch::apply_json_patch_rfc6902_json(
+                    &body,
+                    &patch_json.to_string(),
+                ) else {
+                    tracing::warn!(
+                            "failed to apply JSON patch in roto filter action"
+                        );
+                    continue;
+                };
+
+                if next != body {
+                    body = next;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    changed.then_some(body)
 }

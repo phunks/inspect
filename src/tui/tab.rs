@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tuie::prelude::*;
 use tuie::prelude::Scrollbar::AutoHide;
 use crate::tui::{highlight_detail_text, DETAIL_PLACEHOLDER_TEXT};
@@ -68,14 +70,34 @@ pub struct DetailContent {
     pub dir: String,
 }
 
-#[derive(Debug)]
-pub enum UiEvent {
-    ShowDetail {
-        detail: DetailContent,
-        highlight_query: Option<String>,
-        tab_selection: Option<DetailTabSelection>,
-    },
+// #[derive(Debug)]
+// pub enum UiEvent {
+//     ShowDetail {
+//         detail: DetailContent,
+//         highlight_query: Option<String>,
+//         tab_selection: Option<DetailTabSelection>,
+//     },
+// }
+
+#[derive(Clone, Debug)]
+pub struct DetailEditState {
+    pub selection: DetailTabSelection,
+    pub content: DetailContent,
 }
+
+impl Default for DetailEditState {
+    fn default() -> Self {
+        Self {
+            selection: DetailTabSelection {
+                primary_tab: DetailPrimaryTabSelection::Request,
+                message_part: DetailMessagePartSelection::Meta,
+            },
+            content: DetailContent::default(),
+        }
+    }
+}
+
+pub type SharedDetailEditState = Arc<Mutex<DetailEditState>>;
 
 pub struct DetailPane {
     root: Box<Pane>,
@@ -90,10 +112,11 @@ pub struct DetailPane {
     primary_tab: DetailPrimaryTab,
     message_part: DetailMessagePart,
     highlight_query: Option<String>,
+    edit_state: SharedDetailEditState,
 }
 
 impl DetailPane {
-    pub(crate) fn new() -> Box<Self> {
+    pub(crate) fn new(edit_state: SharedDetailEditState) -> Box<Self> {
         let mut primary_tab_id = WidgetId::EMPTY;
         let mut message_part_row_id = WidgetId::EMPTY;
         let mut message_part_id = WidgetId::EMPTY;
@@ -173,9 +196,11 @@ impl DetailPane {
             primary_tab: DetailPrimaryTab::Request,
             message_part: DetailMessagePart::Meta,
             highlight_query: None,
+            edit_state,
         });
 
         this.sync_message_part_visibility();
+        this.sync_edit_state();
         this
     }
 
@@ -194,6 +219,29 @@ impl DetailPane {
 
         self.sync_message_part_visibility();
         self.refresh_text();
+        self.sync_edit_state();
+    }
+
+    fn current_selection(&self) -> DetailTabSelection {
+        DetailTabSelection {
+            primary_tab: match self.primary_tab {
+                DetailPrimaryTab::Request => DetailPrimaryTabSelection::Request,
+                DetailPrimaryTab::Response => DetailPrimaryTabSelection::Response,
+                DetailPrimaryTab::SslTls => DetailPrimaryTabSelection::SslTls,
+                DetailPrimaryTab::Info => DetailPrimaryTabSelection::Info,
+            },
+            message_part: match self.message_part {
+                DetailMessagePart::Meta => DetailMessagePartSelection::Meta,
+                DetailMessagePart::Body => DetailMessagePartSelection::Body,
+            },
+        }
+    }
+
+    fn sync_edit_state(&self) {
+        *self.edit_state.lock() = DetailEditState {
+            selection: self.current_selection(),
+            content: self.content.clone(),
+        };
     }
 
     fn select_tab(&mut self, tab_selection: DetailTabSelection) {
@@ -281,6 +329,7 @@ impl DetailPane {
 
         self.sync_message_part_visibility();
         self.refresh_text();
+        self.sync_edit_state();
     }
 
     fn sync_message_part_visibility(&mut self) {
