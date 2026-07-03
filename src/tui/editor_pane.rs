@@ -1,12 +1,13 @@
 use std::cell::Cell;
+use std::io::Read;
 use std::rc::Rc;
 
 use tuie::prelude::*;
 use chord_macro::chord;
-
+use flate2::read::GzDecoder;
 use crate::filters::{EditableFilterSession, EditableFilterSessionPreview, EditableHttpBody, EditableHttpHeader, EditableHttpMessage, EditableHttpMessageKind, FilterManager};
 use crate::mitm::capture::CapturePaths;
-use crate::tui::PacketRowEditContext;
+use crate::tui::{PacketRowEditContext, EDITOR_PANE_GAP, EDITOR_PANE_MIN_WIDTH};
 use crate::tui::tab::{
     DetailEditState,
     DetailMessagePartSelection,
@@ -174,7 +175,7 @@ impl EditPanel {
                                     .wrap()
                                     .style(Style::new().bg(Color::grey256(2)))
                                     .id(&mut input_id) as Box<dyn Widget>,
-                            ]) as Box<dyn Widget>,
+                            ]).y_scroll(Scrollbar::AutoHide) as Box<dyn Widget>,
                         Pane::new()
                             .vertical()
                             .flex(1)
@@ -193,15 +194,6 @@ impl EditPanel {
                     ]) as Box<dyn Widget>,
             ]);
 
-        // let focus = FocusPane::new()
-        //     .orientation(Axis2D::Y)
-        //     .gap(0)
-        //     .selected_border_style(Style::new().fg(Color::YELLOW))
-        //     .children([
-        //         content as Box<dyn Widget>,
-        //     ])
-        //     .flex(1);
-
         let root = Pane::new()
             .vertical()
             .width(popup_width)
@@ -213,7 +205,7 @@ impl EditPanel {
                     .vertical()
                     .flex(1)
                     .bordered()
-                    .border_style(Style::new().fg(Color::YELLOW))
+                    .border_style(Style::new().fg(Color::Foreground).bold())
                     .children([
                         content as Box<dyn Widget>,
                     ]) as Box<dyn Widget>,
@@ -426,16 +418,85 @@ fn editable_body_from_text(
     text: String,
     content_type: Option<String>,
 ) -> EditableHttpBody {
-    if text.trim().is_empty()
-        || text.starts_with("<no path>")
-        || text.starts_with("<read error:")
+    let body = text.trim();
+
+    if body.is_empty()
+        || body.starts_with("<no path>")
+        || body.starts_with("<read error:")
     {
-        EditableHttpBody::Empty
-    } else {
-        EditableHttpBody::Text {
-            text,
+        return EditableHttpBody::Empty;
+    }
+
+    if let Some(decoded_text) = decode_gzip_hexdump_to_text(body) {
+        return EditableHttpBody::Text {
+            text: decoded_text,
             content_type,
+        };
+    }
+
+    if body.starts_with("<binary body detected") {
+        let bytes_len = extract_hexdump_bytes(body)
+            .map(|bytes| bytes.len())
+            .unwrap_or_else(|| text.len());
+
+        return EditableHttpBody::Binary {
+            bytes_len,
+            content_type,
+        };
+    }
+
+    EditableHttpBody::Text {
+        text,
+        content_type,
+    }
+}
+
+fn decode_gzip_hexdump_to_text(text: &str) -> Option<String> {
+    if !text.contains("magic number: gzip") {
+        return None;
+    }
+
+    let bytes = extract_hexdump_bytes(text)?;
+    let mut decoder = GzDecoder::new(bytes.as_slice());
+    let mut out = String::new();
+
+    decoder.read_to_string(&mut out).ok()?;
+    if out.trim().is_empty() {
+        return None;
+    }
+
+    Some(out)
+}
+
+fn extract_hexdump_bytes(text: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+
+    for line in text.lines() {
+        let mut parts = line.split('|');
+        let left = parts.next().unwrap_or_default().trim_end();
+
+        let mut iter = left.split_whitespace();
+        let Some(offset) = iter.next() else {
+            continue;
+        };
+
+        if offset.len() != 8 || !offset.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            continue;
         }
+
+        for token in iter {
+            if token.len() == 2 && token.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                if let Ok(byte) = u8::from_str_radix(token, 16) {
+                    bytes.push(byte);
+                }
+            }
+        }
+    }
+
+    if bytes.is_empty() {
+        None
+    } else {
+        Some(bytes)
     }
 }
 
@@ -608,6 +669,22 @@ impl DelegateWidget for EditPanel {
     fn override_is_focusable(&self) -> bool {
         true
     }
+
+    // fn after_before_layout(&mut self) {
+    //     if self.initial_scroll_synced {
+    //         return;
+    //     }
+    //
+    //     if let Some(pane) = self.root.get_widget_mut(self.input_scroll_id) {
+    //         pane.set_scroll_progress(Axis2D::Y, 0.0);
+    //     }
+    //
+    //     if let Some(pane) = self.root.get_widget_mut(self.preview_scroll_id) {
+    //         pane.set_scroll_progress(Axis2D::Y, 0.0);
+    //     }
+    //
+    //     self.initial_scroll_synced = true;
+    // }
 
     fn override_on_input(&mut self, queue: &mut InputQueue) -> InputResult {
         let Some(event) = queue.peek() else {

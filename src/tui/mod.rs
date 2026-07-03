@@ -30,13 +30,15 @@ use crate::mitm::capture::CapturePaths;
 use crate::tui::body::format_body_for_display_with_headers;
 use crate::tui::har::open_har_export_popup;
 use crate::tui::read_metadata::PacketSummary;
-use crate::tui::tab::{DetailContent, DetailEditState, DetailMessagePartSelection, DetailPane, DetailPrimaryTabSelection, DetailTabSelection, SharedDetailEditState};
+use crate::tui::tab::{DetailActionBus, DetailContent, DetailEditState, DetailMessagePartSelection, DetailPane, DetailPrimaryTabSelection, DetailTabSelection, SharedDetailEditState, SharedOpenEditRequests};
 use crate::tui::editor_pane::open_edit_popup;
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
 const DETAIL_PLACEHOLDER_TEXT: &str = "Select row and press Enter";
 pub const TUI_EVENT_BUFFER: usize = 4096;
+pub(crate) const EDITOR_PANE_MIN_WIDTH: u16 = 50;
+pub(crate) const EDITOR_PANE_GAP: u8 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TuiMode {
@@ -341,13 +343,30 @@ pub struct PacketRowEditContext {
 
 impl PacketRowEditContext {
     pub(crate) fn title(&self) -> String {
-        format!(
+        self.title_for_width(EDITOR_PANE_MIN_WIDTH)
+    }
+
+    pub(crate) fn title_for_width(&self, width: u16) -> String {
+        // let max_len = (width.saturating_sub(20) as usize).clamp(24, 120);
+        
+        truncate_str(&format!(
             "Edit: {} {} {}",
             self.method,
             self.host,
             self.uri,
-        )
+        ), width as usize)
     }
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    let mut end_ids = 0;
+    for (idx, _) in s.char_indices().take(max_len) {
+        end_ids = idx;
+    }
+    format!("{}...", &s[..end_ids])
 }
 
 #[allow(dead_code)]
@@ -392,7 +411,7 @@ pub struct PacketListDelegate {
     task: TaskHandle,
     dbstate: Arc<DbState>,
     detail_tx: UnboundedSender<UiEvent>,
-    detail_edit_state: SharedDetailEditState,
+    detail_bus: DetailActionBus,
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     search_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     full_text_select_requests: Arc<parking_lot::Mutex<Vec<FullTextSelectRequest>>>,
@@ -463,7 +482,7 @@ impl PacketListDelegate {
     pub async fn new(
         rx: mpsc::Receiver<PacketEvent>,
         detail_tx: UnboundedSender<UiEvent>,
-        detail_edit_state: SharedDetailEditState,
+        detail_bus: DetailActionBus,
         time_display: TimeDisplayConfig,
         tui_mode: TuiMode,
     ) -> Box<Self> {
@@ -585,7 +604,7 @@ impl PacketListDelegate {
             task: TaskHandle::EMPTY,
             dbstate,
             detail_tx,
-            detail_edit_state,
+            detail_bus,
             row_clicks,
             search_requests,
             full_text_select_requests,
@@ -630,6 +649,13 @@ impl PacketListDelegate {
 
         row.refresh_line();
         row
+    }
+
+    fn poll_open_edit_requests(&mut self) {
+        let request_count = self.detail_bus.take_open_edit_requests();
+        for _ in 0..request_count {
+            self.open_edit_for_selected_detail();
+        }
     }
 
     fn tick(&mut self) {
@@ -1168,7 +1194,7 @@ impl PacketListDelegate {
             return;
         };
 
-        let selection = self.detail_edit_state.lock().selection;
+        let selection = self.detail_bus.edit_state().selection;
 
         match selection.primary_tab {
             DetailPrimaryTabSelection::Request | DetailPrimaryTabSelection::Response => {}
@@ -1650,6 +1676,7 @@ impl DelegateWidget for PacketListDelegate {
         self.poll_row_clicks();
         self.poll_search_requests();
         self.poll_full_text_select_requests();
+        self.poll_open_edit_requests();
         self.list.as_mut()
     }
 
@@ -1956,12 +1983,12 @@ pub async fn run_tui(
     tui_mode: TuiMode,
 ) -> anyhow::Result<()> {
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let detail_edit_state = Arc::new(parking_lot::Mutex::new(DetailEditState::default()));
+    let detail_bus = DetailActionBus::new();
 
     let app: Box<dyn Widget> = PacketListDelegate::new(
         rx,
         detail_tx,
-        detail_edit_state.clone(),
+        detail_bus.clone(),
         time_display,
         tui_mode,
     ).await;
@@ -1972,17 +1999,19 @@ pub async fn run_tui(
     };
 
     let mut detail_pane_id = WidgetId::EMPTY;
-    let detail_pane = DetailPane::new(detail_edit_state)
+    let detail_pane = DetailPane::new(detail_bus)
         .id(&mut detail_pane_id);
 
     let split = Pane::new()
         .vertical()
         .flex(1)
-        .gap(0)
+        .gap(EDITOR_PANE_GAP)
         .children([Split::new(
             SplitPane::new()
+                // .gap(EDITOR_PANE_GAP)
                 .children([
                     SplitPaneChild::from(Pane::new()
+                        .min_width(56)
                         .preferred_width(60)
                         .preferred_height(1)
                         .vertical()
@@ -1991,14 +2020,14 @@ pub async fn run_tui(
                             app
                         ])).title(title),
                     SplitPaneChild::from(Pane::new()
-                        .preferred_width(40)
-                        .preferred_height(1)
-                        .vertical()
-                        .flex(1)
-                        .children([
-                            detail_pane,
-                        ]),
-                        // .y_scroll(Scrollbar::Visible),
+                         .min_width(EDITOR_PANE_MIN_WIDTH)
+                         .preferred_width(40)
+                         .preferred_height(1)
+                         .vertical()
+                         .flex(1)
+                         .children([
+                             detail_pane,
+                         ]),
                     ),
                 ])
         ).flex(1)

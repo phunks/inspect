@@ -794,10 +794,24 @@ impl EditableHttpMessage {
                     bytes_len: *bytes_len,
                     content_type: content_type.clone(),
                 },
-                EditableHttpBody::Text { content_type, .. } => EditableHttpBody::Text {
-                    text: sections.body.to_string(),
-                    content_type: body_content_type.or_else(|| content_type.clone()),
-                },
+                EditableHttpBody::Text { text: original_text, content_type } => {
+                    let normalized_body_text = if sections.body == original_text {
+                        original_text.clone()
+                    } else if !original_text.ends_with('\n')
+                        && sections.body.len() == original_text.len() + 1
+                        && sections.body.starts_with(original_text)
+                        && sections.body.ends_with('\n')
+                    {
+                        original_text.clone()
+                    } else {
+                        sections.body.to_string()
+                    };
+
+                    EditableHttpBody::Text {
+                        text: normalized_body_text,
+                        content_type: body_content_type.or_else(|| content_type.clone()),
+                    }
+                }
                 EditableHttpBody::Empty => {
                     if sections.body.is_empty() {
                         EditableHttpBody::Empty

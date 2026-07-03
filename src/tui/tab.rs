@@ -5,6 +5,9 @@ use tuie::prelude::Scrollbar::AutoHide;
 use crate::tui::{highlight_detail_text, DETAIL_PLACEHOLDER_TEXT};
 use crate::tui::segmented_control::SegmentedControl;
 
+pub type SharedDetailEditState = Arc<Mutex<DetailEditState>>;
+pub type SharedOpenEditRequests = Arc<Mutex<Vec<()>>>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DetailPrimaryTab {
     Request,
@@ -97,7 +100,51 @@ impl Default for DetailEditState {
     }
 }
 
-pub type SharedDetailEditState = Arc<Mutex<DetailEditState>>;
+#[derive(Clone, Debug)]
+pub struct DetailActionBus {
+    edit_state: SharedDetailEditState,
+    open_edit_requests: SharedOpenEditRequests,
+}
+
+impl DetailActionBus {
+    pub fn new() -> Self {
+        Self {
+            edit_state: Arc::new(Mutex::new(DetailEditState::default())),
+            open_edit_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn set_edit_state(&self, state: DetailEditState) {
+        *self.edit_state.lock() = state;
+    }
+
+    pub fn edit_state(&self) -> DetailEditState {
+        self.edit_state.lock().clone()
+    }
+
+    pub fn request_open_edit(&self) {
+        self.open_edit_requests.lock().push(());
+    }
+
+    pub fn request_open_edit_if_supported(&self) -> bool {
+        let selection = self.edit_state().selection;
+
+        match selection.primary_tab {
+            DetailPrimaryTabSelection::Request | DetailPrimaryTabSelection::Response => {
+                self.request_open_edit();
+                true
+            }
+            DetailPrimaryTabSelection::SslTls | DetailPrimaryTabSelection::Info => false,
+        }
+    }
+
+    pub fn take_open_edit_requests(&self) -> usize {
+        let mut requests = self.open_edit_requests.lock();
+        let count = requests.len();
+        requests.clear();
+        count
+    }
+}
 
 pub struct DetailPane {
     root: Box<Pane>,
@@ -112,11 +159,13 @@ pub struct DetailPane {
     primary_tab: DetailPrimaryTab,
     message_part: DetailMessagePart,
     highlight_query: Option<String>,
-    edit_state: SharedDetailEditState,
+    bus: DetailActionBus,
 }
 
 impl DetailPane {
-    pub(crate) fn new(edit_state: SharedDetailEditState) -> Box<Self> {
+    pub(crate) fn new(
+        bus: DetailActionBus,
+    ) -> Box<Self> {
         let mut primary_tab_id = WidgetId::EMPTY;
         let mut message_part_row_id = WidgetId::EMPTY;
         let mut message_part_id = WidgetId::EMPTY;
@@ -196,7 +245,7 @@ impl DetailPane {
             primary_tab: DetailPrimaryTab::Request,
             message_part: DetailMessagePart::Meta,
             highlight_query: None,
-            edit_state,
+            bus,
         });
 
         this.sync_message_part_visibility();
@@ -238,10 +287,10 @@ impl DetailPane {
     }
 
     fn sync_edit_state(&self) {
-        *self.edit_state.lock() = DetailEditState {
+        self.bus.set_edit_state(DetailEditState {
             selection: self.current_selection(),
             content: self.content.clone(),
-        };
+        });
     }
 
     fn select_tab(&mut self, tab_selection: DetailTabSelection) {
@@ -378,6 +427,11 @@ impl DelegateWidget for DetailPane {
         };
 
         match &event.chord {
+            chord!(E) if queue.is_unhandled() => {
+                queue.next();
+                let _ = self.bus.request_open_edit_if_supported();
+                InputResult::Handled
+            }
             chord!(Up | k) => {
                 queue.next();
                 self.scroll_text_by(-1);

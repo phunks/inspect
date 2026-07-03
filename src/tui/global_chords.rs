@@ -143,7 +143,6 @@ fn open_help_popup() {
         .vertical()
         .padding(Spacing::balanced(2))
         .gap(1)
-        .flex(1)
         .children([
             Text::new()
                 .content("Help".fg(Color::Foreground).bold()) as Box<dyn Widget>,

@@ -18,7 +18,7 @@ impl FocusPane {
         if focused {
             let style = self
                 .selected_border_style
-                .unwrap_or_else(|| cfg.selected_style.apply(Style::new().fg(Color::BLUE)));
+                .unwrap_or_else(|| cfg.selected_style.apply(Style::new().fg(Color::YELLOW)));
             self.pane.set_border_style(style);
             self.pane.set_border(Some(cfg.selected_border));
         } else {
