@@ -263,6 +263,7 @@ pub enum GeneratedFilterAction {
         content_type: String,
     },
     Stop,
+    Drop,
 }
 
 impl GeneratedFilter {
@@ -984,6 +985,11 @@ impl GeneratedFilterBuilder {
         self
     }
 
+    pub fn drop(mut self) -> Self {
+        self.actions.push(GeneratedFilterAction::Drop);
+        self
+    }
+
     pub fn build(mut self) -> GeneratedFilter {
         if self.actions.is_empty() {
             let label = generated_mark_label(&self.name);
@@ -1533,6 +1539,9 @@ impl GeneratedFilterAction {
             Self::Stop => {
                 out.push_str("\n            .stop()");
             }
+            Self::Drop => {
+                out.push_str("\n            .drop()");
+            }
             Self::SetResponseStatus(_)
             | Self::SetResponseHeader { .. }
             | Self::RemoveResponseHeader(_)
@@ -1681,6 +1690,9 @@ impl GeneratedFilterAction {
             }
             Self::Stop => {
                 out.push_str("\n            .stop()");
+            }
+            Self::Drop => {
+                out.push_str("\n            .drop()");
             }
             Self::SetRequestHeader { .. }
             | Self::RemoveRequestHeader(_)

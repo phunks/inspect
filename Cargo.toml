@@ -3,6 +3,16 @@ name = "inspect"
 version = "0.6.0"
 edition = "2024"
 
+[profile.release]
+debug = true
+strip = false
+split-debuginfo = "packed"
+
+[profile.dev]
+debug = true
+strip = false
+split-debuginfo = "packed"
+
 [dependencies]
 rama = { path = "ext/rama", version = "0.3.0-alpha.4", features = ["http", "boring", "http-full", "ua", "compression"]  }
 bytes = "1.11"
@@ -39,7 +49,9 @@ grep-searcher = "0.1"
 ignore = "0.4"
 toml = "1.1"
 roto = { version = "0.11", features = ["selinux-fix"] }
+
 json-patch = "4.2"
 
 [patch.crates-io]
 rama-tls-boring = { path = "ext/rama/rama-tls-boring" }
+roto = { path = "ext/roto", features = ["selinux-fix"] }

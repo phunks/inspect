@@ -40,3 +40,37 @@ CREATE TABLE IF NOT EXISTS responses (
     body_truncated INTEGER,
     body_save_limit INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS filter_phase_stats (
+    id TEXT NOT NULL,              -- flow/request id
+    seq INTEGER NOT NULL,
+    flow_key TEXT NOT NULL,
+    phase TEXT NOT NULL,           -- request|response|completed
+    total_elapsed_us INTEGER NOT NULL,
+    loaded_filters INTEGER NOT NULL,
+    matched_filters INTEGER NOT NULL,
+    executed_filters INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_filter_phase_stats_id_phase
+    ON filter_phase_stats(id, phase);
+
+CREATE TABLE IF NOT EXISTS filter_exec_stats (
+    id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    flow_key TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    filter_name TEXT NOT NULL,     -- path全部よりname優先で軽量化
+    elapsed_us INTEGER NOT NULL,
+    result_code INTEGER NOT NULL,  -- 0=ok,1=error,2=quarantined
+    continue_filters INTEGER,      -- 0/1/null
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_filter_exec_stats_id_phase
+    ON filter_exec_stats(id, phase);
+
+CREATE INDEX IF NOT EXISTS idx_filter_exec_stats_filter_phase
+    ON filter_exec_stats(filter_name, phase);
+

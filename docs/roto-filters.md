@@ -355,6 +355,8 @@ req.scheme()
 req.host()
 req.path()
 req.query()
+req.content_type()
+req.body_text()
 ```
 
 Example:
@@ -369,16 +371,23 @@ fn request_action(req: Request) -> RequestAction {
 }
 ```
 
+`req.content_type()` returns the request body content type when Inspect was able to
+derive one, otherwise an empty string.
+
+`req.body_text()` returns the request body decoded as text when available, otherwise
+an empty string. Non-text or undecodable bodies are not exposed through this text API.
+
 The underlying Rust filter model contains additional request data such as ID,
-headers, body, content type, and TLS SNI, but those fields are not all exposed as
-Roto methods yet.
+headers, raw body bytes, and TLS SNI, but those fields are not all exposed as Roto
+methods yet.
 
 TODO:
 
 - [ ] Expose and document request ID access.
 - [ ] Expose and document request header lookup.
-- [ ] Expose and document request body text access.
-- [ ] Expose and document request content type access.
+- [x] Expose and document request body text access.
+- [x] Expose and document request content type access.
+- [ ] Expose and document raw/binary request body access if needed.
 - [ ] Expose and document request TLS SNI access if needed.
 
 ## Response API
@@ -388,6 +397,8 @@ The `Response` object is available in response filters.
 Currently exposed methods:
 
 ```text
+req.content_type()
+req.body_text()
 res.status()
 res.version()
 res.content_type()
@@ -432,7 +443,17 @@ RequestAction.pass()
     .set_header("name", "value")
     .remove_header("name")
     .set_body_text("body", "text/plain; charset=utf-8")
+    .replace_body_text("old", "new")
+    .replace_body_text_once("old", "new")
+    .replace_body_text_all("old", "new")
+    .replace_body_regex("pattern", "replacement")
+    .replace_body_text_when_contains("anchor", "old", "new")
+    .replace_js_property("property", "old", "new")
+    .replace_css_declaration("property", "old", "new")
+    .replace_html_attribute("selector", "attribute", "old", "new")
+    .apply_json_patch("[{"op":"replace","path":"/name","value":"new"}]", "application/json")
     .synthetic_response(200, "body", "text/plain; charset=utf-8")
+    .drop()
     .stop()
 ```
 
@@ -516,18 +537,53 @@ fn request_action(req: Request) -> RequestAction {
 }
 ```
 
-Synthetic responses stop further request filters.
+Synthetic responses are intended for mock/rewrite use cases where Inspect should
+build the response locally and send it through the normal response filter/capture
+path.
 
 Current behavior:
 
-- request metadata/body/head are captured before returning the synthetic response
-- upstream access is skipped
+- request metadata/body/head are captured first
 - the synthetic response follows the normal response dispatch path
 - response filters can run against the synthetic response
 - response patches are applied before response capture
 - `response.head`, `response.body`, response DB metadata, and `ssl_tls.json` are written
 - upstream metadata is stored as absent/null
 - elapsed time is measured from request start to synthetic response generation, so it may be `0ms`
+
+If the goal is to suppress the client response or guarantee a hard block, prefer
+`RequestAction.drop()`.
+
+### Drop client response
+
+A request filter can stop the request before upstream access.
+
+```rust
+fn request_action(req: Request) -> RequestAction {
+    if req.path() == "/blocked" {
+        return RequestAction.pass()
+            .mark("blocked")
+            .drop();
+    }
+
+    RequestAction.pass()
+}
+```
+
+Current behavior:
+
+- later request filters are not executed
+- upstream access is skipped
+- request metadata/body/head are captured
+- no response is captured, so the TUI status is shown as no response / `----`
+- Inspect returns an empty close response to the client
+- no automatic mark is added; use `.mark("drop")` if the drop should be visible in the packet list
+
+TODO:
+
+- [ ] Decide whether `444` should remain the public behavior or become configurable.
+- [ ] Decide whether response-phase `drop()` should be supported or removed from the Roto API.
+
 
 ### Stop filter chain
 
@@ -542,6 +598,9 @@ fn request_action(req: Request) -> RequestAction {
 When `stop()` is used, later matching request filters are not executed.
 
 Synthetic responses also stop request filter processing.
+
+
+
 
 ## ResponseAction API
 
@@ -1036,6 +1095,37 @@ results in both marks being emitted:
 
 Completed-phase action effects are still under development.
 
+### `drop()`
+
+Drop client response after response filters.
+
+A response filter can drop the response returned to the client after Inspect has
+observed and captured the response.
+
+```rust
+fn response_action(res: Response) -> ResponseAction {
+    if res.status() >= 500 {
+        return ResponseAction
+            .pass()
+            .mark("drop")
+            .drop();
+    }
+    ResponseAction.pass()
+}
+```
+
+Current behavior:
+
+- response filters run normally
+- response patches are applied before capture
+- outbound HTTP jobs are resolved/enqueued normally
+- response metadata/body/head are captured normally
+- TUI status reflects the captured response status, not the internal drop response
+- Inspect returns an empty close response to the client
+- no automatic mark is added; use `.mark("drop")` if the drop should be visible in the packet list
+
+
+
 ### `stop()`
 
 Calling `stop()` stops later matching filters in that phase.
@@ -1264,6 +1354,54 @@ patches instead of deeply merging every field.
 The filter directory is currently `./filters` relative to the process current
 working directory. This can be surprising if Inspect is launched from a different
 directory.
+
+## Known issues
+
+### Known Roto short-circuit issue
+
+Some Roto versions used by inspect can crash when short-circuit boolean
+operators (`||` / `&&`) skip an expression that contains `String` comparisons or
+string-producing calls. For example, avoid writing filters like:
+
+```roto
+fn request_action(req: Request) -> RequestAction {
+    let path = req.path();
+
+    if path == "/a" || path == "/b" {
+        RequestAction.pass().mark("example")
+    } else {
+        RequestAction.pass()
+    }
+}
+```
+
+Prefer sequential `if` statements with early returns:
+
+```roto
+fn request_action(req: Request) -> RequestAction {
+    let path = req.path();
+
+    if path == "/a" {
+        return RequestAction.pass().mark("example");
+    }
+
+    if path == "/b" {
+        return RequestAction.pass().mark("example");
+    }
+
+    RequestAction.pass()
+}
+```
+
+For `&&`, prefer nested `if` statements when either side calls string-returning
+methods such as `req.path()`, `req.host()`, `req.query()`, `res.content_type()`,
+or `res.body_text()`.
+
+This is a Roto JIT cleanup/drop issue. Plain equality checks such as
+`req.path() == "/a"` are safe; the problem is the short-circuit path.
+
+
+
 
 ## TODO
 

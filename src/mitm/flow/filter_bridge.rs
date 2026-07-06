@@ -72,6 +72,8 @@ pub(crate) fn merge_request_action(dst: &mut RequestAction, src: RequestAction) 
         dst.continue_filters = src.continue_filters;
     }
 
+    dst.drop_client_response = dst.drop_client_response || src.drop_client_response;
+
     dst.marks.extend(src.marks);
     dst.tags.extend(src.tags);
     dst.notes.extend(src.notes);
@@ -88,6 +90,7 @@ pub(crate) fn merge_response_action(dst: &mut ResponseAction, src: ResponseActio
     dst.notes.extend(src.notes);
     dst.outbound_http.extend(src.outbound_http);
     dst.continue_filters = src.continue_filters;
+    dst.drop_client_response = dst.drop_client_response || src.drop_client_response;
 }
 
 fn filter_headers_from_header_map(headers: &http::HeaderMap) -> Vec<FilterHeader> {
@@ -365,4 +368,49 @@ fn remove_body_integrity_headers(headers: &mut http::HeaderMap) {
     headers.remove(http::header::CONTENT_ENCODING);
     headers.remove(http::header::ETAG);
     headers.remove("content-md5");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::filters::{RequestAction, ResponseAction};
+
+    #[test]
+    fn merge_request_action_or_drop_flag_when_src_true() {
+        let mut dst = RequestAction::pass();
+        dst.drop_client_response = false;
+
+        let mut src = RequestAction::pass();
+        src.drop_client_response = true;
+
+        merge_request_action(&mut dst, src);
+
+        assert!(dst.drop_client_response);
+    }
+
+    #[test]
+    fn merge_request_action_keeps_drop_true_when_dst_already_true() {
+        let mut dst = RequestAction::pass();
+        dst.drop_client_response = true;
+
+        let mut src = RequestAction::pass();
+        src.drop_client_response = false;
+
+        merge_request_action(&mut dst, src);
+
+        assert!(dst.drop_client_response);
+    }
+
+    #[test]
+    fn merge_response_action_or_drop_flag() {
+        let mut dst = ResponseAction::pass();
+        dst.drop_client_response = false;
+
+        let mut src = ResponseAction::pass();
+        src.drop_client_response = true;
+
+        merge_response_action(&mut dst, src);
+
+        assert!(dst.drop_client_response);
+    }
 }

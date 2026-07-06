@@ -234,6 +234,7 @@ pub struct RequestAction {
     pub notes: Vec<String>,
     pub outbound_http: Vec<OutboundHttpJob>,
     pub continue_filters: bool,
+    pub drop_client_response: bool,
 }
 
 impl RequestAction {
@@ -258,6 +259,7 @@ pub struct ResponseAction {
     pub notes: Vec<String>,
     pub outbound_http: Vec<OutboundHttpJob>,
     pub continue_filters: bool,
+    pub drop_client_response: bool,
 }
 
 impl ResponseAction {

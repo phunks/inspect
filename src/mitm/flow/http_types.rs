@@ -87,11 +87,13 @@ pub(crate) struct RequestDispatchOutput {
     pub filter_request: FilterRequest,
     pub marks: Vec<FlowMark>,
     pub synthetic_response: Option<FilterSyntheticResponse>,
+    pub drop_client_response: bool,
 }
 
 pub(crate) struct ResponseFilterDispatchOutput {
     pub marks: Vec<FlowMark>,
     pub outbound_http: Vec<OutboundHttpJob>,
+    pub drop_client_response: bool,
 }
 
 impl ResponseDispatchInput {

@@ -141,9 +141,10 @@ impl FlowDispatcher {
         outbound_http_pool: Option<OutboundHttpClientPool>,
         config: FlowDispatcherConfig,
     ) -> Self {
+        let paths = capture.paths().clone();
         Self {
             capture,
-            filters: FlowFilterRuntime::new(filters),
+            filters: FlowFilterRuntime::new(filters, paths),
             events,
             upstream_client,
             seq,
@@ -201,11 +202,40 @@ impl FlowDispatcher {
             filter_request,
             marks,
             synthetic_response,
+            drop_client_response,
         } = self.dispatch_request_filters(
             &ctx,
             &mut req_parts,
             &mut req_body_bytes,
         );
+
+        if drop_client_response {
+            tracing::info!(
+                id = %ctx.id,
+                flow_key = %ctx.flow_key,
+                method = %req_parts.method,
+                host = %ctx.host,
+                path = %ctx.path(),
+                marks = marks.len(),
+                "request dropped by request filter before upstream"
+            );
+
+            self.commit_request(
+                &ctx,
+                &req_parts,
+                &req_body_bytes,
+                marks,
+            )
+                .await?;
+
+            return Ok(
+                Response::builder()
+                    .status(444)
+                    .header("connection", "close")
+                    .body(Body::from(Bytes::new()))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            );
+        }
 
         self.commit_request(
             &ctx,
@@ -304,7 +334,8 @@ impl FlowDispatcher {
 
         let marks = flow_marks_from_request_action(&request_action);
         let synthetic_response = request_action.synthetic_response;
-
+        let drop_client_response = request_action.drop_client_response;
+        
         if let Some(patch) = request_action.request {
             apply_request_patch(req_parts, req_body_bytes, patch);
         }
@@ -313,6 +344,7 @@ impl FlowDispatcher {
             filter_request,
             marks,
             synthetic_response,
+            drop_client_response,
         }
     }
 
@@ -407,6 +439,7 @@ impl FlowDispatcher {
         );
 
         let response_marks = response_filter_output.marks;
+        let drop_client_response = response_filter_output.drop_client_response;
         let outbound_http = self.resolve_outbound_http_jobs(
             response_filter_output.outbound_http,
             &input,
@@ -432,6 +465,23 @@ impl FlowDispatcher {
         );
 
         publish_response_committed(&self.events, &response_commit, response_marks);
+
+        if drop_client_response {
+            tracing::info!(
+                    id = %input.id,
+                    flow_key = %input.flow_key,
+                    status = %res_parts.status,
+                    "response dropped by response filter"
+                );
+
+            return Ok(
+                Response::builder()
+                    .status(444)
+                    .header("connection", "close")
+                    .body(Body::from(Bytes::new()))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            );
+        }
 
         Ok(Response::from_parts(res_parts, Body::from(res_body_bytes)))
     }
@@ -506,6 +556,7 @@ impl FlowDispatcher {
 
         let response_marks = flow_marks_from_response_action(&response_action);
         let outbound_http = response_action.outbound_http;
+        let drop_client_response = response_action.drop_client_response;
 
         if let Some(patch) = response_action.response {
             apply_response_patch(res_parts, res_body_bytes, patch);
@@ -514,6 +565,7 @@ impl FlowDispatcher {
         ResponseFilterDispatchOutput {
             marks: response_marks,
             outbound_http,
+            drop_client_response,
         }
     }
 

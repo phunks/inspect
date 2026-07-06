@@ -1,4 +1,10 @@
-use tracing::{debug, info};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
+use tracing::{debug, info, warn};
 
 use crate::filters::{
     FilterFlow,
@@ -10,6 +16,7 @@ use crate::filters::{
     RequestAction,
     ResponseAction,
 };
+use crate::mitm::capture::CapturePaths;
 use crate::mitm::flow::filter_bridge::{
     merge_request_action,
     merge_response_action,
@@ -18,11 +25,17 @@ use crate::mitm::flow::filter_bridge::{
 #[derive(Clone)]
 pub(crate) struct FlowFilterRuntime {
     filters: FilterManager,
+    capture_paths: CapturePaths,
+    quarantined_once: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl FlowFilterRuntime {
-    pub(crate) fn new(filters: FilterManager) -> Self {
-        Self { filters }
+    pub(crate) fn new(filters: FilterManager, capture_paths: CapturePaths) -> Self {
+        Self {
+            filters,
+            capture_paths,
+            quarantined_once: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     pub(crate) fn run_request_filters(
@@ -33,6 +46,7 @@ impl FlowFilterRuntime {
         let filters = self.filters.current();
         let mut matched = 0usize;
         let mut combined = RequestAction::pass();
+        let mut needs_reload = false;
 
         for filter in filters.matching_request(req_view) {
             matched += 1;
@@ -46,7 +60,20 @@ impl FlowFilterRuntime {
                 "matched request roto filter"
             );
 
-            match filter.on_request(req) {
+            let started = Instant::now();
+            let result = filter.on_request(req);
+            let elapsed = started.elapsed();
+
+            if self.is_over_jit_threshold(elapsed) {
+                needs_reload |= self.quarantine_slow_filter(
+                    &filter.definition.path,
+                    filter.name(),
+                    elapsed,
+                    "request",
+                );
+            }
+
+            match result {
                 Ok(action) => {
                     debug!(
                         filter = filter.name(),
@@ -76,6 +103,10 @@ impl FlowFilterRuntime {
             }
         }
 
+        if needs_reload {
+            self.reload_after_quarantine();
+        }
+
         if matched == 0 {
             info!(
                 loaded_filters = filters.len(),
@@ -98,6 +129,7 @@ impl FlowFilterRuntime {
         let filters = self.filters.current();
         let mut matched = 0usize;
         let mut combined = ResponseAction::pass();
+        let mut needs_reload = false;
 
         for filter in filters.matching_response(res_view) {
             matched += 1;
@@ -113,7 +145,20 @@ impl FlowFilterRuntime {
                 "matched response roto filter"
             );
 
-            match filter.on_response(flow, res) {
+            let started = Instant::now();
+            let result = filter.on_response(flow, res);
+            let elapsed = started.elapsed();
+
+            if self.is_over_jit_threshold(elapsed) {
+                needs_reload |= self.quarantine_slow_filter(
+                    &filter.definition.path,
+                    filter.name(),
+                    elapsed,
+                    "response",
+                );
+            }
+
+            match result {
                 Ok(action) => {
                     debug!(
                         filter = filter.name(),
@@ -141,6 +186,10 @@ impl FlowFilterRuntime {
             }
         }
 
+        if needs_reload {
+            self.reload_after_quarantine();
+        }
+
         if matched == 0 {
             debug!(
                 loaded_filters = filters.len(),
@@ -163,6 +212,7 @@ impl FlowFilterRuntime {
     ) {
         let filters = self.filters.current();
         let mut matched = 0usize;
+        let mut needs_reload = false;
 
         for filter in filters.matching_completed(req_view) {
             matched += 1;
@@ -176,7 +226,20 @@ impl FlowFilterRuntime {
                 "matched completed roto filter"
             );
 
-            match filter.on_completed(flow) {
+            let started = Instant::now();
+            let result = filter.on_completed(flow);
+            let elapsed = started.elapsed();
+
+            if self.is_over_jit_threshold(elapsed) {
+                needs_reload |= self.quarantine_slow_filter(
+                    &filter.definition.path,
+                    filter.name(),
+                    elapsed,
+                    "completed",
+                );
+            }
+
+            match result {
                 Ok(action) => {
                     debug!(
                         filter = filter.name(),
@@ -202,6 +265,10 @@ impl FlowFilterRuntime {
             }
         }
 
+        if needs_reload {
+            self.reload_after_quarantine();
+        }
+
         if matched == 0 {
             debug!(
                 loaded_filters = filters.len(),
@@ -212,4 +279,125 @@ impl FlowFilterRuntime {
             );
         }
     }
+
+    fn is_over_jit_threshold(&self, elapsed: Duration) -> bool {
+        elapsed > jit_quarantine_threshold()
+    }
+
+    fn quarantine_slow_filter(
+        &self,
+        path: &Path,
+        filter_name: &str,
+        elapsed: Duration,
+        phase: &str,
+    ) -> bool {
+        let path = path.to_path_buf();
+
+        {
+            let mut seen = self.quarantined_once.lock();
+            if !seen.insert(path.clone()) {
+                return false;
+            }
+        }
+
+        let reason = format!(
+            "roto jit execution too slow: phase={phase}, elapsed_ms={}, threshold_ms={}",
+            elapsed.as_millis(),
+            jit_quarantine_threshold().as_millis()
+        );
+
+        if path.starts_with(&self.capture_paths.generated_filters_dir) {
+            match self.capture_paths.quarantine_generated_filter(&path) {
+                Ok(destination) => {
+                    warn!(
+                        filter = filter_name,
+                        source = %path.display(),
+                        destination = %destination.display(),
+                        phase,
+                        elapsed_ms = elapsed.as_millis(),
+                        threshold_ms = jit_quarantine_threshold().as_millis(),
+                        "quarantined slow ephemeral generated roto filter"
+                    );
+                    return true;
+                }
+                Err(err) => {
+                    warn!(
+                        filter = filter_name,
+                        source = %path.display(),
+                        phase,
+                        elapsed_ms = elapsed.as_millis(),
+                        threshold_ms = jit_quarantine_threshold().as_millis(),
+                        error = ?err,
+                        "failed to quarantine slow ephemeral generated roto filter"
+                    );
+                    return false;
+                }
+            }
+        }
+
+        let persistent_generated_dir = self.filters.filters_dir().join("generated");
+        if path.starts_with(&persistent_generated_dir) {
+            match self.filters.quarantine_filter_file(&path, &reason) {
+                Ok(destination) => {
+                    warn!(
+                        filter = filter_name,
+                        source = %path.display(),
+                        destination = %destination.display(),
+                        phase,
+                        elapsed_ms = elapsed.as_millis(),
+                        threshold_ms = jit_quarantine_threshold().as_millis(),
+                        "quarantined slow generated roto filter"
+                    );
+                    return true;
+                }
+                Err(err) => {
+                    warn!(
+                        filter = filter_name,
+                        source = %path.display(),
+                        phase,
+                        elapsed_ms = elapsed.as_millis(),
+                        threshold_ms = jit_quarantine_threshold().as_millis(),
+                        error = ?err,
+                        "failed to quarantine slow generated roto filter"
+                    );
+                    return false;
+                }
+            }
+        }
+
+        warn!(
+            filter = filter_name,
+            source = %path.display(),
+            phase,
+            elapsed_ms = elapsed.as_millis(),
+            threshold_ms = jit_quarantine_threshold().as_millis(),
+            "slow roto filter detected but path is not generated; skip quarantine"
+        );
+
+        false
+    }
+
+    fn reload_after_quarantine(&self) {
+        if let Err(err) = self.filters.reload() {
+            warn!(error = ?err, "failed to reload filters after quarantine");
+        } else {
+            info!("reloaded filters after quarantine");
+        }
+    }
+}
+
+fn jit_quarantine_threshold() -> Duration {
+    static THRESHOLD: OnceLock<Duration> = OnceLock::new();
+
+    *THRESHOLD.get_or_init(|| {
+        let default_ms = 50u64;
+
+        let ms = std::env::var("INSPECT_ROTO_JIT_QUARANTINE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default_ms);
+
+        Duration::from_millis(ms)
+    })
 }

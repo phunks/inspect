@@ -157,6 +157,7 @@ enum RotoBodyRewriteOp {
 }
 
 //TODOを見て
+#[derive(Clone, Debug, PartialEq)]
 struct AppliedBodyRewrite {
     body: String,
     content_type: Option<String>,
@@ -230,6 +231,14 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
                 mut action: Val<RotoRequestActionData>
             ) -> Val<RotoRequestActionData> {
                 action.stop = true;
+                action
+            }
+
+            fn drop(
+                mut action: Val<RotoRequestActionData>
+            ) -> Val<RotoRequestActionData> {
+                action.stop = true;
+                action.drop = true;
                 action
             }
 
@@ -418,6 +427,14 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
 
             fn stop(mut action: Val<RotoResponseActionData>) -> Val<RotoResponseActionData> {
                 action.stop = true;
+                action
+            }
+
+            fn drop(
+                mut action: Val<RotoResponseActionData>
+            ) -> Val<RotoResponseActionData> {
+                action.stop = true;
+                action.drop = true;
                 action
             }
 
@@ -1217,6 +1234,7 @@ pub struct RotoRequestActionData {
     synthetic_body: Option<RotoString>,
     synthetic_content_type: Option<RotoString>,
     stop: bool,
+    drop: bool,
 }
 
 
@@ -1225,6 +1243,7 @@ impl RotoRequestActionData {
         let mut action = RequestAction::pass();
 
         action.continue_filters = !self.stop;
+        action.drop_client_response = self.drop;
 
         if let Some(status) = self.synthetic_status {
             let mut headers = Vec::new();
@@ -1281,10 +1300,12 @@ impl RotoRequestActionData {
                     bytes: body_text.to_string().into_bytes(),
                     content_type: self.body_content_type.map(|value| value.to_string()),
                 });
-            } else if let Some(body_text) = rewritten_body_text {
+            } else if let Some(rewrite) = rewritten_body_text {
                 patch.body = Some(FilterBodyPatch {
-                    bytes: body_text.into_bytes(),
-                    content_type: self.body_content_type.map(|value| value.to_string()),
+                    bytes: rewrite.body.into_bytes(),
+                    content_type: rewrite
+                        .content_type
+                        .or_else(|| self.body_content_type.map(|value| value.to_string())),
                 });
             }
 
@@ -1315,6 +1336,7 @@ pub struct RotoResponseActionData {
     body_rewrite_ops: Vec<RotoBodyRewriteOp>,
     outbound_http: Vec<RotoOutboundHttpData>,
     stop: bool,
+    drop: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1343,6 +1365,7 @@ impl RotoResponseActionData {
         let mut action = ResponseAction::pass();
 
         action.continue_filters = !self.stop;
+        action.drop_client_response = self.drop;
 
         let rewritten_body_text = apply_body_rewrite_ops(
             original_body_text,
@@ -1378,10 +1401,12 @@ impl RotoResponseActionData {
                     bytes: body_text.to_string().into_bytes(),
                     content_type: self.body_content_type.map(|value| value.to_string()),
                 });
-            } else if let Some(body_text) = rewritten_body_text {
+            } else if let Some(rewrite) = rewritten_body_text {
                 patch.body = Some(FilterBodyPatch {
-                    bytes: body_text.into_bytes(),
-                    content_type: self.body_content_type.map(|value| value.to_string()),
+                    bytes: rewrite.body.into_bytes(),
+                    content_type: rewrite
+                        .content_type
+                        .or_else(|| self.body_content_type.map(|value| value.to_string())),
                 });
             }
 
@@ -1465,12 +1490,13 @@ impl RotoResponseActionData {
 fn apply_body_rewrite_ops(
     original_body_text: Option<&str>,
     ops: &[RotoBodyRewriteOp],
-) -> Option<String> {
+) -> Option<AppliedBodyRewrite> {
     if ops.is_empty() {
         return None;
     }
 
     let mut body = original_body_text?.to_string();
+    let mut content_type = None;
     let mut changed = false;
 
     for op in ops {
@@ -1502,9 +1528,9 @@ fn apply_body_rewrite_ops(
                 let pattern = pattern.to_string();
                 let Ok(regex) = Regex::new(&pattern) else {
                     tracing::warn!(
-                        pattern,
-                        "invalid replace_body_regex pattern in roto filter action"
-                    );
+                            pattern,
+                            "invalid replace_body_regex pattern in roto filter action"
+                        );
                     continue;
                 };
 
@@ -1573,7 +1599,7 @@ fn apply_body_rewrite_ops(
             }
             RotoBodyRewriteOp::ApplyJsonPatch {
                 patch_json,
-                content_type: _,
+                content_type: rewrite_content_type,
             } => {
                 let Some(next) = crate::filters::engine::json::patch::apply_json_patch_rfc6902_json(
                     &body,
@@ -1588,10 +1614,18 @@ fn apply_body_rewrite_ops(
                 if next != body {
                     body = next;
                     changed = true;
+
+                    let rewrite_content_type = rewrite_content_type.to_string();
+                    if !rewrite_content_type.trim().is_empty() {
+                        content_type = Some(rewrite_content_type);
+                    }
                 }
             }
         }
     }
 
-    changed.then_some(body)
+    changed.then_some(AppliedBodyRewrite {
+        body,
+        content_type,
+    })
 }

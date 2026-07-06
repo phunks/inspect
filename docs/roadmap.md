@@ -42,5 +42,4 @@
 ## Integrations
 
 - [ ] Document Logstash outbound HTTP example
-- [ ] Document Snort raw HTTP forwarding example
 - [ ] Consider syslog / webhook presets

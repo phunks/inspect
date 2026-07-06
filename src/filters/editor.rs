@@ -1066,6 +1066,11 @@ pub fn extract_request_filter_from_edit(
 
     filter.extend_actions(diff.header_actions());
 
+    if diff.removed_headers.iter().any(|h| h.name.eq_ignore_ascii_case("host")) {
+        filter.add_action(GeneratedFilterAction::Drop);
+        filter.add_rewrite_note("host header removed; auto-added drop() to suppress client response");
+    }
+    
     let semantic_events = original.semantic_diff(edited);
     let json_patch_operations = json_patch_operations_from_diff_events(&semantic_events);
 
