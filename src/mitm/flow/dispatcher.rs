@@ -141,10 +141,9 @@ impl FlowDispatcher {
         outbound_http_pool: Option<OutboundHttpClientPool>,
         config: FlowDispatcherConfig,
     ) -> Self {
-        let paths = capture.paths().clone();
         Self {
+            filters: FlowFilterRuntime::new(filters, capture.clone()),
             capture,
-            filters: FlowFilterRuntime::new(filters, paths),
             events,
             upstream_client,
             seq,

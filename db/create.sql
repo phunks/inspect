@@ -41,36 +41,27 @@ CREATE TABLE IF NOT EXISTS responses (
     body_save_limit INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS filter_phase_stats (
-    id TEXT NOT NULL,              -- flow/request id
-    seq INTEGER NOT NULL,
-    flow_key TEXT NOT NULL,
-    phase TEXT NOT NULL,           -- request|response|completed
-    total_elapsed_us INTEGER NOT NULL,
-    loaded_filters INTEGER NOT NULL,
-    matched_filters INTEGER NOT NULL,
-    executed_filters INTEGER NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_filter_phase_stats_id_phase
-    ON filter_phase_stats(id, phase);
-
 CREATE TABLE IF NOT EXISTS filter_exec_stats (
     id TEXT NOT NULL,
     seq INTEGER NOT NULL,
     flow_key TEXT NOT NULL,
     phase TEXT NOT NULL,
-    filter_name TEXT NOT NULL,     -- path全部よりname優先で軽量化
+    filter_name TEXT NOT NULL,
     elapsed_us INTEGER NOT NULL,
-    result_code INTEGER NOT NULL,  -- 0=ok,1=error,2=quarantined
-    continue_filters INTEGER,      -- 0/1/null
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    result_code INTEGER NOT NULL,
+    state_read_bytes INTEGER NOT NULL DEFAULT 0,
+    state_write_bytes INTEGER NOT NULL DEFAULT 0,
+    state_items INTEGER NOT NULL DEFAULT 0,
+    evicted_items INTEGER NOT NULL DEFAULT 0,
+    limit_hit INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_filter_exec_stats_id_phase
-    ON filter_exec_stats(id, phase);
-
-CREATE INDEX IF NOT EXISTS idx_filter_exec_stats_filter_phase
-    ON filter_exec_stats(filter_name, phase);
+-- CREATE INDEX IF NOT EXISTS idx_filter_phase_stats_id_phase
+--     ON filter_phase_stats(id, phase);
+--
+-- CREATE INDEX IF NOT EXISTS idx_filter_exec_stats_id_phase
+--     ON filter_exec_stats(id, phase);
+--
+-- CREATE INDEX IF NOT EXISTS idx_filter_exec_stats_filter_phase
+--     ON filter_exec_stats(filter_name, phase);
 

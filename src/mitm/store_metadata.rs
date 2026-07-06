@@ -56,10 +56,23 @@ pub struct ResponseMetadata {
     pub body_save_limit: Option<i64>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct FilterExecStatMetadata {
+    pub id: String,
+    pub seq: i64,
+    pub flow_key: String,
+    pub phase: String,
+    pub filter_name: String,
+    pub elapsed_us: i64,
+    pub result_code: i64,
+}
+
+
 #[derive(Debug)]
 pub enum RequestResponseEvent {
     Request(RequestMetadata),
     Response(ResponseMetadata),
+    FilterExecStat(FilterExecStatMetadata),
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +151,19 @@ impl DbState {
         )
             .execute(&db_pool)
             .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS filter_exec_stats (
+                id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                flow_key TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                filter_name TEXT NOT NULL,
+                elapsed_us INTEGER NOT NULL,
+                result_code INTEGER NOT NULL
+            )"
+        )
+            .execute(&db_pool)
+            .await?;
 
         let (event_sender, mut receiver): (
             UnboundedSender<RequestResponseEvent>,
@@ -156,6 +182,11 @@ impl DbState {
                     RequestResponseEvent::Response(metadata) => {
                         if let Err(e) = insert_response(&pool_clone, &metadata).await {
                             tracing::error!("Failed to insert response: {:?}", e);
+                        }
+                    }
+                    RequestResponseEvent::FilterExecStat(metadata) => {
+                        if let Err(e) = insert_filter_exec_stat(&pool_clone, &metadata).await {
+                            tracing::error!("Failed to insert filter_exec_stat: {:?}", e);
                         }
                     }
                 }
@@ -249,3 +280,24 @@ where
     Ok(())
 }
 
+async fn insert_filter_exec_stat<'e, E>(exec: E, metadata: &FilterExecStatMetadata) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    sqlx::query(
+        "INSERT INTO filter_exec_stats (
+            id, seq, flow_key, phase, filter_name, elapsed_us, result_code
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+        .bind(&metadata.id)
+        .bind(metadata.seq)
+        .bind(&metadata.flow_key)
+        .bind(&metadata.phase)
+        .bind(&metadata.filter_name)
+        .bind(metadata.elapsed_us)
+        .bind(metadata.result_code)
+        .execute(exec)
+        .await?;
+
+    Ok(())
+}

@@ -17,6 +17,7 @@ use crate::filters::{
     ResponseAction,
 };
 use crate::mitm::capture::CapturePaths;
+use crate::mitm::flow::CaptureService;
 use crate::mitm::flow::filter_bridge::{
     merge_request_action,
     merge_response_action,
@@ -25,15 +26,15 @@ use crate::mitm::flow::filter_bridge::{
 #[derive(Clone)]
 pub(crate) struct FlowFilterRuntime {
     filters: FilterManager,
-    capture_paths: CapturePaths,
+    capture: CaptureService,
     quarantined_once: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl FlowFilterRuntime {
-    pub(crate) fn new(filters: FilterManager, capture_paths: CapturePaths) -> Self {
+    pub(crate) fn new(filters: FilterManager, capture: CaptureService) -> Self {
         Self {
             filters,
-            capture_paths,
+            capture,
             quarantined_once: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -64,14 +65,30 @@ impl FlowFilterRuntime {
             let result = filter.on_request(req);
             let elapsed = started.elapsed();
 
+            let mut result_code = if result.is_ok() { 0 } else { 1 };
+
             if self.is_over_jit_threshold(elapsed) {
-                needs_reload |= self.quarantine_slow_filter(
+                let quarantined = self.quarantine_slow_filter(
                     &filter.definition.path,
                     filter.name(),
                     elapsed,
                     "request",
                 );
+                needs_reload |= quarantined;
+                if quarantined {
+                    result_code = 2;
+                }
             }
+
+            self.capture.record_filter_exec_stat(
+                &req.id,
+                req.seq,
+                &req.flow_key,
+                "request",
+                filter.name(),
+                elapsed.as_micros() as i64,
+                result_code,
+            );
 
             match result {
                 Ok(action) => {
@@ -149,14 +166,30 @@ impl FlowFilterRuntime {
             let result = filter.on_response(flow, res);
             let elapsed = started.elapsed();
 
+            let mut result_code = if result.is_ok() { 0 } else { 1 };
+
             if self.is_over_jit_threshold(elapsed) {
-                needs_reload |= self.quarantine_slow_filter(
+                let quarantined = self.quarantine_slow_filter(
                     &filter.definition.path,
                     filter.name(),
                     elapsed,
                     "response",
                 );
+                needs_reload |= quarantined;
+                if quarantined {
+                    result_code = 2;
+                }
             }
+
+            self.capture.record_filter_exec_stat(
+                &flow.id,
+                flow.seq,
+                &flow.flow_key,
+                "response",
+                filter.name(),
+                elapsed.as_micros() as i64,
+                result_code,
+            );
 
             match result {
                 Ok(action) => {
@@ -230,14 +263,30 @@ impl FlowFilterRuntime {
             let result = filter.on_completed(flow);
             let elapsed = started.elapsed();
 
+            let mut result_code = if result.is_ok() { 0 } else { 1 };
+
             if self.is_over_jit_threshold(elapsed) {
-                needs_reload |= self.quarantine_slow_filter(
+                let quarantined = self.quarantine_slow_filter(
                     &filter.definition.path,
                     filter.name(),
                     elapsed,
                     "completed",
                 );
+                needs_reload |= quarantined;
+                if quarantined {
+                    result_code = 2;
+                }
             }
+
+            self.capture.record_filter_exec_stat(
+                &flow.id,
+                flow.seq,
+                &flow.flow_key,
+                "completed",
+                filter.name(),
+                elapsed.as_micros() as i64,
+                result_code,
+            );
 
             match result {
                 Ok(action) => {
@@ -306,8 +355,8 @@ impl FlowFilterRuntime {
             jit_quarantine_threshold().as_millis()
         );
 
-        if path.starts_with(&self.capture_paths.generated_filters_dir) {
-            match self.capture_paths.quarantine_generated_filter(&path) {
+        if path.starts_with(&self.capture.paths().generated_filters_dir) {
+            match self.capture.paths().quarantine_generated_filter(&path) {
                 Ok(destination) => {
                     warn!(
                         filter = filter_name,
@@ -390,7 +439,7 @@ fn jit_quarantine_threshold() -> Duration {
     static THRESHOLD: OnceLock<Duration> = OnceLock::new();
 
     *THRESHOLD.get_or_init(|| {
-        let default_ms = 50u64;
+        let default_ms = 1000u64;
 
         let ms = std::env::var("INSPECT_ROTO_JIT_QUARANTINE_MS")
             .ok()

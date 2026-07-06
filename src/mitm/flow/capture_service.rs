@@ -13,12 +13,7 @@ use uuid::Uuid;
 
 use crate::mitm::capture::CapturePaths;
 use crate::mitm::flow::filter_bridge::normalized_content_type;
-use crate::mitm::store_metadata::{
-    DbState,
-    RequestMetadata,
-    RequestResponseEvent,
-    ResponseMetadata,
-};
+use crate::mitm::store_metadata::{DbState, FilterExecStatMetadata, RequestMetadata, RequestResponseEvent, ResponseMetadata};
 
 #[derive(Clone)]
 pub struct CaptureService {
@@ -332,6 +327,32 @@ impl CaptureService {
             display_status,
             version,
         })
+    }
+
+    pub fn record_filter_exec_stat(
+        &self,
+        id: &str,
+        seq: u64,
+        flow_key: &str,
+        phase: &str,
+        filter_name: &str,
+        elapsed_us: i64,
+        result_code: i64,
+    ) {
+        self.dbstate
+            .event_sender
+            .send(RequestResponseEvent::FilterExecStat(FilterExecStatMetadata {
+                id: id.to_string(),
+                seq: seq as i64,
+                flow_key: flow_key.to_string(),
+                phase: phase.to_string(),
+                filter_name: filter_name.to_string(),
+                elapsed_us,
+                result_code,
+            }))
+            .unwrap_or_else(|err| {
+                tracing::error!("error sending filter exec stat event: {err:?}");
+            });
     }
 }
 

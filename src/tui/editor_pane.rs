@@ -434,7 +434,7 @@ fn editable_body_from_text(
         };
     }
 
-    if body.starts_with("<binary body detected") {
+    if body.starts_with("<binary body detected") || looks_like_hexdump(body) {
         let bytes_len = extract_hexdump_bytes(body)
             .map(|bytes| bytes.len())
             .unwrap_or_else(|| text.len());
@@ -498,6 +498,41 @@ fn extract_hexdump_bytes(text: &str) -> Option<Vec<u8>> {
     } else {
         Some(bytes)
     }
+}
+
+fn looks_like_hexdump(text: &str) -> bool {
+    let mut total_lines = 0usize;
+    let mut valid_lines = 0usize;
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        total_lines += 1;
+
+        let mut parts = line.split('|');
+        let left = parts.next().unwrap_or_default().trim_end();
+        let mut iter = left.split_whitespace();
+
+        let Some(offset) = iter.next() else {
+            continue;
+        };
+
+        if offset.len() != 8 || !offset.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            continue;
+        }
+
+        let hex_tokens = iter
+            .filter(|token| token.len() == 2 && token.chars().all(|ch| ch.is_ascii_hexdigit()))
+            .count();
+
+        if (1..=16).contains(&hex_tokens) {
+            valid_lines += 1;
+        }
+    }
+
+    total_lines > 0 && valid_lines > 0 && valid_lines * 100 / total_lines >= 80
 }
 
 fn parse_headers_from_meta(meta: &str) -> Vec<EditableHttpHeader> {
