@@ -242,7 +242,20 @@ tui_time_tz = "utc"
 # base_url = "http://localhost:5044"
 # timeout_ms = 5000
 
-# [[outbound_http_clients]]
-# name = "snort"
-# base_url = "http://127.0.0.1:8081"
-# timeout_ms = 5000
+
+[filter_state]
+# Enable connection/flow-scoped state APIs in Roto:
+# req.state_get/state_put/state_delete and res.state_get/state_put/state_delete
+enabled = true
+
+# TTL for each state entry (seconds)
+ttl_sec = 60
+
+# Resource limits (bytes)
+max_entry_bytes = 262144
+max_connection_bytes = 2097152
+max_filter_bytes = 16777216
+max_total_bytes = 134217728
+
+# Background expiration sweep interval (seconds)
+sweep_interval_sec = 5

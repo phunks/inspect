@@ -34,6 +34,32 @@ pub enum TimeMode {
     Epoch,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FilterStateConfig {
+    pub enabled: bool,
+    pub ttl_sec: u64,
+    pub max_entry_bytes: usize,
+    pub max_connection_bytes: usize,
+    pub max_filter_bytes: usize,
+    pub max_total_bytes: usize,
+    pub sweep_interval_sec: u64,
+}
+
+impl Default for FilterStateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_sec: 60,
+            max_entry_bytes: 256 * 1024,
+            max_connection_bytes: 2 * 1024 * 1024,
+            max_filter_bytes: 16 * 1024 * 1024,
+            max_total_bytes: 128 * 1024 * 1024,
+            sweep_interval_sec: 5,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct FileConfig {
@@ -57,6 +83,7 @@ struct FileConfig {
     tui_time_mode: Option<TimeMode>,
     tui_time_format: Option<String>,
     tui_time_tz: Option<String>,
+    filter_state: Option<FilterStateConfig>,
 }
 
 #[derive(Parser, Debug)]
@@ -111,6 +138,9 @@ pub struct Opt {
 
     #[arg(skip)]
     pub outbound_http_clients: Vec<NamedHttpClientConfig>,
+
+    #[arg(skip)]
+    pub filter_state: FilterStateConfig,
 
     #[arg(long, help = "Generate (or reuse) persistent local MITM root CA and exit")]
     pub generate_ca: bool,
@@ -230,6 +260,10 @@ impl Opt {
             self.outbound_http_clients = value;
         }
 
+        if let Some(value) = config.filter_state {
+            self.filter_state = value;
+        }
+
         if !cli_specified(matches, "generate_ca")
             && let Some(value) = config.generate_ca {
             self.generate_ca = value;
@@ -293,6 +327,7 @@ impl Opt {
             effective_body_save_limit_bytes = ?self.effective_body_save_limit_bytes(),
             body_omit_content_types = ?self.body_omit_content_types,
             outbound_http_clients = ?self.outbound_http_clients,
+            filter_state = ?self.filter_state,
             generate_ca = self.generate_ca,
             force_regenerate_ca = self.force_regenerate_ca,
             preshared_key_log_enabled = self.is_preshared_key_log_enabled(),

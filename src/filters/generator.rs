@@ -7,6 +7,7 @@ use crate::filters::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedFilter {
+    pub id: Option<String>,
     pub name: String,
     pub priority: i32,
     pub enabled: bool,
@@ -273,6 +274,7 @@ impl GeneratedFilter {
         mark: impl Into<String>,
     ) -> Self {
         Self {
+            id: None,
             name: name.into(),
             priority: 9000,
             enabled: true,
@@ -308,6 +310,7 @@ impl GeneratedFilter {
         mark: impl Into<String>,
     ) -> Self {
         Self {
+            id: None,
             name: name.into(),
             priority: 9000,
             enabled: true,
@@ -325,6 +328,7 @@ impl GeneratedFilter {
         mark: impl Into<String>,
     ) -> Self {
         Self {
+            id: None,
             name: name.into(),
             priority: 9000,
             enabled: true,
@@ -434,6 +438,9 @@ impl GeneratedFilter {
         let phase = self.phase.as_roto_phase();
 
         writeln!(out, "//! +++").expect("write to String should not fail");
+        if let Some(id) = self.id.as_deref() {
+            writeln!(out, "//! id = {}", toml_string(id)).expect("write to String should not fail");
+        }
         writeln!(out, "//! name = {}", toml_string(&self.name)).expect("write to String should not fail");
         writeln!(out, "//! enabled = {}", self.enabled).expect("write to String should not fail");
         writeln!(out, "//! priority = {}", self.priority).expect("write to String should not fail");
@@ -997,6 +1004,7 @@ impl GeneratedFilterBuilder {
         }
 
         GeneratedFilter {
+            id: Some(format!("inspect-generated:{}", uuid::Uuid::new_v4())),
             name: self.name,
             priority: self.priority,
             enabled: self.enabled,
@@ -2289,6 +2297,7 @@ mod tests {
     #[test]
     fn generates_all_body_conditions() {
         let filter = GeneratedFilter {
+            id: None,
             name: "all".to_string(),
             priority: 9000,
             enabled: true,

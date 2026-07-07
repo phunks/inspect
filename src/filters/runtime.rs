@@ -29,10 +29,30 @@ use crate::filters::types::{
 };
 use roto::{library, NoCtx, RotoString, Runtime, Val};
 use regex::Regex;
-use crate::filters::FilterSyntheticResponse;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use crate::filters::{runtime_state, FilterSyntheticResponse};
 
 fn plain_error(err: impl std::fmt::Display) -> String {
     console::strip_ansi_codes(&err.to_string()).into_owned()
+}
+
+fn decode_base64_roto_string(value: RotoString, label: &str) -> Option<RotoString> {
+    let encoded = value.to_string();
+
+    match STANDARD.decode(encoded.as_bytes()) {
+        Ok(decoded) => match String::from_utf8(decoded) {
+            Ok(text) => Some(text.into()),
+            Err(err) => {
+                tracing::warn!(field = label, error = ?err, "invalid UTF-8 in base64 action argument");
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(field = label, error = ?err, "invalid base64 in action argument");
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -156,7 +176,6 @@ enum RotoBodyRewriteOp {
     },
 }
 
-//TODOを見て
 #[derive(Clone, Debug, PartialEq)]
 struct AppliedBodyRewrite {
     body: String,
@@ -196,6 +215,24 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
             fn body_text(req: Val<RotoRequestData>) -> RotoString {
                 req.body_text.clone()
             }
+
+            fn state_get(_req: Val<RotoRequestData>, key: RotoString) -> RotoString {
+                runtime_state::state_get_text(key.as_ref())
+                    .unwrap_or_default()
+                    .into()
+            }
+
+            fn state_put(
+                _req: Val<RotoRequestData>,
+                key: RotoString,
+                value: RotoString,
+            ) -> bool {
+                runtime_state::state_put_text(key.as_ref(), value.as_ref())
+            }
+
+            fn state_delete(_req: Val<RotoRequestData>, key: RotoString) -> bool {
+                runtime_state::state_delete(key.as_ref())
+            }
         }
 
         /// HTTP response metadata exposed to inspect Roto filters.
@@ -216,6 +253,24 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
 
             fn body_text(res: Val<RotoResponseData>) -> RotoString {
                 res.body_text.clone()
+            }
+
+            fn state_get(_res: Val<RotoResponseData>, key: RotoString) -> RotoString {
+                runtime_state::state_get_text(key.as_ref())
+                    .unwrap_or_default()
+                    .into()
+            }
+
+            fn state_put(
+                _res: Val<RotoResponseData>,
+                key: RotoString,
+                value: RotoString,
+            ) -> bool {
+                runtime_state::state_put_text(key.as_ref(), value.as_ref())
+            }
+
+            fn state_delete(_res: Val<RotoResponseData>, key: RotoString) -> bool {
+                runtime_state::state_delete(key.as_ref())
             }
         }
 
@@ -305,11 +360,49 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
                 action
             }
 
+            fn replace_body_text_once_b64(
+                mut action: Val<RotoRequestActionData>,
+                old_b64: RotoString,
+                new_b64: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                let Some(old) = decode_base64_roto_string(old_b64, "old_b64") else {
+                    return action;
+                };
+                let Some(new) = decode_base64_roto_string(new_b64, "new_b64") else {
+                    return action;
+                };
+
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextOnce {
+                    old,
+                    new,
+                });
+                action
+            }
+
             fn replace_body_text_all(
                 mut action: Val<RotoRequestActionData>,
                 old: RotoString,
                 new: RotoString,
             ) -> Val<RotoRequestActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_text_all_b64(
+                mut action: Val<RotoRequestActionData>,
+                old_b64: RotoString,
+                new_b64: RotoString,
+            ) -> Val<RotoRequestActionData> {
+                let Some(old) = decode_base64_roto_string(old_b64, "old_b64") else {
+                    return action;
+                };
+                let Some(new) = decode_base64_roto_string(new_b64, "new_b64") else {
+                    return action;
+                };
+
                 action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
                     old,
                     new,
@@ -598,18 +691,6 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
                 action
             }
 
-            fn replace_body_text(
-                mut action: Val<RotoResponseActionData>,
-                old: RotoString,
-                new: RotoString,
-            ) -> Val<RotoResponseActionData> {
-                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
-                    old,
-                    new,
-                });
-                action
-            }
-
             fn replace_body_text_once(
                 mut action: Val<RotoResponseActionData>,
                 old: RotoString,
@@ -622,11 +703,49 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
                 action
             }
 
+            fn replace_body_text_once_b64(
+                mut action: Val<RotoResponseActionData>,
+                old_b64: RotoString,
+                new_b64: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                let Some(old) = decode_base64_roto_string(old_b64, "old_b64") else {
+                    return action;
+                };
+                let Some(new) = decode_base64_roto_string(new_b64, "new_b64") else {
+                    return action;
+                };
+
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextOnce {
+                    old,
+                    new,
+                });
+                action
+            }
+
             fn replace_body_text_all(
                 mut action: Val<RotoResponseActionData>,
                 old: RotoString,
                 new: RotoString,
             ) -> Val<RotoResponseActionData> {
+                action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
+                    old,
+                    new,
+                });
+                action
+            }
+
+            fn replace_body_text_all_b64(
+                mut action: Val<RotoResponseActionData>,
+                old_b64: RotoString,
+                new_b64: RotoString,
+            ) -> Val<RotoResponseActionData> {
+                let Some(old) = decode_base64_roto_string(old_b64, "old_b64") else {
+                    return action;
+                };
+                let Some(new) = decode_base64_roto_string(new_b64, "new_b64") else {
+                    return action;
+                };
+
                 action.body_rewrite_ops.push(RotoBodyRewriteOp::ReplaceTextAll {
                     old,
                     new,
@@ -722,7 +841,6 @@ fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
 }
 
 fn non_empty_roto_string(value: RotoString) -> Option<String> {
-    let value = value.to_string();
     let value = value.trim().to_string();
 
     if value.is_empty() {
@@ -1508,7 +1626,7 @@ fn apply_body_rewrite_ops(
                     continue;
                 }
 
-                body = body.replacen(&old, &new.to_string(), 1);
+                body = body.replacen(&old, new.as_ref(), 1);
                 changed = true;
             }
             RotoBodyRewriteOp::ReplaceTextAll { old, new } => {
@@ -1518,7 +1636,7 @@ fn apply_body_rewrite_ops(
                     continue;
                 }
 
-                body = body.replace(&old, &new.to_string());
+                body = body.replace(&old, new.as_ref());
                 changed = true;
             }
             RotoBodyRewriteOp::ReplaceRegex {
@@ -1555,7 +1673,7 @@ fn apply_body_rewrite_ops(
                     continue;
                 }
 
-                body = body.replacen(&old, &new.to_string(), 1);
+                body = body.replacen(&old, new.as_ref(), 1);
                 changed = true;
             }
             RotoBodyRewriteOp::ReplaceJsProperty { property, old, new }
@@ -1571,7 +1689,7 @@ fn apply_body_rewrite_ops(
                     continue;
                 }
 
-                body = body.replacen(&old, &new.to_string(), 1);
+                body = body.replacen(&old, new.as_ref(), 1);
                 changed = true;
             }
             RotoBodyRewriteOp::ReplaceHtmlAttribute {
@@ -1594,7 +1712,7 @@ fn apply_body_rewrite_ops(
                     continue;
                 }
 
-                body = body.replacen(&old, &new.to_string(), 1);
+                body = body.replacen(&old, new.as_ref(), 1);
                 changed = true;
             }
             RotoBodyRewriteOp::ApplyJsonPatch {
@@ -1603,7 +1721,7 @@ fn apply_body_rewrite_ops(
             } => {
                 let Some(next) = crate::filters::engine::json::patch::apply_json_patch_rfc6902_json(
                     &body,
-                    &patch_json.to_string(),
+                    patch_json.as_ref(),
                 ) else {
                     tracing::warn!(
                             "failed to apply JSON patch in roto filter action"

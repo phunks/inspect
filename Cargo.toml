@@ -1,6 +1,6 @@
 [package]
 name = "inspect"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 
 [profile.release]
@@ -48,10 +48,10 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 toml = "1.1"
-roto = { version = "0.11", features = ["selinux-fix"] }
-
+roto = { git = "https://codeberg.org/NLnetLabs/roto", features = ["selinux-fix"] }
 json-patch = "4.2"
 
 [patch.crates-io]
 rama-tls-boring = { path = "ext/rama/rama-tls-boring" }
-roto = { path = "ext/roto", features = ["selinux-fix"] }
+
+

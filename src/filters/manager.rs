@@ -4,17 +4,68 @@ use crate::filters::runtime::{
     CompiledFilterSet,
     RotoProgram,
 };
-use crate::filters::types::{FilterDefinition, FilterMetadata};
+use crate::filters::types::{
+    FilterDefinition,
+    FilterMetadata,
+    FilterSourceKind,
+};
+use crate::mitm::store_metadata::{
+    FilterStatusMetadata,
+    RequestResponseEvent,
+};
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 const DEFAULT_PRIORITY: i32 = 1000;
 const FRONT_MATTER_DELIMITER: &str = "+++";
 const FILTER_RELOAD_DEBOUNCE: Duration = Duration::from_millis(250);
+const GENERATED_FILTER_ID_PREFIX: &str = "inspect-generated:";
+
+
+fn stable_hash_hex(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    format!("{hash:016x}")
+}
+
+fn script_hash(source: &str) -> String {
+    stable_hash_hex(source)
+}
+
+fn is_reserved_generated_id(id: &str) -> bool {
+    id.starts_with(GENERATED_FILTER_ID_PREFIX)
+}
+
+fn filter_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown.roto")
+        .to_string()
+}
+
+fn build_filter_id(
+    source_kind: FilterSourceKind,
+    file_name: &str,
+    explicit_id: Option<&str>,
+    script_hash: &str,
+) -> String {
+    let raw = match explicit_id {
+        Some(id) => format!("{}\0id\0{}\0{}", source_kind.as_str(), id, script_hash),
+        None => format!("{}\0file\0{}\0{}", source_kind.as_str(), file_name, script_hash),
+    };
+
+    format!("filter-{}", stable_hash_hex(&raw))
+}
 
 #[derive(Clone, Debug)]
 pub struct FilterManager {
@@ -22,6 +73,7 @@ pub struct FilterManager {
     filter_dirs: Vec<PathBuf>,
     quarantine_dir: PathBuf,
     current: Arc<RwLock<Arc<CompiledFilterSet>>>,
+    event_sender: Option<UnboundedSender<RequestResponseEvent>>,
 }
 
 
@@ -35,7 +87,16 @@ impl FilterManager {
             filters_dir,
             quarantine_dir,
             current: Arc::new(RwLock::new(Arc::new(CompiledFilterSet::empty()))),
+            event_sender: None,
         }
+    }
+
+    pub fn with_event_sender(
+        mut self,
+        event_sender: UnboundedSender<RequestResponseEvent>,
+    ) -> Self {
+        self.event_sender = Some(event_sender);
+        self
     }
 
     pub fn with_filter_dir(mut self, filter_dir: impl Into<PathBuf>) -> Self {
@@ -120,6 +181,10 @@ impl FilterManager {
                 filter_dirs = ?self.filter_dirs,
                 quarantine_dir = %self.quarantine_dir.display(),
                 cwd = %cwd.display(),
+                filter_id = %filter.definition.id,
+                source_kind = filter.definition.source_kind.as_str(),
+                file_name = %filter.definition.file_name,
+                script_hash = %filter.definition.script_hash,
                 filter = filter.name(),
                 priority = filter.priority,
                 path = %filter.definition.path.display(),
@@ -242,6 +307,12 @@ impl FilterManager {
                 continue;
             }
 
+            let source_kind = if filter_dir == &self.filters_dir {
+                FilterSourceKind::Persistent
+            } else {
+                FilterSourceKind::Generated
+            };
+
             for entry in std::fs::read_dir(filter_dir)
                 .with_context(|| format!("read filters dir {}", filter_dir.display()))?
             {
@@ -256,7 +327,7 @@ impl FilterManager {
                     continue;
                 }
 
-                match self.load_filter(&path) {
+                match self.load_filter(&path, source_kind) {
                     Ok(Some(filter)) => filters.push(filter),
                     Ok(None) => {}
                     Err(err) => {
@@ -273,38 +344,127 @@ impl FilterManager {
         Ok(CompiledFilterSet::new(filters))
     }
 
-    fn load_filter(&self, path: &Path) -> Result<Option<CompiledFilter>> {
+    fn load_filter(
+        &self,
+        path: &Path,
+        source_kind: FilterSourceKind,
+    ) -> Result<Option<CompiledFilter>> {
         let source = std::fs::read_to_string(path)
             .with_context(|| format!("read roto filter {}", path.display()))?;
 
         let (metadata, script) = parse_filter_source(&source)
             .with_context(|| format!("parse filter metadata {}", path.display()))?;
 
-        if !metadata.enabled {
-            debug!(
-                    path = %path.display(),
-                    "roto filter disabled"
-                );
+        if source_kind == FilterSourceKind::Persistent
+            && metadata
+            .id
+            .as_deref()
+            .is_some_and(is_reserved_generated_id)
+        {
+            let file_name = filter_file_name(path);
+            let script_hash = script_hash(&source);
+            let id = build_filter_id(
+                source_kind,
+                &file_name,
+                metadata.id.as_deref(),
+                &script_hash,
+            );
 
-            return Ok(None);
+            let definition = FilterDefinition {
+                id,
+                source_kind,
+                file_name,
+                script_hash,
+                path: path.to_path_buf(),
+                source,
+                metadata,
+                script,
+            };
+
+            self.record_filter_status(filter_status_from_definition(
+                &definition,
+                None,
+                false,
+                None,
+                Some(format!(
+                    "persistent filter cannot use generated filter id prefix `{GENERATED_FILTER_ID_PREFIX}`"
+                )),
+            ));
+
+            anyhow::bail!(
+                "persistent filter cannot use generated filter id prefix `{GENERATED_FILTER_ID_PREFIX}`"
+            );
         }
 
         let priority = metadata
             .priority
             .unwrap_or_else(|| priority_from_file_name(path).unwrap_or(DEFAULT_PRIORITY));
 
+        let file_name = filter_file_name(path);
+        let script_hash = script_hash(&source);
+        let id = build_filter_id(
+            source_kind,
+            &file_name,
+            metadata.id.as_deref(),
+            &script_hash,
+        );
+
         let definition = FilterDefinition {
+            id,
+            source_kind,
+            file_name,
+            script_hash,
             path: path.to_path_buf(),
             source,
             metadata,
             script,
         };
 
-        Ok(Some(compile_filter_definition(definition, priority)?))
+        if !definition.metadata.enabled {
+            debug!(
+                path = %path.display(),
+                "roto filter disabled"
+            );
+
+            self.record_filter_status(filter_status_from_definition(
+                &definition,
+                Some(priority),
+                true,
+                Some("disabled"),
+                None,
+            ));
+
+            return Ok(None);
+        }
+
+        match compile_filter_definition(definition.clone(), priority) {
+            Ok(filter) => {
+                self.record_filter_status(filter_status_from_definition(
+                    &filter.definition,
+                    Some(filter.priority),
+                    true,
+                    Some(program_kind_for_filter(&filter)),
+                    None,
+                ));
+
+                Ok(Some(filter))
+            }
+            Err(err) => {
+                self.record_filter_status(filter_status_from_definition(
+                    &definition,
+                    Some(priority),
+                    false,
+                    None,
+                    Some(err.to_string()),
+                ));
+
+                Err(err)
+            }
+        }
     }
 
     pub fn validate_filter_file(&self, path: &Path) -> Result<()> {
-        self.load_filter(path)
+        self.load_filter(path, FilterSourceKind::Persistent)
             .with_context(|| format!("validate roto filter {}", path.display()))?;
 
         Ok(())
@@ -344,6 +504,26 @@ impl FilterManager {
 
     fn is_quarantined_path(&self, path: &Path) -> bool {
         path.starts_with(&self.quarantine_dir)
+    }
+
+    fn record_filter_status(&self, status: FilterStatusMetadata) {
+        let Some(sender) = self.event_sender.as_ref() else {
+            warn!(
+                filter_id = %status.filter_id,
+                filter = %status.name,
+                "filter status event sender is not configured"
+            );
+            return;
+        };
+
+        sender
+            .send(RequestResponseEvent::FilterStatus(status))
+            .unwrap_or_else(|err| {
+                warn!(
+                    error = ?err,
+                    "failed to enqueue filter status event"
+                );
+            });
     }
 }
 
@@ -592,10 +772,60 @@ fn normalized_comment_line(line: &str) -> Option<String> {
         .map(|line| line.trim_start().to_string())
 }
 
+fn loaded_at_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn program_kind_for_filter(filter: &CompiledFilter) -> &'static str {
+    match filter.program {
+        RotoProgram::MetadataOnly => "metadata-only",
+        RotoProgram::Compiled { .. } => "compiled",
+    }
+}
+
+fn filter_status_from_definition(
+    definition: &FilterDefinition,
+    priority: Option<i32>,
+    valid: bool,
+    program_kind: Option<&str>,
+    last_error: Option<String>,
+) -> FilterStatusMetadata {
+    let name = definition
+        .metadata
+        .name
+        .clone()
+        .unwrap_or_else(|| {
+            definition
+                .path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("unnamed")
+                .to_string()
+        });
+
+    FilterStatusMetadata {
+        filter_id: definition.id.clone(),
+        source_kind: definition.source_kind.as_str().to_string(),
+        file_name: definition.file_name.clone(),
+        path: definition.path.to_string_lossy().to_string(),
+        explicit_id: definition.metadata.id.clone(),
+        name,
+        enabled: definition.metadata.enabled,
+        valid,
+        priority,
+        script_hash: definition.script_hash.clone(),
+        script_len: definition.script.len() as i64,
+        program_kind: program_kind.map(str::to_string),
+        last_error,
+        loaded_at: loaded_at_now(),
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filters::types::{FilterPhase, FilterRequestView};
+    use crate::filters::types::{FilterPhase, FilterRequestView, FilterSourceKind};
 
     #[test]
     fn priority_is_read_from_file_name_prefix() {
@@ -694,6 +924,10 @@ fn on_request() {}
     fn compiled_filter_set_sorts_by_priority_then_path() {
         let first = CompiledFilter::metadata_only(
             FilterDefinition {
+                id: "test-b".to_string(),
+                source_kind: FilterSourceKind::Persistent,
+                file_name: "b.roto".to_string(),
+                script_hash: "empty".to_string(),
                 path: PathBuf::from("b.roto"),
                 source: String::new(),
                 metadata: FilterMetadata::default(),
@@ -704,6 +938,10 @@ fn on_request() {}
 
         let second = CompiledFilter::metadata_only(
             FilterDefinition {
+                id: "test-a".to_string(),
+                source_kind: FilterSourceKind::Persistent,
+                file_name: "a.roto".to_string(),
+                script_hash: "empty".to_string(),
                 path: PathBuf::from("a.roto"),
                 source: String::new(),
                 metadata: FilterMetadata::default(),
@@ -736,6 +974,10 @@ fn on_request() {}
 
         let filter = CompiledFilter::compiled(
             FilterDefinition {
+                id: "test-api".to_string(),
+                source_kind: FilterSourceKind::Persistent,
+                file_name: "000-api.roto".to_string(),
+                script_hash: stable_hash_hex(source),
                 path: PathBuf::from("000-api.roto"),
                 source: source.to_string(),
                 metadata,

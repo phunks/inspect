@@ -16,7 +16,7 @@ use crate::mitm::capture::CapturePaths;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
-pub enum DbCommand {
+pub enum DbCommand { 
     SelectRequest {
         id: String,
         reply: oneshot::Sender<Result<RequestMetadata>>,

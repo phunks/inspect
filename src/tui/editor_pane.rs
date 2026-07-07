@@ -7,7 +7,7 @@ use chord_macro::chord;
 use flate2::read::GzDecoder;
 use crate::filters::{EditableFilterSession, EditableFilterSessionPreview, EditableHttpBody, EditableHttpHeader, EditableHttpMessage, EditableHttpMessageKind, FilterManager};
 use crate::mitm::capture::CapturePaths;
-use crate::tui::{PacketRowEditContext, EDITOR_PANE_GAP, EDITOR_PANE_MIN_WIDTH};
+use crate::tui::PacketRowEditContext;
 use crate::tui::tab::{
     DetailEditState,
     DetailMessagePartSelection,
@@ -485,10 +485,9 @@ fn extract_hexdump_bytes(text: &str) -> Option<Vec<u8>> {
         }
 
         for token in iter {
-            if token.len() == 2 && token.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                if let Ok(byte) = u8::from_str_radix(token, 16) {
-                    bytes.push(byte);
-                }
+            if token.len() == 2 && token.chars().all(|ch| ch.is_ascii_hexdigit())
+                && let Ok(byte) = u8::from_str_radix(token, 16) {
+                bytes.push(byte);
             }
         }
     }

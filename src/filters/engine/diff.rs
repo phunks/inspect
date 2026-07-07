@@ -347,6 +347,7 @@ pub struct JavaScriptBodyDiffEngine;
 pub struct CssBodyDiffEngine;
 pub struct TextBodyDiffEngine;
 
+#[allow(unused)]
 pub struct BodyDiffDispatcher {
     engines: Vec<Box<dyn BodyDiffEngine>>,
 }

@@ -15,7 +15,7 @@ use inspect::mitm::capture::CapturePaths;
 use inspect::mitm::dynamic_ca::generate_default_ca_files;
 use inspect::options::{Opt, Logger};
 use inspect::mitm::flow::{FlowEventDispatcher, FlowEventPublisher, TuiSink};
-
+use inspect::mitm::store_metadata::DbState;
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
@@ -73,6 +73,7 @@ async fn main() -> Result<(), AnyError> {
     let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
     let body_save_limit_bytes = opt.effective_body_save_limit_bytes();
     let body_omit_content_types = opt.body_omit_content_types.clone();
+    let filter_state = opt.filter_state.clone();
     let outbound_http_configs = opt
         .outbound_http_clients
         .clone()
@@ -82,7 +83,9 @@ async fn main() -> Result<(), AnyError> {
             (name, OutboundHttpPoolConfig::from(config))
         })
         .collect::<HashMap<_, _>>();
+    let dbstate = DbState::new().await.expect("dbstate");
     let filter_manager = FilterManager::new("./filters")
+        .with_event_sender(dbstate.event_sender.clone())
         .with_filter_dir(capture_paths.generated_filters_dir.clone());
     let (quit_tx, quit_rx) = watch::channel(false);
 
@@ -121,6 +124,7 @@ async fn main() -> Result<(), AnyError> {
             outbound_http_pool,
             filter_manager,
             flow_events,
+            filter_state,
             quit_rx,
         ).await {
             eprintln!("proxy error: {e}");

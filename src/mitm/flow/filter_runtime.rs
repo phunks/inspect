@@ -16,26 +16,34 @@ use crate::filters::{
     RequestAction,
     ResponseAction,
 };
-use crate::mitm::capture::CapturePaths;
+use crate::filters::runtime_state::RuntimeStateGuard;
+use crate::mitm::flow::capture_service::FilterResourceStats;
 use crate::mitm::flow::CaptureService;
 use crate::mitm::flow::filter_bridge::{
     merge_request_action,
     merge_response_action,
 };
+use crate::mitm::flow::state_store::{FilterStateStore, StateOpStats};
 
 #[derive(Clone)]
 pub(crate) struct FlowFilterRuntime {
     filters: FilterManager,
     capture: CaptureService,
     quarantined_once: Arc<Mutex<HashSet<PathBuf>>>,
+    state_store: Option<FilterStateStore>,
 }
 
 impl FlowFilterRuntime {
-    pub(crate) fn new(filters: FilterManager, capture: CaptureService) -> Self {
+    pub(crate) fn new(
+        filters: FilterManager,
+        capture: CaptureService,
+        state_store: Option<FilterStateStore>,
+    ) -> Self {
         Self {
             filters,
             capture,
             quarantined_once: Arc::new(Mutex::new(HashSet::new())),
+            state_store,
         }
     }
 
@@ -61,11 +69,25 @@ impl FlowFilterRuntime {
                 "matched request roto filter"
             );
 
+            let mut resource_stats = self.sweep_state_stats();
+
+            let state_guard = RuntimeStateGuard::enter(
+                req.flow_key.clone(),
+                filter.name().to_string(),
+                self.state_store.clone(),
+            );
+
             let started = Instant::now();
             let result = filter.on_request(req);
             let elapsed = started.elapsed();
 
+            let runtime_state_stats = state_guard.finish();
+            resource_stats = resource_stats.merge(runtime_state_stats);
+
             let mut result_code = if result.is_ok() { 0 } else { 1 };
+            if resource_stats.limit_hit {
+                result_code = 3;
+            }
 
             if self.is_over_jit_threshold(elapsed) {
                 let quarantined = self.quarantine_slow_filter(
@@ -85,9 +107,11 @@ impl FlowFilterRuntime {
                 req.seq,
                 &req.flow_key,
                 "request",
+                Some(filter.definition.id.as_str()),
                 filter.name(),
                 elapsed.as_micros() as i64,
                 result_code,
+                resource_stats,
             );
 
             match result {
@@ -162,11 +186,25 @@ impl FlowFilterRuntime {
                 "matched response roto filter"
             );
 
+            let mut resource_stats = self.sweep_state_stats();
+
+            let state_guard = RuntimeStateGuard::enter(
+                flow.flow_key.clone(),
+                filter.name().to_string(),
+                self.state_store.clone(),
+            );
+
             let started = Instant::now();
             let result = filter.on_response(flow, res);
             let elapsed = started.elapsed();
 
+            let runtime_state_stats = state_guard.finish();
+            resource_stats = resource_stats.merge(runtime_state_stats);
+
             let mut result_code = if result.is_ok() { 0 } else { 1 };
+            if resource_stats.limit_hit {
+                result_code = 3;
+            }
 
             if self.is_over_jit_threshold(elapsed) {
                 let quarantined = self.quarantine_slow_filter(
@@ -186,9 +224,11 @@ impl FlowFilterRuntime {
                 flow.seq,
                 &flow.flow_key,
                 "response",
+                Some(filter.definition.id.as_str()),
                 filter.name(),
                 elapsed.as_micros() as i64,
                 result_code,
+                resource_stats,
             );
 
             match result {
@@ -259,11 +299,25 @@ impl FlowFilterRuntime {
                 "matched completed roto filter"
             );
 
+            let mut resource_stats = self.sweep_state_stats();
+
+            let state_guard = RuntimeStateGuard::enter(
+                flow.flow_key.clone(),
+                filter.name().to_string(),
+                self.state_store.clone(),
+            );
+
             let started = Instant::now();
             let result = filter.on_completed(flow);
             let elapsed = started.elapsed();
 
+            let runtime_state_stats = state_guard.finish();
+            resource_stats = resource_stats.merge(runtime_state_stats);
+
             let mut result_code = if result.is_ok() { 0 } else { 1 };
+            if resource_stats.limit_hit {
+                result_code = 3;
+            }
 
             if self.is_over_jit_threshold(elapsed) {
                 let quarantined = self.quarantine_slow_filter(
@@ -283,9 +337,11 @@ impl FlowFilterRuntime {
                 flow.seq,
                 &flow.flow_key,
                 "completed",
+                Some(filter.definition.id.as_str()),
                 filter.name(),
                 elapsed.as_micros() as i64,
                 result_code,
+                resource_stats,
             );
 
             match result {
@@ -431,6 +487,28 @@ impl FlowFilterRuntime {
             warn!(error = ?err, "failed to reload filters after quarantine");
         } else {
             info!("reloaded filters after quarantine");
+        }
+    }
+
+    fn sweep_state_stats(&self) -> FilterResourceStats {
+        let Some(store) = self.state_store.as_ref() else {
+            return FilterResourceStats::default();
+        };
+
+        let StateOpStats {
+            read_bytes,
+            write_bytes,
+            state_items,
+            evicted_items,
+            limit_hit,
+        } = store.sweep_expired();
+
+        FilterResourceStats {
+            state_read_bytes: read_bytes,
+            state_write_bytes: write_bytes,
+            state_items,
+            evicted_items,
+            limit_hit,
         }
     }
 }

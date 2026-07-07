@@ -151,7 +151,7 @@ impl CapturePaths {
     }
 }
 
-fn generated_filter_file_name(name: &str) -> String {
+pub fn generated_filter_file_name(name: &str) -> String {
     let slug = slugify_filter_name(name);
 
     if slug.ends_with(".roto") {

@@ -100,19 +100,26 @@ impl Default for DetailEditState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub struct DetailActionBus {
     edit_state: SharedDetailEditState,
     open_edit_requests: SharedOpenEditRequests,
 }
 
+// impl Default for DetailActionBus {
+//      fn default() -> Self {
+//          Self::new()
+//      }
+// }
+
+
 impl DetailActionBus {
-    pub fn new() -> Self {
-        Self {
-            edit_state: Arc::new(Mutex::new(DetailEditState::default())),
-            open_edit_requests: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
+    // pub fn new() -> Self {
+    //     Self {
+    //         edit_state: Arc::new(Mutex::new(DetailEditState::default())),
+    //         open_edit_requests: Arc::new(Mutex::new(Vec::new())),
+    //     }
+    // }
 
     pub fn set_edit_state(&self, state: DetailEditState) {
         *self.edit_state.lock() = state;

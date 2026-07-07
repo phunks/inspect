@@ -23,14 +23,35 @@ use tokio::sync::{
     }, watch};
 use tuie::prelude::*;
 use read_metadata::DbState;
-use crate::tui::search::{open_full_text_search_popup, open_search_popup, FullTextMatcher, FullTextSearchResult};
-use crate::tui::time::{TimeDisplayConfig, TimeFormatter};
-use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketMarked, PacketStarted};
+use crate::tui::search::{
+    open_full_text_search_popup,
+    open_search_popup,
+    FullTextMatcher,
+    FullTextSearchResult
+};
+use crate::tui::time::{
+    TimeDisplayConfig,
+    TimeFormatter
+};
+use crate::mitm::proxy::{
+    PacketCompleted,
+    PacketEvent,
+    PacketMarked,
+    PacketStarted
+};
 use crate::mitm::capture::CapturePaths;
 use crate::tui::body::format_body_for_display_with_headers;
 use crate::tui::har::open_har_export_popup;
 use crate::tui::read_metadata::PacketSummary;
-use crate::tui::tab::{DetailActionBus, DetailContent, DetailEditState, DetailMessagePartSelection, DetailPane, DetailPrimaryTabSelection, DetailTabSelection, SharedDetailEditState, SharedOpenEditRequests};
+use crate::tui::tab::{
+    DetailActionBus,
+    DetailContent,
+    DetailEditState,
+    DetailMessagePartSelection,
+    DetailPane,
+    DetailPrimaryTabSelection,
+    DetailTabSelection
+};
 use crate::tui::editor_pane::open_edit_popup;
 
 const MAX_ROWS: usize = 10_000;
@@ -1983,7 +2004,7 @@ pub async fn run_tui(
     tui_mode: TuiMode,
 ) -> anyhow::Result<()> {
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let detail_bus = DetailActionBus::new();
+    let detail_bus = DetailActionBus::default();
 
     let app: Box<dyn Widget> = PacketListDelegate::new(
         rx,

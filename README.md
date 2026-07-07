@@ -143,6 +143,33 @@ Options:
   -V, --version
           Print version
 ```
+### Filter state configuration
+
+`inspect` supports connection/flow-scoped state for Roto filters (`state_get/state_put/state_delete`).
+
+Configure limits and TTL in `config.toml`:
+
+```toml
+[filter_state]
+enabled = true
+ttl_sec = 60
+max_entry_bytes = 262144
+max_connection_bytes = 2097152
+max_filter_bytes = 16777216
+max_total_bytes = 134217728
+sweep_interval_sec = 5
+```
+
+Field meanings:
+
+- `enabled`: enable/disable state storage
+- `ttl_sec`: expiration time for state entries
+- `max_entry_bytes`: max bytes per single key
+- `max_connection_bytes`: max bytes per connection/flow scope
+- `max_filter_bytes`: max bytes per filter namespace
+- `max_total_bytes`: global max bytes across all state entries
+- `sweep_interval_sec`: expiration sweep interval
+
 
 ## Output
 Capture data is written under `capture/<timestamp>/`.

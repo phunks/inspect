@@ -41,20 +41,6 @@ CREATE TABLE IF NOT EXISTS responses (
     body_save_limit INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS filter_exec_stats (
-    id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    flow_key TEXT NOT NULL,
-    phase TEXT NOT NULL,
-    filter_name TEXT NOT NULL,
-    elapsed_us INTEGER NOT NULL,
-    result_code INTEGER NOT NULL,
-    state_read_bytes INTEGER NOT NULL DEFAULT 0,
-    state_write_bytes INTEGER NOT NULL DEFAULT 0,
-    state_items INTEGER NOT NULL DEFAULT 0,
-    evicted_items INTEGER NOT NULL DEFAULT 0,
-    limit_hit INTEGER NOT NULL DEFAULT 0
-);
 
 -- CREATE INDEX IF NOT EXISTS idx_filter_phase_stats_id_phase
 --     ON filter_phase_stats(id, phase);
@@ -65,3 +51,36 @@ CREATE TABLE IF NOT EXISTS filter_exec_stats (
 -- CREATE INDEX IF NOT EXISTS idx_filter_exec_stats_filter_phase
 --     ON filter_exec_stats(filter_name, phase);
 
+CREATE TABLE IF NOT EXISTS filters (
+    filter_id TEXT PRIMARY KEY,
+    source_kind TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    explicit_id TEXT,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    valid INTEGER NOT NULL,
+    priority INTEGER,
+    script_hash TEXT NOT NULL,
+    script_len INTEGER NOT NULL,
+    program_kind TEXT,
+    last_error TEXT,
+    loaded_at TEXT
+);
+
+
+CREATE TABLE IF NOT EXISTS filter_exec_stats (
+    id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    flow_key TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    filter_id TEXT,
+    filter_name TEXT NOT NULL,
+    elapsed_us INTEGER NOT NULL,
+    result_code INTEGER NOT NULL,
+    state_read_bytes INTEGER NOT NULL DEFAULT 0,
+    state_write_bytes INTEGER NOT NULL DEFAULT 0,
+    state_items INTEGER NOT NULL DEFAULT 0,
+    evicted_items INTEGER NOT NULL DEFAULT 0,
+    limit_hit INTEGER NOT NULL DEFAULT 0
+);

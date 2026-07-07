@@ -73,6 +73,7 @@ use crate::mitm::flow::http_types::{
     ResponseDispatchInput,
     ResponseFilterDispatchOutput
 };
+use crate::mitm::flow::state_store::FilterStateLimits;
 use crate::mitm::flow::tls_metadata::{
     tls_sni_from_extensions,
     upstream_tls_info_from_extensions
@@ -118,6 +119,8 @@ pub struct FlowDispatcherConfig {
     pub upstream_proxy: Option<ProxyAddress>,
     pub body_save_limit_bytes: Option<usize>,
     pub body_omit_content_types: Arc<[String]>,
+    pub filter_state_enabled: bool,
+    pub filter_state_limits: FilterStateLimits,
 }
 
 #[derive(Clone)]
@@ -142,7 +145,13 @@ impl FlowDispatcher {
         config: FlowDispatcherConfig,
     ) -> Self {
         Self {
-            filters: FlowFilterRuntime::new(filters, capture.clone()),
+            filters: FlowFilterRuntime::new(
+                filters,
+                capture.clone(),
+                config.filter_state_enabled.then(|| {
+                    crate::mitm::flow::state_store::FilterStateStore::new(config.filter_state_limits.clone())
+                }),
+            ),
             capture,
             events,
             upstream_client,

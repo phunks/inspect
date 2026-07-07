@@ -7,7 +7,7 @@ pub mod generator;
 pub mod generated;
 pub mod editor;
 pub mod engine;
-
+pub mod runtime_state;
 
 pub use manager::FilterManager;
 pub use runtime::{CompiledFilter, CompiledFilterSet};
@@ -18,11 +18,7 @@ pub use engine::diff::{
     DiffPathSegment,
     DiffSource,
 };
-// pub use engine::json::capture::{
-//     json_patch_operations_to_rfc6902_json,
-//     write_json_patch_comments,
-//     GeneratedJsonPatchOperation,
-// };
+
 pub use engine::json::patch::{
     apply_json_merge_patch_json,
     apply_json_patch_rfc6902_json,

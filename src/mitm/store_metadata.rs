@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
-use sqlx::{Executor, Sqlite};
+use sqlx::{Executor, Row, Sqlite};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
 use rama::telemetry::tracing;
@@ -62,17 +62,41 @@ pub struct FilterExecStatMetadata {
     pub seq: i64,
     pub flow_key: String,
     pub phase: String,
+    pub filter_id: Option<String>,
     pub filter_name: String,
     pub elapsed_us: i64,
     pub result_code: i64,
+    pub state_read_bytes: i64,
+    pub state_write_bytes: i64,
+    pub state_items: i64,
+    pub evicted_items: i64,
+    pub limit_hit: i64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct FilterStatusMetadata {
+    pub filter_id: String,
+    pub source_kind: String,
+    pub file_name: String,
+    pub path: String,
+    pub explicit_id: Option<String>,
+    pub name: String,
+    pub enabled: bool,
+    pub valid: bool,
+    pub priority: Option<i32>,
+    pub script_hash: String,
+    pub script_len: i64,
+    pub program_kind: Option<String>,
+    pub last_error: Option<String>,
+    pub loaded_at: String,
+}
 
 #[derive(Debug)]
 pub enum RequestResponseEvent {
     Request(RequestMetadata),
     Response(ResponseMetadata),
     FilterExecStat(FilterExecStatMetadata),
+    FilterStatus(FilterStatusMetadata),
 }
 
 #[derive(Clone, Debug)]
@@ -151,15 +175,43 @@ impl DbState {
         )
             .execute(&db_pool)
             .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS filters (
+                filter_id TEXT PRIMARY KEY,
+                source_kind TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                explicit_id TEXT,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                valid INTEGER NOT NULL,
+                priority INTEGER,
+                script_hash TEXT NOT NULL,
+                script_len INTEGER NOT NULL,
+                program_kind TEXT,
+                last_error TEXT,
+                loaded_at TEXT
+            )"
+        )
+            .execute(&db_pool)
+            .await?;
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS filter_exec_stats (
                 id TEXT NOT NULL,
                 seq INTEGER NOT NULL,
                 flow_key TEXT NOT NULL,
                 phase TEXT NOT NULL,
+                filter_id TEXT,
                 filter_name TEXT NOT NULL,
                 elapsed_us INTEGER NOT NULL,
-                result_code INTEGER NOT NULL
+                result_code INTEGER NOT NULL,
+                state_read_bytes INTEGER NOT NULL DEFAULT 0,
+                state_write_bytes INTEGER NOT NULL DEFAULT 0,
+                state_items INTEGER NOT NULL DEFAULT 0,
+                evicted_items INTEGER NOT NULL DEFAULT 0,
+                limit_hit INTEGER NOT NULL DEFAULT 0
             )"
         )
             .execute(&db_pool)
@@ -187,6 +239,11 @@ impl DbState {
                     RequestResponseEvent::FilterExecStat(metadata) => {
                         if let Err(e) = insert_filter_exec_stat(&pool_clone, &metadata).await {
                             tracing::error!("Failed to insert filter_exec_stat: {:?}", e);
+                        }
+                    }
+                    RequestResponseEvent::FilterStatus(metadata) => {
+                        if let Err(e) = insert_filter_status(&pool_clone, &metadata).await {
+                            tracing::error!("Failed to insert filter status: {:?}", e);
                         }
                     }
                 }
@@ -286,16 +343,67 @@ where
 {
     sqlx::query(
         "INSERT INTO filter_exec_stats (
-            id, seq, flow_key, phase, filter_name, elapsed_us, result_code
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            id, seq, flow_key, phase, filter_id, filter_name, elapsed_us, result_code,
+            state_read_bytes, state_write_bytes, state_items, evicted_items, limit_hit
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
         .bind(&metadata.id)
         .bind(metadata.seq)
         .bind(&metadata.flow_key)
         .bind(&metadata.phase)
+        .bind(&metadata.filter_id)
         .bind(&metadata.filter_name)
         .bind(metadata.elapsed_us)
         .bind(metadata.result_code)
+        .bind(metadata.state_read_bytes)
+        .bind(metadata.state_write_bytes)
+        .bind(metadata.state_items)
+        .bind(metadata.evicted_items)
+        .bind(metadata.limit_hit)
+        .execute(exec)
+        .await?;
+
+    Ok(())
+}
+
+async fn insert_filter_status<'e, E>(exec: E, metadata: &FilterStatusMetadata) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    sqlx::query(
+        "INSERT INTO filters (
+            filter_id, source_kind, file_name, path, explicit_id, name, enabled, valid,
+            priority, script_hash, script_len, program_kind, last_error, loaded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(filter_id) DO UPDATE SET
+            source_kind = excluded.source_kind,
+            file_name = excluded.file_name,
+            path = excluded.path,
+            explicit_id = excluded.explicit_id,
+            name = excluded.name,
+            enabled = excluded.enabled,
+            valid = excluded.valid,
+            priority = excluded.priority,
+            script_hash = excluded.script_hash,
+            script_len = excluded.script_len,
+            program_kind = excluded.program_kind,
+            last_error = excluded.last_error,
+            loaded_at = excluded.loaded_at"
+    )
+        .bind(&metadata.filter_id)
+        .bind(&metadata.source_kind)
+        .bind(&metadata.file_name)
+        .bind(&metadata.path)
+        .bind(&metadata.explicit_id)
+        .bind(&metadata.name)
+        .bind(metadata.enabled as i64)
+        .bind(metadata.valid as i64)
+        .bind(metadata.priority.map(i64::from))
+        .bind(&metadata.script_hash)
+        .bind(metadata.script_len)
+        .bind(&metadata.program_kind)
+        .bind(&metadata.last_error)
+        .bind(&metadata.loaded_at)
         .execute(exec)
         .await?;
 

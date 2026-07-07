@@ -843,14 +843,13 @@ fn css_declaration_property_anchor(
     source: &[u8],
 ) -> Option<String> {
     loop {
-        if node.kind() == "declaration" {
-            if let Some(property) = child_by_field_or_kind(node, source, "property", &[
-                "property_name",
-                "plain_value",
-                "identifier",
-            ]) {
-                return property.utf8_text(source).ok().map(|value| value.trim().to_string());
-            }
+        if node.kind() == "declaration"
+            && let Some(property) = child_by_field_or_kind(node, source, "property", &[
+            "property_name",
+            "plain_value",
+            "identifier",
+        ]) {
+            return property.utf8_text(source).ok().map(|value| value.trim().to_string());
         }
 
         node = node.parent()?;

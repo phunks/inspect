@@ -357,6 +357,9 @@ req.path()
 req.query()
 req.content_type()
 req.body_text()
+req.state_get("key")
+req.state_put("key", "value")
+req.state_delete("key")
 ```
 
 Example:
@@ -376,6 +379,36 @@ derive one, otherwise an empty string.
 
 `req.body_text()` returns the request body decoded as text when available, otherwise
 an empty string. Non-text or undecodable bodies are not exposed through this text API.
+
+State API behavior:
+
+- `req.state_get("key")` returns the stored value as text.
+- If the key does not exist, it returns an empty string.
+- `req.state_put("key", "value")` returns `true` on success, `false` on limit/rejection.
+- `req.state_delete("key")` returns `true` if the key existed and was deleted.
+- State is scoped to connection/flow context and filter name, and is bounded by TTL and configured limits.
+- Values are stored as bytes internally; the current Roto API exposes text only.
+
+Example (request-side counter):
+
+```rust
+fn request_action(req: Request) -> RequestAction {
+    let current = req.state_get("counter");
+
+    if current == "" {
+        let _ok = req.state_put("counter", "1");
+        return RequestAction.pass().mark("counter-init");
+    }
+
+    if current == "1" {
+        let _ok = req.state_put("counter", "2");
+        return RequestAction.pass().mark("counter-step2");
+    }
+
+    RequestAction.pass()
+}
+```
+
 
 The underlying Rust filter model contains additional request data such as ID,
 headers, raw body bytes, and TLS SNI, but those fields are not all exposed as Roto
@@ -403,6 +436,9 @@ res.status()
 res.version()
 res.content_type()
 res.body_text()
+res.state_get("key")
+res.state_put("key", "value")
+res.state_delete("key")
 ```
 
 Example:
@@ -415,6 +451,25 @@ fn response_action(res: Response) -> ResponseAction {
             .set_header("x-inspect-roto", "matched")
     } else {
         ResponseAction.pass()
+    }
+}
+```
+
+State API behavior in response phase is the same as request phase and uses the same
+connection/flow+filter scoped state namespace.
+
+Example (read state written in request phase):
+
+```rust
+fn response_action(res: Response) -> ResponseAction {
+    let phase = res.state_get("phase");
+
+    if phase == "" {
+        let _ok = res.state_put("phase", "response");
+        ResponseAction.pass().mark("state-init")
+    } else {
+        let _ok = res.state_delete("phase");
+        ResponseAction.pass().mark("state-clear")
     }
 }
 ```
@@ -952,7 +1007,7 @@ ResponseAction.pass()
     .set_body_text("new response body\n", "text/plain; charset=utf-8")
 ```
 
-When a body is rewritten, Inspect removes headers that may no longer be valid:
+When a body is rewritten, Inspect removes or updates headers that may no longer be valid:
 
 ```text
 content-length
@@ -960,6 +1015,9 @@ content-encoding
 etag
 content-md5
 ```
+
+`content-encoding` handling differs between request and response rewrites; see
+the content-encoded bodies section below.
 
 ### Why these headers are removed
 
@@ -973,6 +1031,31 @@ After rewriting the body:
 - `content-md5` may no longer match the body
 
 Keeping them can cause browser/protocol errors, corrupted rendering, or cache/integrity mismatches.
+
+### Content-encoded bodies
+
+For content-encoded bodies such as `gzip`, `br`, `zstd`, and `deflate`, Inspect
+attempts to decode the body before exposing it through `req.body_text()` or
+`res.body_text()`. Text rewrite helpers such as `replace_body_text_once()`,
+`replace_body_text_all()`, and `replace_body_regex()` operate on that decoded text.
+
+Request and response rewrites intentionally differ after a decoded body is changed.
+
+For response rewrites, Inspect currently sends the rewritten body back to the client
+as plain, uncompressed bytes and removes `content-encoding`. This avoids returning a
+body whose bytes no longer match the original compression metadata.
+
+For request rewrites, Inspect attempts to preserve the original `content-encoding`
+when forwarding the request upstream. If the original request body used an encoding
+such as `gzip`, Inspect rewrites the decoded text and then recompresses the rewritten
+body using the original encoding before sending it to the server. If recompression
+fails or the original encoding is unsupported, Inspect falls back to sending plain
+bytes and removes `content-encoding`.
+
+After a body rewrite, Inspect removes framing/integrity headers such as
+`content-length`, `etag`, and `content-md5`. It does not attempt to update
+application-specific checksums, signatures, authorization headers, or custom hash
+headers. Servers may reject rewritten requests when such protections are present.
 
 ### Is `content-length` recalculated?
 
@@ -988,13 +1071,14 @@ The HTTP server/client stack may still frame the response correctly using the pr
 
 However, from the filter/capture point of view, rewritten bodies should be treated as having no explicit `content-length` unless a later layer adds one.
 
+
 TODO:
 
 - [ ] Decide whether Inspect should explicitly set a new `content-length` after body rewrite.
 - [ ] Add tests for HTTP/1.1 rewritten body framing.
 - [ ] Add tests for HTTP/2 rewritten body framing.
 - [ ] Document capture behavior if lower layers add or omit `content-length`.
-- [ ] Consider preserving compression by recompressing rewritten bodies, but only as an explicit future feature.
+- [ ] Consider explicit per-phase compression rewrite policies for request and response bodies.
 
 ### Content type
 
@@ -1442,6 +1526,8 @@ This is a Roto JIT cleanup/drop issue. Plain equality checks such as
 - [ ] Add CLI option for filters directory.
 - [ ] Add reload status/errors to TUI.
 - [ ] Consider preserving compression by recompressing rewritten bodies, but only as an explicit future feature.
+- [ ] Add binary-aware state APIs (e.g. base64/bytes helpers) for non-text protocols.
+- [ ] Add explicit per-script state namespace controls if needed.
 
 ## Security model
 

@@ -15,15 +15,35 @@ TypedFunc<NoCtx, fn(Val<RotoResponseData>) -> Val<RotoResponseActionData>>;
 
 #[derive(Clone, Debug)]
 pub struct FilterDefinition {
+    pub id: String,
+    pub source_kind: FilterSourceKind,
+    pub file_name: String,
+    pub script_hash: String,
     pub path: PathBuf,
     pub source: String,
     pub metadata: FilterMetadata,
     pub script: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilterSourceKind {
+    Persistent,
+    Generated,
+}
+
+impl FilterSourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Persistent => "persistent",
+            Self::Generated => "generated",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct FilterMetadata {
+    pub id: Option<String>,
     pub name: Option<String>,
     pub enabled: bool,
     pub priority: Option<i32>,
@@ -33,6 +53,7 @@ pub struct FilterMetadata {
 impl Default for FilterMetadata {
     fn default() -> Self {
         Self {
+            id: None,
             name: None,
             enabled: true,
             priority: None,

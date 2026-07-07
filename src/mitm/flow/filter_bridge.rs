@@ -17,6 +17,8 @@ use crate::filters::{
 };
 use crate::mitm::flow::FlowMark;
 use crate::mitm::flow::capture_service::version_to_string;
+use crate::mitm::flow::body_encoding::decoded_body_or_raw;
+
 
 pub(crate) fn flow_marks_from_request_action(action: &RequestAction) -> Vec<FlowMark> {
     let mut marks = Vec::new();
@@ -117,6 +119,8 @@ pub(crate) fn build_filter_request(
     req_body_bytes: &Bytes,
     tls_sni: Option<String>,
 ) -> FilterRequest {
+    let body_text_bytes = decoded_body_or_raw(&parts.headers, req_body_bytes);
+
     FilterRequest {
         id: id.to_string(),
         seq,
@@ -130,7 +134,7 @@ pub(crate) fn build_filter_request(
         headers: filter_headers_from_header_map(&parts.headers),
         body: FilterBody {
             bytes: req_body_bytes.to_vec(),
-            text: std::str::from_utf8(req_body_bytes).ok().map(str::to_string),
+            text: std::str::from_utf8(body_text_bytes.as_ref()).ok().map(str::to_string),
             content_type: normalized_content_type(&parts.headers),
             encoding: parts
                 .headers
@@ -149,13 +153,15 @@ pub(crate) fn build_filter_response(
     upstream_status: Option<u16>,
     elapsed_ms: i64,
 ) -> FilterResponse {
+    let body_text_bytes = decoded_body_or_raw(&parts.headers, res_body_bytes);
+
     FilterResponse {
         status: parts.status.as_u16(),
         version: version_to_string(parts.version),
         headers: filter_headers_from_header_map(&parts.headers),
         body: FilterBody {
             bytes: res_body_bytes.to_vec(),
-            text: std::str::from_utf8(res_body_bytes).ok().map(str::to_string),
+            text: std::str::from_utf8(body_text_bytes.as_ref()).ok().map(str::to_string),
             content_type: normalized_content_type(&parts.headers),
             encoding: parts
                 .headers

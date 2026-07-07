@@ -64,10 +64,11 @@ use crate::mitm::flow::{
     FlowEventPublisher,
     UpstreamFlowClient
 };
+use crate::mitm::flow::state_store::FilterStateLimits;
 use crate::mitm::flow::websocket::dispatch_websocket_handshake;
 use crate::mitm::store_metadata::DbState;
 use crate::mitm::tls_sni::ConnectSniRouterService;
-use crate::options::{ProxyMode, UaProfile};
+use crate::options::{FilterStateConfig, ProxyMode, UaProfile};
 
 const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 // const WEBSOCKET_NOT_CAPTURED_MESSAGE: &str =
@@ -176,6 +177,7 @@ pub async fn mitm_proxy_main(
     outbound_http_pool: Option<OutboundHttpClientPool>,
     filter_manager: FilterManager,
     flow_events: FlowEventPublisher,
+    filter_state: FilterStateConfig,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
@@ -238,6 +240,14 @@ pub async fn mitm_proxy_main(
             upstream_proxy: upstream_proxy.clone(),
             body_save_limit_bytes,
             body_omit_content_types: body_omit_content_types.clone(),
+            filter_state_enabled: filter_state.enabled,
+            filter_state_limits: FilterStateLimits {
+                ttl: Duration::from_secs(filter_state.ttl_sec),
+                max_entry_bytes: filter_state.max_entry_bytes,
+                max_connection_bytes: filter_state.max_connection_bytes,
+                max_filter_bytes: filter_state.max_filter_bytes,
+                max_total_bytes: filter_state.max_total_bytes,
+            },
         },
     );
 

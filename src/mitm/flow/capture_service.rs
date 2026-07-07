@@ -3,17 +3,37 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use flate2::read;
-use http::{HeaderMap, HeaderValue, StatusCode, Version};
+use http::{HeaderMap, StatusCode, Version};
 use serde_json::{json, Value};
 use std::io;
-use std::io::Read;
 use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::mitm::capture::CapturePaths;
+use crate::mitm::flow::body_encoding::decoded_body_or_raw;
 use crate::mitm::flow::filter_bridge::normalized_content_type;
 use crate::mitm::store_metadata::{DbState, FilterExecStatMetadata, RequestMetadata, RequestResponseEvent, ResponseMetadata};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FilterResourceStats {
+    pub state_read_bytes: i64,
+    pub state_write_bytes: i64,
+    pub state_items: i64,
+    pub evicted_items: i64,
+    pub limit_hit: bool,
+}
+
+impl FilterResourceStats {
+    pub fn merge(self, rhs: Self) -> Self {
+        Self {
+            state_read_bytes: self.state_read_bytes + rhs.state_read_bytes,
+            state_write_bytes: self.state_write_bytes + rhs.state_write_bytes,
+            state_items: rhs.state_items,
+            evicted_items: self.evicted_items + rhs.evicted_items,
+            limit_hit: self.limit_hit || rhs.limit_hit,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct CaptureService {
@@ -329,15 +349,18 @@ impl CaptureService {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_filter_exec_stat(
         &self,
         id: &str,
         seq: u64,
         flow_key: &str,
         phase: &str,
+        filter_id: Option<&str>,
         filter_name: &str,
         elapsed_us: i64,
         result_code: i64,
+        resource_stats: FilterResourceStats,
     ) {
         self.dbstate
             .event_sender
@@ -346,9 +369,15 @@ impl CaptureService {
                 seq: seq as i64,
                 flow_key: flow_key.to_string(),
                 phase: phase.to_string(),
+                filter_id: filter_id.map(str::to_string),
                 filter_name: filter_name.to_string(),
                 elapsed_us,
                 result_code,
+                state_read_bytes: resource_stats.state_read_bytes,
+                state_write_bytes: resource_stats.state_write_bytes,
+                state_items: resource_stats.state_items,
+                evicted_items: resource_stats.evicted_items,
+                limit_hit: i64::from(resource_stats.limit_hit),
             }))
             .unwrap_or_else(|err| {
                 tracing::error!("error sending filter exec stat event: {err:?}");
@@ -441,46 +470,6 @@ pub struct ResponseCommit {
     pub version: String,
 }
 
-fn decode_reader(header_value: &HeaderValue, bytes: &[u8]) -> io::Result<Bytes> {
-    let mut buf = Vec::new();
-    let enc = header_value
-        .to_str()
-        .unwrap_or_default()
-        .split(',')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-
-    let res = match enc.as_str() {
-        "gzip" => read::GzDecoder::new(bytes).read_to_end(&mut buf),
-        "deflate" => read::DeflateDecoder::new(bytes).read_to_end(&mut buf),
-        "br" => {
-            let mut decoder = brotli::Decompressor::new(bytes, 4096);
-            decoder.read_to_end(&mut buf)
-        }
-        "zstd" => match zstd::stream::decode_all(bytes) {
-            Ok(decoded) => {
-                buf = decoded;
-                Ok(buf.len())
-            }
-            Err(err) => Err(io::Error::new(io::ErrorKind::InvalidData, err)),
-        },
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported content-encoding: {enc}"),
-        )),
-    };
-
-    match res {
-        Ok(_) => Ok(Bytes::from(buf)),
-        Err(err) => {
-            tracing::warn!("decode error: {err}");
-            Ok(Bytes::copy_from_slice(bytes))
-        }
-    }
-}
-
 fn body_for_storage(headers: &HeaderMap, body_bytes: &Bytes) -> Bytes {
     body_for_storage_by_headers(headers, body_bytes)
 }
@@ -490,32 +479,7 @@ fn request_body_for_storage(headers: &HeaderMap, body_bytes: &Bytes) -> Bytes {
 }
 
 fn body_for_storage_by_headers(headers: &HeaderMap, body_bytes: &Bytes) -> Bytes {
-    if let Some(enc) = headers.get(http::header::CONTENT_ENCODING) {
-        return decode_reader(enc, body_bytes).unwrap_or_else(|err| {
-            tracing::warn!("failed to decode body for storage: {err}");
-            body_bytes.clone()
-        });
-    }
-
-    decode_body_by_magic_number(body_bytes).unwrap_or_else(|| body_bytes.clone())
-}
-
-fn decode_body_by_magic_number(body_bytes: &Bytes) -> Option<Bytes> {
-    let bytes = body_bytes.as_ref();
-
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut buf = Vec::new();
-
-        return match read::GzDecoder::new(bytes).read_to_end(&mut buf) {
-            Ok(_) => Some(Bytes::from(buf)),
-            Err(err) => {
-                tracing::warn!("failed to decode gzip body by magic number: {err}");
-                None
-            }
-        }
-    }
-
-    None
+    decoded_body_or_raw(headers, body_bytes)
 }
 
 fn body_file_name(base: &str, headers: &HeaderMap) -> String {
