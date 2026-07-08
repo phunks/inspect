@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing::info;
 use inspect::filters::FilterManager;
@@ -15,7 +16,8 @@ use inspect::mitm::capture::CapturePaths;
 use inspect::mitm::dynamic_ca::generate_default_ca_files;
 use inspect::options::{Opt, Logger};
 use inspect::mitm::flow::{FlowEventDispatcher, FlowEventPublisher, TuiSink};
-use inspect::mitm::store_metadata::DbState;
+use inspect::mitm::store_metadata::DbState as StoreDbState;
+use inspect::tui::ReadDbState;
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
@@ -43,8 +45,9 @@ async fn main() -> Result<(), AnyError> {
 
         let (_tx, rx) = mpsc::channel(TUI_EVENT_BUFFER);
         let (quit_tx, _quit_rx) = watch::channel(false);
+        let tui_dbstate = Arc::new(ReadDbState::new_for_paths(paths).await.expect("tui dbstate"));
 
-        if let Err(e) = run_tui(rx, quit_tx, time_display, TuiMode::Viewer).await {
+        if let Err(e) = run_tui(rx, quit_tx, time_display, TuiMode::Viewer, tui_dbstate).await {
             eprintln!("tui error: {e}");
         }
 
@@ -52,6 +55,10 @@ async fn main() -> Result<(), AnyError> {
     }
 
     let service_port = format!("{}:{}", opt.ip, opt.port);
+
+    let capture_paths = CapturePaths::initialize_for_process()?.clone();
+    let store_dbstate = StoreDbState::new_for_paths(&capture_paths).await.expect("store dbstate");
+    let tui_dbstate = Arc::new(ReadDbState::from_pool(store_dbstate.db_pool.clone()));
 
     let capture_paths = CapturePaths::initialize_for_process()?;
 
@@ -83,9 +90,9 @@ async fn main() -> Result<(), AnyError> {
             (name, OutboundHttpPoolConfig::from(config))
         })
         .collect::<HashMap<_, _>>();
-    let dbstate = DbState::new().await.expect("dbstate");
+
     let filter_manager = FilterManager::new("./filters")
-        .with_event_sender(dbstate.event_sender.clone())
+        .with_event_sender(store_dbstate.event_sender.clone())
         .with_filter_dir(capture_paths.generated_filters_dir.clone());
     let (quit_tx, quit_rx) = watch::channel(false);
 
@@ -110,6 +117,8 @@ async fn main() -> Result<(), AnyError> {
             .await;
     });
 
+    let proxy_capture_paths = capture_paths.clone();
+    let proxy_store_dbstate = store_dbstate.clone();
     let proxy_task = tokio::spawn(async move {
         if let Err(e) = mitm_proxy_main(
             upstream_proxy,
@@ -125,13 +134,15 @@ async fn main() -> Result<(), AnyError> {
             filter_manager,
             flow_events,
             filter_state,
+            proxy_store_dbstate,
+            proxy_capture_paths,
             quit_rx,
         ).await {
             eprintln!("proxy error: {e}");
         }
     });
 
-    if let Err(e) = run_tui(rx, quit_tx.clone(), time_display, TuiMode::Capture).await {
+    if let Err(e) = run_tui(rx, quit_tx.clone(), time_display, TuiMode::Capture, tui_dbstate).await {
         eprintln!("tui error: {e}");
     }
 

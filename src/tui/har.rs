@@ -6,6 +6,7 @@ use tuie::widget::{WidgetId, WidgetMethods};
 use crate::mitm::capture::CapturePaths;
 use crate::mitm::har::export_current_capture_har;
 use crate::tui::button::Button;
+use crate::tui::theme;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HarExportState {
@@ -158,7 +159,7 @@ pub fn open_har_export_popup() {
     let mut status_text_id = WidgetId::EMPTY;
 
     let body = Pane::new()
-        .style(Style::new().bg(Color::grey256(3)).blend(95))
+        .style(Style::new().bg(theme::panel_inner_bg()))
         .width(72)
         .vertical()
         .padding(Spacing::balanced(2))

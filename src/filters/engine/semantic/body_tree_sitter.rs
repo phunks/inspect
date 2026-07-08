@@ -430,64 +430,6 @@ fn extract_html_tree_sitter_anchor(
     })
 }
 
-// #[allow(unused)]
-// fn extract_javascript_rewrite_intent(original: &str, edited: &str) -> Option<BodyRewriteIntent> {
-//     if let Some((property, old_value, new_value)) =
-//         find_changed_quoted_property_value(original, edited)
-//     {
-//         return Some(BodyRewriteIntent {
-//             language: BodyLanguage::JavaScript,
-//             anchor: BodyAnchor::ContainsAll(vec![property.clone(), old_value.clone()]),
-//             operation: BodyRewriteOperation::ReplaceText {
-//                 old: old_value,
-//                 new: new_value,
-//             },
-//             confidence: RewriteConfidence::High,
-//         });
-//     }
-//
-//     extract_text_rewrite_intent(BodyLanguage::JavaScript, original, edited)
-// }
-
-// #[allow(unused)]
-// fn extract_css_rewrite_intent(original: &str, edited: &str) -> Option<BodyRewriteIntent> {
-//     if let Some((property, old_value, new_value)) = find_changed_css_declaration(original, edited) {
-//         return Some(BodyRewriteIntent {
-//             language: BodyLanguage::Css,
-//             anchor: BodyAnchor::ContainsAll(vec![property, old_value.clone()]),
-//             operation: BodyRewriteOperation::ReplaceText {
-//                 old: old_value,
-//                 new: new_value,
-//             },
-//             confidence: RewriteConfidence::High,
-//         });
-//     }
-//
-//     extract_text_rewrite_intent(BodyLanguage::Css, original, edited)
-// }
-
-// #[allow(unused)]
-// fn extract_html_rewrite_intent(original: &str, edited: &str) -> Option<BodyRewriteIntent> {
-//     if let Some(replacement) = single_text_replacement(original, edited) {
-//         let old_text = replacement.old;
-//         let new_text = replacement.new;
-//         return Some(BodyRewriteIntent {
-//             language: BodyLanguage::Html,
-//             anchor: BodyAnchor::AstNode {
-//                 kind: "document".to_string(),
-//                 text_fragment: old_text.clone(),
-//             },
-//             operation: BodyRewriteOperation::ReplaceText {
-//                 old: old_text,
-//                 new: new_text,
-//             },
-//             confidence: RewriteConfidence::Medium,
-//         });
-//     }
-//
-//     extract_text_rewrite_intent(BodyLanguage::Html, original, edited)
-// }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TextReplacement {
     start: usize,
@@ -571,71 +513,6 @@ fn common_suffix_len(left: &str, right: &str) -> usize {
         .map(|((idx, _), _)| left.len() - idx)
         .last()
         .unwrap_or(0)
-}
-
-
-// #[allow(unused)]
-// fn find_changed_quoted_property_value(
-//     original: &str,
-//     edited: &str,
-// ) -> Option<(String, String, String)> {
-//     let replacement = single_text_replacement(original, edited)?;
-//     let old_text = replacement.old;
-//     let new_text = replacement.new;
-//     if !looks_like_quoted_string(&old_text) || !looks_like_quoted_string(&new_text) {
-//         return None;
-//     }
-//
-//     let property = property_name_before_value(original, &old_text)?;
-//
-//     Some((property, old_text, new_text))
-// }
-
-fn property_name_before_value(source: &str, old_value: &str) -> Option<String> {
-    let value_idx = source.find(old_value)?;
-    let before = &source[..value_idx];
-    let before = before.trim_end();
-
-    let separator_idx = before.rfind([':', '='])?;
-    let candidate = before[..separator_idx]
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '$'))
-        .next_back()?
-        .trim();
-
-    if candidate.is_empty() {
-        None
-    } else {
-        Some(candidate.to_string())
-    }
-}
-
-// #[allow(unused)]
-// fn find_changed_css_declaration(original: &str, edited: &str) -> Option<(String, String, String)> {
-//     let replacement = single_text_replacement(original, edited)?;
-//     let old_text = replacement.old;
-//     let new_text = replacement.new;
-//     let value_idx = original.find(&old_text)?;
-//     let before = original[..value_idx].trim_end();
-//     let colon_idx = before.rfind(':')?;
-//
-//     let property = before[..colon_idx]
-//         .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
-//         .next_back()?
-//         .trim();
-//
-//     if property.is_empty() {
-//         return None;
-//     }
-//
-//     Some((property.to_string(), old_text, new_text))
-// }
-
-fn looks_like_quoted_string(value: &str) -> bool {
-    let value = value.trim();
-
-    value.len() >= 2
-        && ((value.starts_with('"') && value.ends_with('"'))
-        || (value.starts_with('\'') && value.ends_with('\'')))
 }
 
 fn stable_text_anchor(text: &str) -> Option<String> {

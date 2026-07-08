@@ -4,6 +4,7 @@ use chord_macro::chord;
 use tuie::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
+use crate::tui::theme;
 
 const HELP_TEXT: &str = "\
 Key bindings
@@ -26,6 +27,7 @@ Navigation
 Packet
   Enter             open details
   S                 export HAR
+  i                 show filter stats
 
 Search
   f                 filter packets
@@ -137,7 +139,7 @@ fn open_help_popup() {
     let mut scroll_id = WidgetId::EMPTY;
 
     let body = Pane::new()
-        .style(Style::new().bg(Color::grey256(3)).blend(95))
+        .style(Style::new().bg(theme::panel_inner_bg()))
         .width(64)
         .height(24)
         .vertical()

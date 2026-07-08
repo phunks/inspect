@@ -4,6 +4,8 @@ mod search;
 mod button;
 mod focus_pane;
 mod editor_pane;
+mod filter_stats;
+mod theme;
 pub mod time;
 pub mod tab;
 mod segmented_control;
@@ -22,7 +24,6 @@ use tokio::sync::{
         self, UnboundedReceiver, UnboundedSender
     }, watch};
 use tuie::prelude::*;
-use read_metadata::DbState;
 use crate::tui::search::{
     open_full_text_search_popup,
     open_search_popup,
@@ -53,6 +54,9 @@ use crate::tui::tab::{
     DetailTabSelection
 };
 use crate::tui::editor_pane::open_edit_popup;
+use crate::tui::filter_stats::open_filter_stats_popup;
+use read_metadata::DbState;
+pub use read_metadata::DbState as ReadDbState;
 
 const MAX_ROWS: usize = 10_000;
 const TRIM_ROWS: usize = 1_000;
@@ -349,6 +353,10 @@ pub enum UiEvent {
         row: PacketRowEditContext,
         detail: DetailEditState,
     },
+    OpenFilterStats {
+        dbstate: Arc<DbState>,
+        snapshot: read_metadata::FilterStatsSnapshot,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -506,6 +514,7 @@ impl PacketListDelegate {
         detail_bus: DetailActionBus,
         time_display: TimeDisplayConfig,
         tui_mode: TuiMode,
+        dbstate: Arc<DbState>,
     ) -> Box<Self> {
         let row_clicks = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let search_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -514,7 +523,6 @@ impl PacketListDelegate {
         let full_text_search_history = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let capture_flows_dir = CapturePaths::new().flows_dir;
         let mut time_formatter = TimeFormatter::new(time_display);
-        let dbstate = Arc::new(DbState::new().await.expect("dbstate"));
 
         let rows = match dbstate.select_packet_summaries().await {
             Ok(summaries) if !summaries.is_empty() => summaries
@@ -1435,6 +1443,35 @@ impl PacketListDelegate {
         open_har_export_popup();
     }
 
+    fn open_filter_stats(&mut self) {
+        let db = self.dbstate.clone();
+        let detail_tx = self.detail_tx.clone();
+
+        tokio::spawn(async move {
+            match db.select_filter_stats().await {
+                Ok(snapshot) => {
+                    let _ = detail_tx.send(UiEvent::OpenFilterStats {
+                        dbstate: db,
+                        snapshot,
+                    });
+                }
+                Err(err) => {
+                    let _ = detail_tx.send(UiEvent::ShowDetail {
+                        detail: DetailContent {
+                            request_meta: format!("filter stats error: {err:#}"),
+                            ..Default::default()
+                        },
+                        highlight_query: None,
+                        tab_selection: Some(DetailTabSelection {
+                            primary_tab: DetailPrimaryTabSelection::Info,
+                            message_part: DetailMessagePartSelection::Meta,
+                        }),
+                    });
+                }
+            }
+        });
+    }
+
     fn poll_search_requests(&mut self) {
         let requests = {
             let mut search_requests = self.search_requests.lock();
@@ -1735,6 +1772,12 @@ impl DelegateWidget for PacketListDelegate {
                 self.open_har_export_dialog();
                 return InputResult::Handled;
             }
+            // filter stats shortcut
+            chord!(Char('i')) if queue.is_unhandled() => {
+                queue.next();
+                self.open_filter_stats();
+                return InputResult::Handled;
+            }
             // generated filter editor shortcut
             chord!(Char('E')) if queue.is_unhandled() => {
                 queue.next();
@@ -1831,6 +1874,10 @@ impl RootPane {
                 }
                 UiEvent::OpenEdit { row, detail } => {
                     open_edit_popup(row, detail);
+                    tuie::dirty_layout();
+                }
+                UiEvent::OpenFilterStats { dbstate, snapshot } => {
+                    open_filter_stats_popup(dbstate, snapshot);
                     tuie::dirty_layout();
                 }
             }
@@ -2002,6 +2049,7 @@ pub async fn run_tui(
     quit_tx: watch::Sender<bool>,
     time_display: TimeDisplayConfig,
     tui_mode: TuiMode,
+    dbstate: Arc<DbState>,
 ) -> anyhow::Result<()> {
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
     let detail_bus = DetailActionBus::default();
@@ -2012,6 +2060,7 @@ pub async fn run_tui(
         detail_bus.clone(),
         time_display,
         tui_mode,
+        dbstate,
     ).await;
 
     let title = match tui_mode {

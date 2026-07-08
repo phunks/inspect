@@ -1125,7 +1125,7 @@ impl CompiledFilter {
 
 #[derive(Clone, Debug, Default)]
 pub struct CompiledFilterSet {
-    filters: Vec<CompiledFilter>,
+    pub(crate) filters: Vec<CompiledFilter>,
 }
 
 impl CompiledFilterSet {

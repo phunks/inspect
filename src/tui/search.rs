@@ -12,6 +12,7 @@ use std::sync::Arc;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use crate::tui::button::Button;
 use crate::tui::focus_pane::FocusPane;
+use crate::tui::theme;
 
 const MAX_FULL_TEXT_RESULTS_DISPLAYED: usize = 500;
 const MAX_FULL_TEXT_RESULT_LINE_CHARS: usize = 96;
@@ -187,7 +188,7 @@ pub fn open_search_popup(
     ]);
 
     let body = Pane::new()
-        .style(Style::new().bg(Color::grey256(3)).blend(95))
+        .style(Style::new().bg(theme::panel_outer_bg()))
         .width(60)
         .vertical()
         .padding(Spacing::balanced(2))
@@ -950,7 +951,7 @@ pub fn open_full_text_search_popup(
     );
 
     let body = Pane::new()
-        .style(Style::new().bg(Color::grey256(3)).blend(95))
+        .style(Style::new().bg(theme::panel_outer_bg()))
         .width(86)
         .max_height(28)
         .vertical()
@@ -979,7 +980,7 @@ pub fn open_full_text_search_popup(
                 .vertical()
                 .flex(1)
                 .bordered()
-                .border_style(Style::new().fg(Color::grey256(8)))
+                .border_style(Style::new().fg(theme::panel_inner_bg()))
                 .children([
                     results_list,
                 ]),

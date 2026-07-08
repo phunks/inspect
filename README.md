@@ -237,6 +237,7 @@ Viewer mode is read-only:
 - `f`: filter packets
 - `g`: full-text search
 - `S`: export HAR
+- `i`: show filter stats
 - `n`: jump to the next retained full-text search result
 - `p`: jump to the previous retained full-text search result
 

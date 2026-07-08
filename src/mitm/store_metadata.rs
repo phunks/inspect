@@ -2,8 +2,13 @@
 use anyhow::{Context, Result};
 use std::time::Duration;
 use serde::Serialize;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqliteSynchronous};
-use sqlx::{Executor, Row, Sqlite};
+use sqlx::sqlite::{
+    SqliteConnectOptions,
+    SqliteJournalMode,
+    SqlitePool,
+    SqliteSynchronous
+};
+use sqlx::{Acquire, Executor, Sqlite};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
 use rama::telemetry::tracing;
@@ -97,6 +102,9 @@ pub enum RequestResponseEvent {
     Response(ResponseMetadata),
     FilterExecStat(FilterExecStatMetadata),
     FilterStatus(FilterStatusMetadata),
+    FilterStatusPrune {
+        file_names: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -108,7 +116,10 @@ pub struct DbState {
 impl DbState {
     pub async fn new() -> Result<Self> {
         let paths = CapturePaths::new();
+        Self::new_for_paths(&paths).await
+    }
 
+    pub async fn new_for_paths(paths: &CapturePaths)  -> Result<Self> {
         tracing::info!("Using database url: {:?}", &paths.db_path);
         tracing::info!("Using current dir: {:?}", std::env::current_dir());
 
@@ -120,7 +131,7 @@ impl DbState {
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(Duration::from_millis(5000));
 
-        let db_pool = SqlitePoolOptions::new()
+        let db_pool: SqlitePool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(conn_opts)
             .await
@@ -246,6 +257,11 @@ impl DbState {
                             tracing::error!("Failed to insert filter status: {:?}", e);
                         }
                     }
+                    RequestResponseEvent::FilterStatusPrune { file_names } => {
+                        if let Err(e) = prune_filter_statuses(&pool_clone, &file_names).await {
+                            tracing::error!("Failed to prune filter statuses: {:?}", e);
+                        }
+                    }
                 }
             }
             tracing::info!("store DB pool shutting down");
@@ -264,6 +280,37 @@ impl DbState {
         self.db_pool.close().await;
         Ok(())
     }
+}
+
+async fn prune_filter_statuses<'e, E>(exec: E, file_names: &[String]) -> Result<()>
+where
+    E: Acquire<'e, Database = Sqlite>,
+{
+    let mut tx = exec.begin().await?;
+
+    if file_names.is_empty() {
+        sqlx::query("DELETE FROM filters")
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        let placeholders = std::iter::repeat_n("?", file_names.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut query = sqlx::query(
+            "DELETE FROM filters WHERE file_name NOT IN ({placeholders})"
+        );
+        
+        for file_name in file_names {
+            query = query.bind(file_name);
+        }
+
+        query.execute(&mut *tx).await?;
+    }
+
+    tx.commit().await?;
+
+    Ok(())
 }
 
 async fn insert_request<'e, E>(exec: E, metadata: &RequestMetadata) -> Result<()>
@@ -368,8 +415,20 @@ where
 
 async fn insert_filter_status<'e, E>(exec: E, metadata: &FilterStatusMetadata) -> Result<()>
 where
-    E: Executor<'e, Database = Sqlite>,
+    E: Acquire<'e, Database = Sqlite>,
 {
+    let mut tx = exec.begin().await?;
+
+    sqlx::query(
+        "DELETE FROM filters
+         WHERE file_name = ?
+           AND filter_id != ?"
+    )
+        .bind(&metadata.file_name)
+        .bind(&metadata.filter_id)
+        .execute(&mut *tx)
+        .await?;
+
     sqlx::query(
         "INSERT INTO filters (
             filter_id, source_kind, file_name, path, explicit_id, name, enabled, valid,
@@ -404,8 +463,10 @@ where
         .bind(&metadata.program_kind)
         .bind(&metadata.last_error)
         .bind(&metadata.loaded_at)
-        .execute(exec)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }

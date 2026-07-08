@@ -5,7 +5,7 @@ use std::time::Duration;
 use http::StatusCode;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use sqlx::{Executor, FromRow, Sqlite};
+use sqlx::{Executor, FromRow, Row, Sqlite};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -16,7 +16,7 @@ use crate::mitm::capture::CapturePaths;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
-pub enum DbCommand { 
+pub enum DbCommand {
     SelectRequest {
         id: String,
         reply: oneshot::Sender<Result<RequestMetadata>>,
@@ -28,6 +28,39 @@ pub enum DbCommand {
     SelectPacketSummaries {
         reply: oneshot::Sender<Result<Vec<PacketSummary>>>,
     },
+    SelectFilterStats {
+        reply: oneshot::Sender<Result<FilterStatsSnapshot>>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct FilterStatsSnapshot {
+    pub exec_stats: Vec<FilterExecStatsRow>,
+    pub statuses: Vec<FilterStatusRow>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FilterExecStatsRow {
+    pub filter_id: Option<String>,
+    pub filter_name: String,
+    pub phase: String,
+    pub runs: i64,
+    pub min_us: Option<i64>,
+    pub avg_us: Option<f64>,
+    pub max_us: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FilterStatusRow {
+    pub source_kind: String,
+    pub valid: i64,
+    pub enabled: i64,
+    pub priority: Option<i64>,
+    pub name: String,
+    pub file_name: String,
+    pub program_kind: Option<String>,
+    pub last_error: Option<String>,
+    pub loaded_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -328,7 +361,9 @@ fn indent_lines(s: &str, prefix: &str) -> String {
 impl DbState {
     pub async fn new() -> Result<Self> {
         let paths = CapturePaths::new();
-
+        Self::new_for_paths(&paths).await
+    }
+    pub async fn new_for_paths(paths: &CapturePaths) -> Result<Self> {
         let conn_opts = SqliteConnectOptions::new()
             .filename(&paths.db_path)
             .read_only(true)
@@ -340,8 +375,11 @@ impl DbState {
             .connect_with(conn_opts)
             .await
             .context("Failed to connect to SQLite")?;
+        
+        Ok(Self::from_pool(db_pool))
+    }
 
-
+    pub fn from_pool(db_pool: SqlitePool) -> Self {
         let (event_sender, mut receiver): (
             UnboundedSender<DbCommand>,
             UnboundedReceiver<DbCommand>
@@ -363,15 +401,19 @@ impl DbState {
                         let result = select_packet_summaries(&pool_clone).await;
                         let _ = reply.send(result);
                     }
+                    DbCommand::SelectFilterStats { reply } => {
+                        let res = select_filter_stats(&pool_clone).await;
+                        let _ = reply.send(res);
+                    }
                 }
             }
             tracing::info!("read DB pool shutting down");
         });
 
-        Ok(Self {
+        Self {
             _db_pool: db_pool,
             event_sender,
-        })
+        }
     }
 
     pub async fn select_request_by_id(&self, id: impl Into<String>) -> Result<RequestMetadata> {
@@ -400,6 +442,7 @@ impl DbState {
 
     pub async fn select_packet_summaries(&self) -> Result<Vec<PacketSummary>> {
         let (tx, rx) = oneshot::channel();
+
         self.event_sender
             .send(DbCommand::SelectPacketSummaries {
                 reply: tx,
@@ -407,6 +450,18 @@ impl DbState {
             .context("Failed to send SelectPacketSummaries command")?;
 
         rx.await.context("DB worker dropped SelectPacketSummaries response")?
+    }
+
+    pub async fn select_filter_stats(&self) -> Result<FilterStatsSnapshot> {
+        let (tx, rx) = oneshot::channel();
+
+        self.event_sender
+            .send(DbCommand::SelectFilterStats {
+                reply: tx,
+            })
+            .context("Failed to send SelectFilterStats command")?;
+
+        rx.await.context("DB worker dropped SelectFilterStats response")?
     }
 }
 
@@ -439,6 +494,88 @@ where
         .context("Failed to select packet summaries")?;
 
     Ok(rows)
+}
+
+async fn select_filter_stats(exec: &SqlitePool) -> Result<FilterStatsSnapshot> {
+    let exec_stats_rows = sqlx::query(
+        "SELECT
+            filter_id,
+            filter_name,
+            phase,
+            COUNT(*) AS runs,
+            MIN(elapsed_us) AS min_us,
+            AVG(elapsed_us) AS avg_us,
+            MAX(elapsed_us) AS max_us
+         FROM filter_exec_stats
+         GROUP BY filter_id, filter_name, phase
+         ORDER BY max_us DESC"
+    )
+        .fetch_all(exec)
+        .await
+        .context("Failed to select filter execution stats")?;
+
+    let exec_stats = exec_stats_rows
+        .into_iter()
+        .map(|row| FilterExecStatsRow {
+            filter_id: row.try_get("filter_id").ok(),
+            filter_name: row
+                .try_get::<String, _>("filter_name")
+                .unwrap_or_else(|_| "-".to_string()),
+            phase: row
+                .try_get::<String, _>("phase")
+                .unwrap_or_else(|_| "-".to_string()),
+            runs: row.try_get::<i64, _>("runs").unwrap_or_default(),
+            min_us: row.try_get("min_us").ok(),
+            avg_us: row.try_get("avg_us").ok(),
+            max_us: row.try_get("max_us").ok(),
+        })
+        .collect();
+
+    let status_rows = sqlx::query(
+        "SELECT
+            source_kind,
+            valid,
+            enabled,
+            priority,
+            name,
+            file_name,
+            program_kind,
+            last_error,
+            loaded_at
+         FROM filters
+         ORDER BY source_kind, valid ASC, priority ASC, file_name"
+    )
+        .fetch_all(exec)
+        .await
+        .context("Failed to select filter statuses")?;
+
+    let statuses = status_rows
+        .into_iter()
+        .map(|row| FilterStatusRow {
+            source_kind: row
+                .try_get::<String, _>("source_kind")
+                .unwrap_or_else(|_| "-".to_string()),
+            valid: row.try_get::<i64, _>("valid").unwrap_or_default(),
+            enabled: row.try_get::<i64, _>("enabled").unwrap_or_default(),
+            priority: row.try_get("priority").ok(),
+            name: row
+                .try_get::<String, _>("name")
+                .unwrap_or_else(|_| "-".to_string()),
+            file_name: row
+                .try_get::<String, _>("file_name")
+                .unwrap_or_else(|_| "-".to_string()),
+            program_kind: row.try_get("program_kind").ok(),
+            last_error: row.try_get("last_error").ok(),
+            loaded_at: row
+                .try_get::<String, _>("loaded_at")
+                .unwrap_or_else(|_| "-".to_string()),
+        })
+        .collect();
+
+    Ok(FilterStatsSnapshot {
+        exec_stats,
+        statuses,
+    })
 }
 
 async fn select_request(exec: &SqlitePool, id: &str) -> Result<RequestMetadata> {

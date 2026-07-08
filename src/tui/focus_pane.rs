@@ -2,7 +2,7 @@
 
 use tuie::{delegate_field, field, prelude::*};
 use tuie::render::border;
-
+use crate::tui::theme;
 
 /// Bordered [`Pane`] wrapper that highlights its border when focused.
 pub(crate) struct FocusPane {
@@ -18,7 +18,7 @@ impl FocusPane {
         if focused {
             let style = self
                 .selected_border_style
-                .unwrap_or_else(|| cfg.selected_style.apply(Style::new().fg(Color::YELLOW)));
+                .unwrap_or_else(|| cfg.selected_style.apply(Style::new().fg(theme::accent_fg())));
             self.pane.set_border_style(style);
             self.pane.set_border(Some(cfg.selected_border));
         } else {

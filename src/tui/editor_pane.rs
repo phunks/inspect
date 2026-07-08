@@ -13,6 +13,7 @@ use crate::tui::tab::{
     DetailMessagePartSelection,
     DetailPrimaryTabSelection,
 };
+use crate::tui::theme;
 
 struct SaveResultPopup {
     root: Box<Pane>,
@@ -31,7 +32,7 @@ impl SaveResultPopup {
             .height(12)
             .padding(Spacing::balanced(2))
             .gap(1)
-            .style(Style::new().bg(Color::grey256(3)).blend(98))
+            .style(Style::new().bg(theme::popup_bg()))
             .bordered()
             .border_style(Style::new().fg(Color::YELLOW))
             .children([
@@ -47,7 +48,7 @@ impl SaveResultPopup {
                             .overflow(TextOverflow::WRAP) as Box<dyn Widget>,
                     ]) as Box<dyn Widget>,
                 Text::new()
-                    .content("Enter/Esc/q: OK".fg(Color::BRIGHT_BLACK))
+                    .content("Enter/Esc/q: OK".fg(theme::muted_fg()))
                     .align(Align::End) as Box<dyn Widget>,
             ]);
 
@@ -151,11 +152,11 @@ impl EditPanel {
             .vertical()
             .flex(1)
             .gap(0)
-            .style(Style::new().bg(Color::grey256(2)))
+            .style(Style::new().bg(theme::panel_inner_bg()))
             .children([
                 Text::new()
                     .content(format!("{title}    Esc: close  S: save  ^J/^K: scroll  ^Z: undo").bold())
-                    .style(Style::new().bg(Color::grey256(2))) as Box<dyn Widget>,
+                    .style(Style::new().bg(theme::panel_inner_bg())) as Box<dyn Widget>,
                 Pane::new()
                     .horizontal()
                     .flex(1)
@@ -165,30 +166,30 @@ impl EditPanel {
                             .vertical()
                             .flex(1)
                             .bordered()
-                            .border_style(Style::new().fg(Color::grey256(8)))
-                            .style(Style::new().bg(Color::grey256(2)))
+                            .border_style(Style::new().fg(theme::panel_border_fg()))
+                            .style(Style::new().bg(theme::panel_inner_bg()))
                             .children([
                                 Input::new()
                                     .content(editable_text.clone())
                                     .bindings(ModernBindings::new)
                                     .multiline()
                                     .wrap()
-                                    .style(Style::new().bg(Color::grey256(2)))
+                                    .style(Style::new().bg(theme::panel_inner_bg()))
                                     .id(&mut input_id) as Box<dyn Widget>,
                             ]).y_scroll(Scrollbar::AutoHide) as Box<dyn Widget>,
                         Pane::new()
                             .vertical()
                             .flex(1)
                             .bordered()
-                            .border_style(Style::new().fg(Color::grey256(8)))
-                            .style(Style::new().bg(Color::grey256(2)))
+                            .border_style(Style::new().fg(theme::panel_border_fg()))
+                            .style(Style::new().bg(theme::panel_inner_bg()))
                             .id(&mut preview_scroll_id)
                             .y_scroll(Scrollbar::AutoHide)
                             .children([
                                 Text::new()
                                     .content(preview_text)
                                     .overflow(TextOverflow::WRAP)
-                                    .style(Style::new().bg(Color::grey256(2)))
+                                    .style(Style::new().bg(theme::panel_inner_bg()))
                                     .id(&mut preview_id) as Box<dyn Widget>,
                             ]) as Box<dyn Widget>,
                     ]) as Box<dyn Widget>,
@@ -199,7 +200,7 @@ impl EditPanel {
             .width(popup_width)
             .height(popup_height)
             .padding(Spacing::balanced(1))
-            .style(Style::new().bg(Color::grey256(1)).blend(98))
+            .style(Style::new().bg(theme::panel_outer_bg()))
             .children([
                 Pane::new()
                     .vertical()

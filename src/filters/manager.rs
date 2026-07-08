@@ -59,9 +59,12 @@ fn build_filter_id(
     explicit_id: Option<&str>,
     script_hash: &str,
 ) -> String {
+    let _ = source_kind;
+    let _ = script_hash;
+
     let raw = match explicit_id {
-        Some(id) => format!("{}\0id\0{}\0{}", source_kind.as_str(), id, script_hash),
-        None => format!("{}\0file\0{}\0{}", source_kind.as_str(), file_name, script_hash),
+        Some(id) => format!("id\0{id}"),
+        None => format!("file\0{file_name}"),
     };
 
     format!("filter-{}", stable_hash_hex(&raw))
@@ -74,6 +77,12 @@ pub struct FilterManager {
     quarantine_dir: PathBuf,
     current: Arc<RwLock<Arc<CompiledFilterSet>>>,
     event_sender: Option<UnboundedSender<RequestResponseEvent>>,
+}
+
+#[derive(Clone, Debug)]
+struct LoadedFilterSet {
+    filters: CompiledFilterSet,
+    file_names: Vec<String>,
 }
 
 
@@ -131,8 +140,11 @@ impl FilterManager {
         let cwd = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("<unknown>"));
 
-        let next = self.load_filter_set().context("load filter set")?;
+        let loaded = self.load_filter_set().context("load filter set")?;
+        let next = loaded.filters;
         let count = next.len();
+
+        self.prune_filter_statuses(loaded.file_names);
 
         for filter in next.filters() {
             let (
@@ -294,15 +306,16 @@ impl FilterManager {
         FilterSnapshot::read_many(&self.filter_dirs)
     }
 
-    fn load_filter_set(&self) -> Result<CompiledFilterSet> {
+    fn load_filter_set(&self) -> Result<LoadedFilterSet> {
         let mut filters = Vec::new();
+        let mut file_names = Vec::new();
 
         for filter_dir in &self.filter_dirs {
             if !filter_dir.exists() {
                 debug!(
-                    filters_dir = %filter_dir.display(),
-                    "filters directory does not exist; skipping"
-                );
+                        filters_dir = %filter_dir.display(),
+                        "filters directory does not exist; skipping"
+                    );
 
                 continue;
             }
@@ -327,21 +340,47 @@ impl FilterManager {
                     continue;
                 }
 
+                file_names.push(filter_file_name(&path));
+
                 match self.load_filter(&path, source_kind) {
                     Ok(Some(filter)) => filters.push(filter),
                     Ok(None) => {}
                     Err(err) => {
                         warn!(
-                            path = %path.display(),
-                            error = ?err,
-                            "failed to load roto filter; skipping this file"
-                        );
+                                path = %path.display(),
+                                error = ?err,
+                                "failed to load roto filter; skipping this file"
+                            );
                     }
                 }
             }
         }
 
-        Ok(CompiledFilterSet::new(filters))
+        file_names.sort();
+        file_names.dedup();
+
+        Ok(LoadedFilterSet {
+            filters: CompiledFilterSet::new(filters),
+            file_names,
+        })
+    }
+
+    fn prune_filter_statuses(&self, file_names: Vec<String>) {
+        let Some(sender) = self.event_sender.as_ref() else {
+            warn!(
+                    "filter status event sender is not configured"
+                );
+            return;
+        };
+
+        sender
+            .send(RequestResponseEvent::FilterStatusPrune { file_names })
+            .unwrap_or_else(|err| {
+                warn!(
+                        error = ?err,
+                        "failed to enqueue filter status prune event"
+                    );
+            });
     }
 
     fn load_filter(
@@ -352,8 +391,41 @@ impl FilterManager {
         let source = std::fs::read_to_string(path)
             .with_context(|| format!("read roto filter {}", path.display()))?;
 
-        let (metadata, script) = parse_filter_source(&source)
-            .with_context(|| format!("parse filter metadata {}", path.display()))?;
+        let (metadata, script) = match parse_filter_source(&source) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let file_name = filter_file_name(path);
+                let script_hash = script_hash(&source);
+                let id = build_filter_id(
+                    source_kind,
+                    &file_name,
+                    None,
+                    &script_hash,
+                );
+
+                let definition = FilterDefinition {
+                    id,
+                    source_kind,
+                    file_name,
+                    script_hash,
+                    path: path.to_path_buf(),
+                    source,
+                    metadata: FilterMetadata::default(),
+                    script: String::new(),
+                };
+
+                self.record_filter_status(filter_status_from_definition(
+                    &definition,
+                    priority_from_file_name(path).or(Some(DEFAULT_PRIORITY)),
+                    false,
+                    None,
+                    Some(format!("invalid filter header/front matter: {err}")),
+                ));
+
+                return Err(err)
+                    .with_context(|| format!("parse filter metadata {}", path.display()));
+            }
+        };
 
         if source_kind == FilterSourceKind::Persistent
             && metadata
@@ -745,6 +817,8 @@ fn parse_filter_source(source: &str) -> Result<(FilterMetadata, String)> {
                 continue;
             }
 
+            validate_front_matter_line(&normalized)?;
+
             toml_text.push_str(&normalized);
             toml_text.push('\n');
         } else {
@@ -770,6 +844,30 @@ fn normalized_comment_line(line: &str) -> Option<String> {
         .strip_prefix("//!")
         .or_else(|| trimmed.strip_prefix("//"))
         .map(|line| line.trim_start().to_string())
+}
+
+fn validate_front_matter_line(line: &str) -> Result<()> {
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in line.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            _ => {}
+        }
+    }
+
+    if in_string {
+        anyhow::bail!("unterminated string in filter metadata line: {line}");
+    }
+
+    Ok(())
 }
 
 fn loaded_at_now() -> String {
@@ -899,6 +997,29 @@ fn on_response() {}
         assert_eq!(metadata.name.as_deref(), Some("generic"));
         assert!(!metadata.enabled);
         assert!(script.contains("fn on_response"));
+    }
+
+    #[test]
+    fn parse_source_rejects_unterminated_front_matter_string() {
+        let source = r#"//! +++
+//! name = "broken
+//!
+//! [trigger]
+//! host = ["*example.com", "xxxxxxx]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+    "#;
+
+        let err = parse_filter_source(source)
+            .expect_err("unterminated front matter string should be invalid");
+
+        assert!(
+                err.to_string().contains("unterminated string in filter metadata line")
+                    || format!("{err:?}").contains("unterminated string in filter metadata line"),
+            );
     }
 
     #[test]

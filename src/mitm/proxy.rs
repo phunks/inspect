@@ -178,6 +178,8 @@ pub async fn mitm_proxy_main(
     filter_manager: FilterManager,
     flow_events: FlowEventPublisher,
     filter_state: FilterStateConfig,
+    store_dbstate: DbState,
+    capture_paths: CapturePaths,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
@@ -207,11 +209,8 @@ pub async fn mitm_proxy_main(
 
     let exec = Executor::graceful(graceful.guard());
 
-    let dbstate = DbState::new().await.expect("dbstate");
-    let capture_paths = CapturePaths::new();
-
     let capture = CaptureService::new(
-        dbstate.clone(),
+        store_dbstate.clone(),
         capture_paths,
         body_save_limit_bytes,
         body_omit_content_types.clone(),
@@ -260,13 +259,14 @@ pub async fn mitm_proxy_main(
         ua_db: Arc::new(UserAgentDatabase::try_embedded()?),
     };
 
-    let dbstate = dbstate.clone();
+    let dbstate = store_dbstate.clone();
     info!(
         ?proxy_mode,
         request_ua_profile = ?ua_profile,
         connect_ua_profile = ?connect_ua_profile,
         "Starting mitm proxy with upstream proxy"
     );
+
     let handle = graceful.spawn_task_fn(async move |guard| {
         info!("starting tcp proxy on {service_port}");
         let tcp_service = TcpListener::build()
