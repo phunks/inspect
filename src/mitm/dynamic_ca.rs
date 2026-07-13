@@ -12,10 +12,10 @@ use rama::crypto::dep::rcgen::{BasicConstraints,
                                ExtendedKeyUsagePurpose,
                                IsCa, Issuer, KeyPair,
                                KeyUsagePurpose};
-use rama::error::OpaqueError;
-use rama::net::tls::client::ClientHello;
-use rama::net::tls::DataEncoding;
-use rama::net::tls::server::{DynamicCertIssuer, ServerAuthData};
+use rama::tls::client::ClientHello;
+use rama::crypto::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rama::error::{BoxError, BoxErrorExt};
+use rama::tls::server::{DynamicCertIssuer, ServerAuthData};
 use rama::telemetry::tracing;
 use time::OffsetDateTime;
 
@@ -75,18 +75,12 @@ impl Ca {
         let key_pair = KeyPair::generate()?;
         let cert = params.signed_by(&key_pair, issuer)?;
 
+        let private_key_pem = key_pair.serialize_pem();
+        let private_key = PrivateKeyDer::from_pem_slice(private_key_pem.as_bytes())?;
+
         Ok(ServerAuthData {
-            private_key: DataEncoding::Pem(
-                key_pair
-                    .serialize_pem()
-                    .try_into()
-                    .expect("valid PEM key"),
-            ),
-            cert_chain: DataEncoding::Pem(
-                cert.pem()
-                    .try_into()
-                    .expect("valid PEM cert"),
-            ),
+            private_key,
+            cert_chain: vec![CertificateDer::from(cert.der().to_vec())],
             ocsp: None,
         })
     }
@@ -185,10 +179,12 @@ impl DynamicCertIssuer for DynamicIssuer {
         &self,
         client_hello: ClientHello,
         _server_name: Option<rama::net::address::Domain>,
-    ) -> Result<ServerAuthData, OpaqueError> {
+    ) -> Result<ServerAuthData, BoxError> {
         let sni = match client_hello.ext_server_name() {
             Some(domain) => domain.to_string(),
-            None => return Err(OpaqueError::from_display("missing SNI")),
+            None => {
+                return Err(BoxError::from_static_str("missing SNI"));
+            }
         };
 
         if let Some(data) = self.cache.read().unwrap().get(&sni).cloned() {
@@ -199,9 +195,10 @@ impl DynamicCertIssuer for DynamicIssuer {
         let data = self
             .ca
             .sign_for_host(&sni, &ca.issuer)
-            .map_err(OpaqueError::from_display)?;
+            .map_err(|err| BoxError::from(err.to_string()))?;
 
         self.cache.write().unwrap().insert(sni, data.clone());
+
         Ok(data)
     }
 }

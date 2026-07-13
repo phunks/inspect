@@ -3,14 +3,15 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use http::{HeaderMap, StatusCode, Version};
+use rama::http::{HeaderMap, StatusCode};
+use rama::net::http::Version;
 use serde_json::{json, Value};
 use std::io;
 use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::mitm::capture::CapturePaths;
-use crate::mitm::flow::body_encoding::decoded_body_or_raw;
+use crate::mitm::flow::body_encoding::body_file_name;
 use crate::mitm::flow::filter_bridge::normalized_content_type;
 use crate::mitm::store_metadata::{DbState, FilterExecStatMetadata, RequestMetadata, RequestResponseEvent, ResponseMetadata};
 
@@ -81,9 +82,17 @@ impl CaptureService {
             })?;
 
         let request_head_path = capture.flow_dir.join("request.head");
-        let request_body_path = capture
-            .flow_dir
-            .join(body_file_name("request.body", &capture.headers));
+        let omit_reason = body_omit_reason_by_content_type(
+            &capture.headers,
+            &self.body_omit_content_types,
+        );
+        let request_body_path = capture.flow_dir.join(
+            if omit_reason.is_some() {
+                "request.body".to_owned()
+            } else {
+                body_file_name("request.body", &capture.headers)
+            },
+        );
 
         let request_head_text = build_request_head_text(
             &capture.method,
@@ -104,13 +113,14 @@ impl CaptureService {
             &self.body_omit_content_types,
         );
 
-        let stored_body_bytes = if let Some(reason) = omit_reason.as_deref() {
-            Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
-        } else if self.body_save_limit_bytes.is_none() {
-            capture.body_bytes.clone()
-        } else {
-            request_body_for_storage(&capture.headers, &capture.body_bytes)
-        };
+        // let stored_body_bytes = if let Some(reason) = omit_reason.as_deref() {
+        //     Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
+        // } else if self.body_save_limit_bytes.is_none() {
+        //     capture.body_bytes.clone()
+        // } else {
+        //     request_body_for_storage(&capture.headers, &capture.body_bytes)
+        // };
+        let stored_body_bytes = capture.body_bytes.clone();
 
         let storage_info = if omit_reason.is_some() {
             BodyStorageInfo {
@@ -143,8 +153,13 @@ impl CaptureService {
 
         let time = rfc3999z(&capture.time);
         let epoch_ms = capture.time.timestamp_millis();
-        let uri = capture.uri.path().to_string();
-        let query_str = capture.uri.query().unwrap_or_default().to_string();
+        // let uri = capture.uri.path().to_string();
+        let uri = capture.uri.path()
+            .map(|path| path.as_encoded_str().to_string())
+            .unwrap_or_else(|| "/".to_owned());
+        let query_str = capture.uri.query()
+            .map(|query| query.to_string())
+            .unwrap_or_default();
         let version = version_to_string(capture.version);
 
         self.dbstate
@@ -204,9 +219,23 @@ impl CaptureService {
             })?;
 
         let response_head_path = capture.flow_dir.join("response.head");
-        let response_body_path = capture
-            .flow_dir
-            .join(body_file_name("response.body", &capture.headers));
+        let omit_reason = capture
+            .upstream_error_message
+            .is_none()
+            .then(|| {
+                body_omit_reason_by_content_type(
+                    &capture.headers,
+                    &self.body_omit_content_types,
+                )
+            })
+            .flatten();
+        let response_body_path = capture.flow_dir.join(
+            if omit_reason.is_some() || capture.upstream_error_message.is_some() {
+                "response.body".to_owned()
+            } else {
+                body_file_name("response.body", &capture.headers)
+            },
+        );
         let ssl_tls_path = capture.flow_dir.join("ssl_tls.json");
 
         let ssl_tls_json = json!({
@@ -266,12 +295,18 @@ impl CaptureService {
                 &self.body_omit_content_types,
             );
 
+            // let stored_body_bytes = if let Some(reason) = omit_reason.as_deref() {
+            //     Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
+            // } else if self.body_save_limit_bytes.is_none() {
+            //     capture.body_bytes.clone()
+            // } else {
+            //     body_for_storage(&capture.headers, &capture.body_bytes)
+            // };
+            // let stored_body_bytes = capture.body_bytes.clone();
             let stored_body_bytes = if let Some(reason) = omit_reason.as_deref() {
                 Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
-            } else if self.body_save_limit_bytes.is_none() {
-                capture.body_bytes.clone()
             } else {
-                body_for_storage(&capture.headers, &capture.body_bytes)
+                capture.body_bytes.clone()
             };
 
             let storage_info = if omit_reason.is_some() {
@@ -392,7 +427,7 @@ pub struct EffectiveRequestCapture {
     pub time: DateTime<Utc>,
     pub flow_dir: PathBuf,
     pub method: String,
-    pub uri: http::Uri,
+    pub uri: rama::net::uri::Uri,
     pub version: Version,
     pub headers: HeaderMap,
     pub body_bytes: Bytes,
@@ -470,47 +505,6 @@ pub struct ResponseCommit {
     pub version: String,
 }
 
-fn body_for_storage(headers: &HeaderMap, body_bytes: &Bytes) -> Bytes {
-    body_for_storage_by_headers(headers, body_bytes)
-}
-
-fn request_body_for_storage(headers: &HeaderMap, body_bytes: &Bytes) -> Bytes {
-    body_for_storage_by_headers(headers, body_bytes)
-}
-
-fn body_for_storage_by_headers(headers: &HeaderMap, body_bytes: &Bytes) -> Bytes {
-    decoded_body_or_raw(headers, body_bytes)
-}
-
-fn body_file_name(base: &str, headers: &HeaderMap) -> String {
-    let Some(content_encoding) = headers
-        .get(http::header::CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return base.to_string();
-    };
-
-    let suffixes = content_encoding
-        .split(',')
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .filter_map(|encoding| match encoding.as_str() {
-            "gzip" | "x-gzip" => Some("gz"),
-            "br" => Some("br"),
-            "zstd" => Some("zst"),
-            "deflate" => Some("deflate"),
-            "identity" => None,
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    if suffixes.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}.{}", suffixes.join("."))
-    }
-}
-
 fn body_omit_reason_by_content_type(
     headers: &HeaderMap,
     omit_content_types: &[String],
@@ -578,14 +572,13 @@ fn rfc3999z(time: &DateTime<Utc>) -> String {
     time.to_rfc3339_opts(chrono::format::SecondsFormat::Millis, true)
 }
 
-pub(crate) fn version_to_string(v: Version) -> String {
+pub(crate) fn version_to_string(v: rama::net::http::Version) -> String {
     match v {
         Version::HTTP_09 => "HTTP/0.9".into(),
         Version::HTTP_10 => "HTTP/1.0".into(),
         Version::HTTP_11 => "HTTP/1.1".into(),
         Version::HTTP_2 => "HTTP/2".into(),
         Version::HTTP_3 => "HTTP/3".into(),
-        other => format!("{other:?}"),
     }
 }
 
@@ -618,7 +611,7 @@ pub(crate) fn headers_to_json(headers: &HeaderMap) -> Value {
 
 pub(crate) fn build_request_head_text(
     method: &str,
-    uri: &http::Uri,
+    uri: &rama::net::uri::Uri,
     version: Version,
     headers: &HeaderMap,
     tls_sni: Option<&str>,

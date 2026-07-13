@@ -2,7 +2,7 @@ use std::fmt;
 use std::fmt::Formatter;
 use anyhow::{Context, Result};
 use std::time::Duration;
-use http::StatusCode;
+use rama::http::StatusCode;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::{Executor, FromRow, Row, Sqlite};

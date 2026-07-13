@@ -49,7 +49,7 @@ pub fn json_filter_response_bytes(
             normalized_content_type(&res_parts.headers).as_deref(),
             res_parts
                 .headers
-                .get(http::header::CONTENT_ENCODING)
+                .get(rama::http::header::CONTENT_ENCODING)
                 .and_then(|value| value.to_str().ok()),
             false,
             res_body_bytes,
@@ -103,7 +103,7 @@ fn json_filter_headers(headers: &[FilterHeader]) -> serde_json::Value {
     )
 }
 
-fn json_header_map(headers: &http::HeaderMap) -> serde_json::Value {
+fn json_header_map(headers: &rama::http::HeaderMap) -> serde_json::Value {
     serde_json::Value::Array(
         headers
             .iter()
@@ -277,24 +277,24 @@ fn diff_json_value(
                 );
             }
 
-            for idx in common_len..original_items.len() {
+            for (idx, item) in original_items.iter().enumerate().skip(common_len) {
                 let mut next_path = path.clone();
                 next_path.push(DiffPathSegment::JsonIndex(idx));
 
                 events.push(DiffEvent::Delete {
                     path: DiffPath::body_json(next_path),
-                    old: json_value_to_diff_node(&original_items[idx]),
+                    old: json_value_to_diff_node(item),
                     source: DiffSource::Body(Json),
                 });
             }
 
-            for idx in common_len..edited_items.len() {
+            for (idx, item) in edited_items.iter().enumerate().skip(common_len) {
                 let mut next_path = path.clone();
                 next_path.push(DiffPathSegment::JsonIndex(idx));
 
                 events.push(DiffEvent::Insert {
                     path: DiffPath::body_json(next_path),
-                    node: json_value_to_diff_node(&edited_items[idx]),
+                    node: json_value_to_diff_node(item),
                     source: DiffSource::Body(Json),
                 });
             }

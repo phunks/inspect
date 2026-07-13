@@ -1,3 +1,4 @@
+use rama::http::body::util::BodyExt;
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use chrono::Utc;
-use http_body_util::BodyExt;
+
 use rama::{
     http::{
         service::web::response::IntoResponse,
@@ -17,11 +18,10 @@ use rama::{
     },
     net::{
         address::ProxyAddress,
-        http::RequestContext,
     },
     telemetry::tracing,
 };
-use rama::extensions::{ExtensionsMut, ExtensionsRef};
+use rama::extensions::ExtensionsRef;
 use tracing::info;
 use uuid::Uuid;
 
@@ -119,6 +119,7 @@ pub struct FlowDispatcherConfig {
     pub upstream_proxy: Option<ProxyAddress>,
     pub body_save_limit_bytes: Option<usize>,
     pub body_omit_content_types: Arc<[String]>,
+    pub filters_enabled: bool,
     pub filter_state_enabled: bool,
     pub filter_state_limits: FilterStateLimits,
 }
@@ -173,10 +174,6 @@ impl FlowDispatcher {
         &self.upstream_client
     }
 
-    pub(crate) fn upstream_proxy(&self) -> Option<ProxyAddress> {
-        self.config.upstream_proxy.clone()
-    }
-
     pub(crate) fn seq(&self) -> &Arc<AtomicU64> {
         &self.seq
     }
@@ -200,7 +197,7 @@ impl FlowDispatcher {
         let (mut req_parts, req_body) = req.into_parts();
 
         if let Some(upstream_proxy) = self.config.upstream_proxy.clone() {
-            req_parts.extensions_mut().insert(upstream_proxy);
+            req_parts.extensions.insert(upstream_proxy);
         }
 
         let ctx = self.new_request_context(&req_parts)?;
@@ -286,14 +283,36 @@ impl FlowDispatcher {
 
         let tls_sni = tls_sni_from_extensions(req_parts.extensions());
 
-        let req_ctx = RequestContext::try_from(req_parts).map_err(|err| {
-            tracing::error!("error extracting request context: {err:?}");
-            FlowDispatchError::BadRequest
-        })?;
+        let protocol = req_parts
+            .uri
+            .scheme()
+            .map(|scheme| scheme.as_str().to_owned())
+            .unwrap_or_else(|| {
+                if tls_sni.is_some() {
+                    "https".to_owned()
+                } else {
+                    "http".to_owned()
+                }
+            });
 
-        let protocol = req_ctx.protocol.to_string();
-        let host = req_ctx.authority.host.to_string();
+        let host = req_parts
+            .uri
+            .host()
+            .map(|host| host.to_str().into_owned())
+            .or_else(|| {
+                req_parts
+                    .headers
+                    .get(rama::http::header::HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        
         let uri = req_parts.uri.clone();
+        let path = uri
+            .path()
+            .map(|path| path.as_encoded_str().to_string())
+            .unwrap_or_else(|| "/".to_owned());
         let method = req_parts.method.to_string();
 
         let uuid_simple = id.simple().to_string();
@@ -311,7 +330,7 @@ impl FlowDispatcher {
             tls_sni,
             protocol,
             host,
-            uri,
+            path,
             method,
         })
     }
@@ -322,8 +341,6 @@ impl FlowDispatcher {
         req_parts: &mut rama::http::request::Parts,
         req_body_bytes: &mut Bytes,
     ) -> RequestDispatchOutput {
-        let req_filter_view = ctx.request_view(req_parts.method.as_str());
-
         let filter_request = build_filter_request(
             &ctx.id,
             ctx.seq,
@@ -335,6 +352,16 @@ impl FlowDispatcher {
             ctx.tls_sni.clone(),
         );
 
+        if !self.config.filters_enabled {
+            return RequestDispatchOutput {
+                filter_request,
+                marks: Vec::new(),
+                synthetic_response: None,
+                drop_client_response: false,
+            };
+        }
+
+        let req_filter_view = ctx.request_view(req_parts.method.as_str());
         let request_action = self.filters.run_request_filters(
             &req_filter_view,
             &filter_request,
@@ -343,7 +370,7 @@ impl FlowDispatcher {
         let marks = flow_marks_from_request_action(&request_action);
         let synthetic_response = request_action.synthetic_response;
         let drop_client_response = request_action.drop_client_response;
-        
+
         if let Some(patch) = request_action.request {
             apply_request_patch(req_parts, req_body_bytes, patch);
         }
@@ -532,6 +559,14 @@ impl FlowDispatcher {
         res_body_bytes: &mut Bytes,
         elapsed_ms: i64,
     ) -> ResponseFilterDispatchOutput {
+        if !self.config.filters_enabled {
+            return ResponseFilterDispatchOutput {
+                marks: Vec::new(),
+                outbound_http: Vec::new(),
+                drop_client_response: false,
+            };
+        }
+
         let res_content_type = normalized_content_type(&res_parts.headers);
 
         let req_view = input.request_view();
@@ -654,6 +689,10 @@ impl FlowDispatcher {
         res_body_bytes: &Bytes,
         elapsed_ms: i64,
     ) {
+        if !self.config.filters_enabled {
+            return;
+        }
+
         self.filters.run_completed_filters(
             &input.request_view(),
             &FilterFlow {

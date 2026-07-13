@@ -1763,22 +1763,6 @@ fn choose_original_host(original_host: &str, edited_host: &str) -> String {
     }
 }
 
-fn body_rewrite_anchor(
-    original_body_text: Option<&str>,
-    edited_body_text: Option<&str>,
-    strategy: GeneratedDiffStrategy,
-) -> Option<GeneratedFilterCondition> {
-    let original = original_body_text?.trim();
-    let edited = edited_body_text?.trim();
-
-    if original.is_empty() || original == edited {
-        return None;
-    }
-
-    diff_anchor(original, edited, strategy)
-        .map(|anchor| GeneratedFilterCondition::ResponseBodyContains(anchor.text))
-}
-
 fn response_body_rewrite_anchor(
     original_body_text: Option<&str>,
     edited_body_text: Option<&str>,

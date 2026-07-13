@@ -19,10 +19,8 @@ use rama::{
             protocol::{Role, WebSocketConfig},
         },
     },
-    rt::Executor,
     telemetry::tracing,
 };
-use rama::extensions::ExtensionsRef;
 
 pub async fn mitm_websocket<S>(client: &S, req: Request) -> Response
 where
@@ -30,33 +28,21 @@ where
 {
     tracing::debug!("detected websocket request: starting MITM WS upgrade...");
 
+    let ingress_upgrade = upgrade::handle_upgrade(&req);
+
     let (mut parts, body) = req.into_parts();
 
     // Avoid negotiating permessage-deflate through the MITM for now.
     // Some peer/client combinations can produce invalid window bits for rama-ws/flate2.
     let _ = parts.headers.remove(SecWebSocketExtensions::name());
 
-    let parts_copy = parts.clone();
-
     let req = Request::from_parts(parts, body);
-    let guard = req
-        .extensions()
-        .get::<Executor>()
-        .and_then(|exec| exec.guard())
-        .cloned();
+    let cancel = std::future::pending::<()>();
 
-    let cancel = async move {
-        match guard {
-            Some(guard) => guard.downgrade().into_cancelled().await,
-            None => std::future::pending::<()>().await,
-        }
-    };
+    tracing::debug!("forcing egress HTTP/1.1 connection for websocket upgrade");
 
-    let target_version = req.version();
-    tracing::debug!("forcing egress http connection as {target_version:?} to ensure WS upgrade");
-
-    let mut extensions = Extensions::new();
-    extensions.insert(TargetHttpVersion(target_version));
+    let extensions = Extensions::new();
+    extensions.insert(TargetHttpVersion(rama::http::Version::HTTP_11));
 
     let mut handshake = match client
         .websocket_with_request(req)
@@ -94,11 +80,13 @@ where
     tokio::spawn(async move {
         tracing::debug!("egress websocket active: starting ingress WS upgrade...");
 
-        let request = Request::from_parts(parts_copy, Body::empty());
-
-        let ingress_socket = match upgrade::handle_upgrade(&request).await {
+        let ingress_socket = match ingress_upgrade.await {
             Ok(upgraded) => {
-                AsyncWebSocket::from_raw_socket(upgraded, Role::Server, Some(ingress_socket_cfg))
+                AsyncWebSocket::from_raw_socket(
+                    upgraded,
+                    Role::Server,
+                    Some(ingress_socket_cfg),
+                )
                     .await
             }
             Err(err) => {

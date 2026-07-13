@@ -1,3 +1,4 @@
+
 use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
@@ -15,13 +16,13 @@ pub(crate) struct RequestDispatchContext {
     pub(crate) tls_sni: Option<String>,
     pub(crate) protocol: String,
     pub(crate) host: String,
-    pub(crate) uri: http::Uri,
+    pub(crate) path: String,
     pub(crate) method: String,
 }
 
 impl RequestDispatchContext {
     pub(crate) fn path(&self) -> &str {
-        self.uri.path()
+        &self.path
     }
 
     pub(crate) fn request_view<'a>(

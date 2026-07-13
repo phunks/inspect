@@ -34,7 +34,7 @@ impl SaveResultPopup {
             .gap(1)
             .style(Style::new().bg(theme::popup_bg()))
             .bordered()
-            .border_style(Style::new().fg(Color::YELLOW))
+            .border_style(Style::new().fg(theme::accent_fg()).bold())
             .children([
                 Text::new()
                     .content(title.into().bold()) as Box<dyn Widget>,
@@ -48,7 +48,7 @@ impl SaveResultPopup {
                             .overflow(TextOverflow::WRAP) as Box<dyn Widget>,
                     ]) as Box<dyn Widget>,
                 Text::new()
-                    .content("Enter/Esc/q: OK".fg(theme::muted_fg()))
+                    .content("Enter/Esc/q: OK".fg(theme::muted_fg()).dim())
                     .align(Align::End) as Box<dyn Widget>,
             ]);
 
@@ -152,10 +152,10 @@ impl EditPanel {
             .vertical()
             .flex(1)
             .gap(0)
-            .style(Style::new().bg(theme::panel_inner_bg()))
+            .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
             .children([
                 Text::new()
-                    .content(format!("{title}    Esc: close  S: save  ^J/^K: scroll  ^Z: undo").bold())
+                    .content(format!("{title}    Esc: close  S: save  ^J/^K: scroll  ^Z: undo").fg(theme::panel_fg()).bold())
                     .style(Style::new().bg(theme::panel_inner_bg())) as Box<dyn Widget>,
                 Pane::new()
                     .horizontal()
@@ -167,14 +167,14 @@ impl EditPanel {
                             .flex(1)
                             .bordered()
                             .border_style(Style::new().fg(theme::panel_border_fg()))
-                            .style(Style::new().bg(theme::panel_inner_bg()))
+                            .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
                             .children([
                                 Input::new()
                                     .content(editable_text.clone())
                                     .bindings(ModernBindings::new)
                                     .multiline()
                                     .wrap()
-                                    .style(Style::new().bg(theme::panel_inner_bg()))
+                                    .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
                                     .id(&mut input_id) as Box<dyn Widget>,
                             ]).y_scroll(Scrollbar::AutoHide) as Box<dyn Widget>,
                         Pane::new()
@@ -182,14 +182,14 @@ impl EditPanel {
                             .flex(1)
                             .bordered()
                             .border_style(Style::new().fg(theme::panel_border_fg()))
-                            .style(Style::new().bg(theme::panel_inner_bg()))
+                            .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
                             .id(&mut preview_scroll_id)
                             .y_scroll(Scrollbar::AutoHide)
                             .children([
                                 Text::new()
                                     .content(preview_text)
                                     .overflow(TextOverflow::WRAP)
-                                    .style(Style::new().bg(theme::panel_inner_bg()))
+                                    .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
                                     .id(&mut preview_id) as Box<dyn Widget>,
                             ]) as Box<dyn Widget>,
                     ]) as Box<dyn Widget>,
@@ -200,13 +200,13 @@ impl EditPanel {
             .width(popup_width)
             .height(popup_height)
             .padding(Spacing::balanced(1))
-            .style(Style::new().bg(theme::panel_outer_bg()))
+            .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_outer_bg()))
             .children([
                 Pane::new()
                     .vertical()
                     .flex(1)
                     .bordered()
-                    .border_style(Style::new().fg(Color::Foreground).bold())
+                    .border_style(Style::new().fg(theme::panel_border_fg()).bold())
                     .children([
                         content as Box<dyn Widget>,
                     ]) as Box<dyn Widget>,

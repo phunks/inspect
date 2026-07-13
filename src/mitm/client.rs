@@ -1,13 +1,19 @@
 use rama::{
     http::{
         client::EasyHttpWebClient,
+        header::USER_AGENT,
         service::web::response::IntoResponse,
+        HeaderValue,
         Request,
         Response,
         StatusCode,
+        Version,
     },
     layer::timeout::TimeoutLayer as ServiceTimeoutLayer,
-    tls::boring::client::TlsConnectorDataBuilder,
+    rt::Executor,
+    tls::{
+        client::{ServerVerifyMode, TlsClientConfig},
+    },
     ua::layer::emulate::{
         UserAgentEmulateHttpConnectModifierLayer,
         UserAgentEmulateHttpRequestModifierLayer,
@@ -19,15 +25,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use http::header::USER_AGENT;
-use http::HeaderValue;
-use rama::extensions::{ExtensionsRef, InputExtensions};
 use rama::http::client::proxy::layer::HttpProxyConnector;
+use rama::http::layer::decompression::DecompressionLayer;
+use rama::http::layer::map_response_body::MapResponseBodyLayer;
+use rama::http::layer::remove_header::{RemoveRequestHeaderLayer, RemoveResponseHeaderLayer};
 use rama::http::layer::timeout::TimeoutLayer;
-use rama::net::stream::ClientSocketInfo;
-use rama::net::tls::client::ServerVerifyMode;
-use crate::options::{ProxyMode, UaProfile};
 use crate::mitm::websocket::mitm_websocket;
+use crate::options::{ProxyMode, UaProfile};
 
 #[derive(Debug)]
 pub(crate) struct UpstreamResult {
@@ -72,17 +76,8 @@ impl UpstreamClient {
     }
 }
 
-fn upstream_remote_addr_from_response(res: &Response) -> Option<String> {
-    let socket_info = res.extensions()
-        .get()
-        .and_then(|InputExtensions(egress)| egress.get::<ClientSocketInfo>())?;
-
-    let peer = socket_info.peer_addr();
-
-    let ip = peer.ip();
-    let port = peer.port();
-
-    Some(format!("{ip}:{port}"))
+fn upstream_remote_addr_from_response(_res: &Response) -> Option<String> {
+    None
 }
 
 #[derive(Clone)]
@@ -115,16 +110,15 @@ fn ua_header_for_profile(profile: UaProfile) -> Option<HeaderValue> {
 }
 
 pub fn new_upstream_client(
+    executor: Executor,
     proxy_mode: ProxyMode,
     request_ua_profile: UaProfile,
     connect_ua_profile: Option<UaProfile>,
     handshake_timeout: Duration,
     request_timeout: Duration,
 ) -> UpstreamClient {
-    let base_tls_config = TlsConnectorDataBuilder::new_http_auto()
-        .with_server_verify_mode(ServerVerifyMode::Disable)
-        .with_store_server_certificate_chain(true)
-        .into_shared_builder();
+    let base_tls_config = TlsClientConfig::default_http()
+        .with_server_verify(ServerVerifyMode::Disable);
 
     let request_ua = ua_header_for_profile(request_ua_profile);
     let connect_ua_from_profile = connect_ua_profile.and_then(ua_header_for_profile);
@@ -145,16 +139,26 @@ pub fn new_upstream_client(
             let static_client = Arc::new(
                 EasyHttpWebClient::connector_builder()
                     .with_default_transport_connector()
+                    .with_default_dns_connector()
                     .with_tls_proxy_support_using_boringssl()
                     .with_proxy_support()
-                    .with_custom_connector(CustomProxyUaLayer { ua_value: static_proxy_ua.clone() })
-                    .with_tls_support_using_boringssl(Some(base_tls_config.clone()))
-                    .with_default_http_connector()
+                    .with_custom_connector(CustomProxyUaLayer {
+                        ua_value: static_proxy_ua.clone(),
+                    })
+                    .with_tls_support_using_boringssl_and_default_http_version(
+                        base_tls_config.clone(),
+                        Version::HTTP_11,
+                    )
+                    .with_default_http_connector(executor.clone())
                     .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
                     .build_client()
-                    .with_jit_layer(
-                        TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout)
-                    ),
+                    .with_jit_layer((
+                        MapResponseBodyLayer::new_boxed_streaming_body(),
+                        TimeoutLayer::with_status_code(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            request_timeout,
+                        ),
+                    ))
             );
 
             let request_ua = request_ua.clone();
@@ -164,6 +168,7 @@ pub fn new_upstream_client(
                 let static_client = static_client.clone();
                 let request_ua = request_ua.clone();
                 let base_tls_config = base_tls_config.clone();
+                let executor = executor.clone();
 
                 Box::pin(async move {
                     let mut req = req;
@@ -177,20 +182,40 @@ pub fn new_upstream_client(
                         Arc::new(
                             EasyHttpWebClient::connector_builder()
                                 .with_default_transport_connector()
+                                .with_default_dns_connector()
                                 .with_tls_proxy_support_using_boringssl()
                                 .with_proxy_support()
-                                .with_custom_connector(CustomProxyUaLayer { ua_value: connect_ua_from_client })
-                                .with_tls_support_using_boringssl(Some(base_tls_config))
-                                .with_default_http_connector()
+                                .with_custom_connector(CustomProxyUaLayer {
+                                    ua_value: connect_ua_from_client
+                                })
+                                .with_tls_support_using_boringssl_and_default_http_version(
+                                    base_tls_config.clone(),
+                                    Version::HTTP_11,
+                                )
+                                .with_default_http_connector(executor.clone())
                                 .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
                                 .build_client()
-                                .with_jit_layer(
-                                    TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout),
-                                ),
+                                .with_jit_layer((
+                                    MapResponseBodyLayer::new_boxed_streaming_body(),
+                                    TimeoutLayer::with_status_code(
+                                        StatusCode::GATEWAY_TIMEOUT,
+                                        request_timeout,
+                                    ),
+                                ))
                         )
                     } else {
                         static_client
                     };
+
+                    let client = (
+                        RemoveResponseHeaderLayer::hop_by_hop(),
+                        RemoveRequestHeaderLayer::hop_by_hop(),
+                        MapResponseBodyLayer::new_boxed_streaming_body(),
+                        // DecompressionLayer::new()
+                        //     .with_insert_accept_encoding_header(false)
+                        //     .with_tolerate_decode_errors(true),
+                    )
+                        .into_layer(client);
 
                     match client.serve(req).await {
                         Ok(res) => {
@@ -207,15 +232,10 @@ pub fn new_upstream_client(
                             let err_text = format!("{err:#}");
                             let upstream_status = extract_http_status_from_error_text(&err_text);
 
-                            let res = err.into_response();
-                            let fallback_status = Some(res.status().as_u16());
-
-                            let msg = format!("upstream error: {err_text}");
-                            // (res, Some(msg), upstream_status.or(fallback_status))
                             UpstreamResult {
-                                response: res,
-                                upstream_err: Some(msg),
-                                upstream_status: upstream_status.or(fallback_status),
+                                response: StatusCode::BAD_GATEWAY.into_response(),
+                                upstream_err: Some(format!("upstream transport error: {err_text}")),
+                                upstream_status,
                                 upstream_remote_addr: None,
                             }
                         }
@@ -237,17 +257,28 @@ pub fn new_upstream_client(
             let client = Arc::new(
                 EasyHttpWebClient::connector_builder()
                     .with_default_transport_connector()
+                    .with_default_dns_connector()
                     .with_tls_proxy_support_using_boringssl()
                     .with_proxy_support()
-                    .with_custom_connector(CustomProxyUaLayer { ua_value: static_proxy_ua })
-                    .with_tls_support_using_boringssl(Some(base_tls_config))
+                    .with_custom_connector(CustomProxyUaLayer {
+                        ua_value: static_proxy_ua.clone(),
+                    })
+                    // .with_tls_support_using_boringssl(base_tls_config.clone())
+                    .with_tls_support_using_boringssl_and_default_http_version(
+                        base_tls_config.clone(),
+                        Version::HTTP_11,
+                    )
                     .with_custom_connector(UserAgentEmulateHttpConnectModifierLayer::default())
-                    .with_default_http_connector()
+                    .with_default_http_connector(executor.clone())
                     .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
                     .build_client()
                     .with_jit_layer((
+                        MapResponseBodyLayer::new_boxed_streaming_body(),
                         UserAgentEmulateHttpRequestModifierLayer::default(),
-                        TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout),
+                        TimeoutLayer::with_status_code(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            request_timeout,
+                        ),
                     )),
             );
 
@@ -265,29 +296,38 @@ pub fn new_upstream_client(
                         req.headers_mut().insert(USER_AGENT, ua);
                     }
 
+                    let client = (
+                        RemoveResponseHeaderLayer::hop_by_hop(),
+                        RemoveRequestHeaderLayer::hop_by_hop(),
+                        MapResponseBodyLayer::new_boxed_streaming_body(),
+                        DecompressionLayer::new()
+                            .with_insert_accept_encoding_header(false)
+                            .with_tolerate_decode_errors(true),
+                    )
+                        .into_layer(client);
+
                     match client.serve(req).await {
                         Ok(res) => {
                             let status = Some(res.status().as_u16());
-                            // (res, None, status)
+                            let upstream_remote_addr = upstream_remote_addr_from_response(&res);
+
                             UpstreamResult {
                                 response: res,
                                 upstream_err: None,
                                 upstream_status: status,
-                                upstream_remote_addr: None,
+                                upstream_remote_addr,
                             }
                         }
                         Err(err) => {
                             let err_text = format!("{err:#}");
                             let upstream_status = extract_http_status_from_error_text(&err_text);
 
-                            let res = err.into_response();
-                            let fallback_status = Some(res.status().as_u16());
+                            let response = err.into_response();
+                            let fallback_status = Some(response.status().as_u16());
 
-                            let msg = format!("upstream error: {err_text}");
-                            // (res, Some(msg), upstream_status.or(fallback_status))
                             UpstreamResult {
-                                response: res,
-                                upstream_err: Some(msg),
+                                response,
+                                upstream_err: Some(format!("upstream transport error: {err_text}")),
                                 upstream_status: upstream_status.or(fallback_status),
                                 upstream_remote_addr: None,
                             }

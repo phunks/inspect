@@ -10,17 +10,125 @@ It captures request/response metadata into SQLite and stores raw headers/bodies 
 ## Overview
 ```mermaid
 flowchart LR
-    client[Client / Browser] --> proxy[inspect MITM proxy]
-    proxy --> upstream[Upstream server]
+  client[Client / Browser] --> proxy[inspect MITM proxy]
+  proxy --> upstream[Upstream server]
 
-    proxy --> filters[Roto filters<br/>mark / rewrite / mock]
-    filters --> proxy
+  proxy --> filters[Roto filters<br/>mark / rewrite / mock]
+  filters --> proxy
 
-    proxy --> capture[Capture storage<br/>SQLite + flow files]
-    proxy --> tui[Terminal UI]
+  proxy --> capture[Capture storage<br/>SQLite + flow files]
+  proxy --> tui[Terminal UI]
 
-    filters -. fire-and-forget .-> sinks[Optional HTTP sinks<br/>Logstash / webhook / local collector]
+  filters -. fire-and-forget .-> sinks[Optional HTTP sinks<br/>Logstash / webhook / local collector]
 ```
+
+## MITM flow and operating modes
+
+Inspect terminates downstream TLS and creates a separate upstream connection. This
+makes HTTP traffic observable and capturable, but it also means that semantic
+request/response mutation and upstream browser emulation must remain separate
+layers.
+
+### Design principles
+
+- **Roto is a semantic MITM-termination layer.** It can inspect, mark, rewrite,
+  synthesize, or drop HTTP flows when enabled.
+- **Browser, TLS, and HTTP/2 emulation are upstream transport concerns.** They
+  run after request-side semantic processing and before the origin is contacted.
+- **Capture is independent from Roto mutation.** Request/response capture, SQLite
+  metadata, HAR export data, TLS metadata, and TUI events remain enabled in both
+  operating modes.
+- **Protocol cleanup occurs immediately before upstream wire transmission.**
+  Hop-by-hop headers and body-integrity metadata must not be forwarded after a
+  semantic rewrite.
+- **WebSocket upgrades are a separate HTTP/1.1 path.** They do not use the
+  ordinary HTTP cleanup path, and their upgraded payload frames are relayed rather
+  than captured as HTTP bodies.
+- **ALPN is negotiated, not assumed.** Normal upstream HTTPS offers `h2` and
+  `http/1.1`. The origin or upstream route selects a protocol; if ALPN is absent,
+  Inspect safely falls back to HTTP/1.1 rather than forcing HTTP/2.
+
+### Mode behavior
+| Capability | `observe` | `emulate` |
+| --- | --- | --- |
+| Roto request, response, and completed filters | enabled | disabled |
+| Request/response patches | enabled | disabled |
+| Synthetic response and client-response drop | enabled | disabled |
+| Roto outbound HTTP jobs | enabled | disabled |
+| Request/response capture and SQLite metadata | enabled | enabled |
+| Upstream TLS metadata and HAR-oriented records | enabled | enabled |
+| Browser/TLS/HTTP emulation | optional | prioritized |
+| Upstream HTTP/2 via ALPN | supported | supported |
+
+`emulate` exists to prioritize browser-like upstream wire behavior. In this mode,
+Roto is deliberately disabled so that semantic mutation cannot make browser
+profiles, HTTP headers, request bodies, TLS fingerprints, or HTTP/2 behavior
+internally inconsistent.
+
+### Ordinary HTTP request path
+
+```text
+downstream browser
+  ↓
+MITM TLS termination
+  ↓
+Roto request filter and request action             (observe only)
+  ↓
+capture request
+  ↓
+protocol cleanup
+  - hop-by-hop header removal
+  - body-integrity header adjustment
+  ↓
+browser / TLS / HTTP emulation
+  ↓
+upstream origin
+```
+
+A request filter can rewrite a request, return a synthetic response, or stop the
+flow before upstream access. Capture records the effective request after an
+enabled request action has been applied. Cleanup is intentionally later: it
+prepares the request for the actual upstream protocol without becoming part of
+the semantic Roto API.
+
+### Ordinary HTTP response path
+
+```text
+upstream origin
+  ↓
+browser-like response handling / decompression
+  ↓
+Roto response filter and response action           (observe only)
+  ↓
+capture response
+  ↓
+downstream browser
+```
+
+Response capture records the effective response after an enabled response action
+has been applied. Capture also records the upstream response HTTP version and,
+when available, upstream TLS metadata including the selected ALPN protocol.
+
+### HTTP version and ALPN behavior
+
+Downstream and upstream HTTP versions are independent:
+
+```text
+browser -- HTTP/2 --> inspect -- TLS ALPN --> origin
+```
+
+For upstream HTTPS, Inspect offers both `h2` and `http/1.1`.
+
+| Upstream ALPN result | Upstream HTTP behavior |
+| --- | --- |
+| `h2` | use HTTP/2 |
+| `http/1.1` | use HTTP/1.1 |
+| no ALPN selected | use the safe HTTP/1.1 fallback |
+
+A CDN edge or an upstream-proxy route may legitimately leave ALPN unselected even
+when the client offered both protocols. This is not an HTTP/2 failure by itself;
+the HTTP/1.1 fallback preserves interoperability. Inspect must not force HTTP/2
+on such a connection.
 
 ## Features
 - HTTP and HTTPS proxying

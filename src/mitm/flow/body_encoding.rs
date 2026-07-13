@@ -2,7 +2,7 @@ use std::io::Read;
 
 use bytes::Bytes;
 use flate2::read;
-use http::{HeaderMap, HeaderValue};
+use rama::http::{header, HeaderMap, HeaderValue};
 
 pub(crate) fn decoded_body_or_raw(headers: &HeaderMap, body: &Bytes) -> Bytes {
     decode_content_encoded_body(headers, body).unwrap_or_else(|| {
@@ -11,7 +11,7 @@ pub(crate) fn decoded_body_or_raw(headers: &HeaderMap, body: &Bytes) -> Bytes {
 }
 
 pub(crate) fn decode_content_encoded_body(headers: &HeaderMap, body: &Bytes) -> Option<Bytes> {
-    let content_encoding = headers.get(http::header::CONTENT_ENCODING)?;
+    let content_encoding = headers.get(header::CONTENT_ENCODING)?;
     decode_by_content_encoding_header(content_encoding, body)
 }
 
@@ -81,7 +81,7 @@ pub(crate) fn body_file_name(base: &str, headers: &HeaderMap) -> String {
 
 pub(crate) fn content_encoding_suffixes(headers: &HeaderMap) -> Vec<&'static str> {
     let Some(content_encoding) = headers
-        .get(http::header::CONTENT_ENCODING)
+        .get(header::CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
     else {
         return Vec::new();

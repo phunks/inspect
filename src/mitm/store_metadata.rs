@@ -8,7 +8,7 @@ use sqlx::sqlite::{
     SqlitePool,
     SqliteSynchronous
 };
-use sqlx::{Acquire, Executor, Sqlite};
+use sqlx::{Acquire, AssertSqlSafe, Executor, Sqlite};
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::mpsc;
 use rama::telemetry::tracing;
@@ -293,12 +293,13 @@ where
             .execute(&mut *tx)
             .await?;
     } else {
-        let placeholders = std::iter::repeat_n("?", file_names.len())
+        let _placeholders = std::iter::repeat_n("?", file_names.len())
             .collect::<Vec<_>>()
             .join(", ");
-
+        let sql = format!("DELETE FROM filters WHERE file_name NOT IN ({_placeholders})");
+        let safe_query = AssertSqlSafe(sql);
         let mut query = sqlx::query(
-            "DELETE FROM filters WHERE file_name NOT IN ({placeholders})"
+            safe_query
         );
         
         for file_name in file_names {

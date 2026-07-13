@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use anyhow::{Context, Result};
-use http::StatusCode;
+use rama::http::StatusCode;
 use serde_json::{json, Map, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;

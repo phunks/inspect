@@ -1,32 +1,39 @@
 
 use rama::{
-    error::{ErrorContext, OpaqueError}, extensions::{ExtensionsMut, ExtensionsRef},
+    error::ErrorContext,
+    extensions::{Extension, ExtensionsRef},
     http::{
         layer::{
             compression::CompressionLayer,
             map_response_body::MapResponseBodyLayer,
             required_header::AddRequiredRequestHeadersLayer,
             trace::TraceLayer,
-            upgrade::{UpgradeLayer, Upgraded},
-        }, matcher::MethodMatcher,
-        server::HttpServer, service::web::response::IntoResponse,
+            upgrade::{
+                DefaultHttpProxyConnectReplyService,
+                UpgradeLayer,
+                Upgraded,
+            },
+        },
+        matcher::MethodMatcher,
+        server::HttpServer,
         Body,
+        BodyLimitLayer,
         Request,
         Response,
-        StatusCode,
     },
     layer::{AddInputExtensionLayer, ConsumeErrLayer},
-    net::{
-        http::RequestContext, proxy::ProxyTarget, stream::layer::http::BodyLimitLayer,
-        tls::server::{ServerAuth, ServerConfig},
-    },
+    matcher::Matcher,
+    net::address::{Host, HostWithPort, ProxyAddress},
     rt::Executor,
     service::service_fn,
-    tcp::{server::TcpListener},
+    tcp::server::TcpListener,
     telemetry::tracing,
-    tls::boring::{
-        client::EmulateTlsProfileLayer,
-        server::{TlsAcceptorData, TlsAcceptorLayer},
+    tls::{
+        boring::{
+            client::EmulateTlsProfileLayer,
+            server::TlsAcceptorLayer,
+        },
+        server::TlsServerConfig,
     },
     ua::{
         layer::emulate::UserAgentEmulateLayer,
@@ -43,27 +50,21 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
-use rama::net::address::{Host, HostWithPort, ProxyAddress};
+use rama::error::BoxError;
+use rama::http::ws::handshake::matcher::WebSocketMatcher;
+use rama::tls::boring::server::{BoringServerConfigExt, CacheKind, ServerCertIssuerData};
+use rama::tls::server::SniRouter;
 use serde::Serialize;
-use rama::http::ws::handshake::server::WebSocketMatcher;
-use rama::matcher::Matcher;
-use rama::net::tls::server::SniRouter;
+use tokio::sync::watch;
 use tracing::{info, info_span};
 use tracing_futures::Instrument;
-use tokio::sync::watch;
 use crate::filters::FilterManager;
 use crate::filters::http_client::OutboundHttpClientPool;
 use crate::mitm::capture::CapturePaths;
 use crate::mitm::client::{new_upstream_client, UpstreamClient};
 use crate::mitm::dynamic_ca::DynamicIssuer;
+use crate::mitm::flow::{CaptureService, FlowDispatcher, FlowDispatcherConfig, FlowEventPublisher, UpstreamFlowClient};
 use crate::mitm::flow::dispatcher::UpstreamFlowResult;
-use crate::mitm::flow::{
-    CaptureService,
-    FlowDispatcher,
-    FlowDispatcherConfig,
-    FlowEventPublisher,
-    UpstreamFlowClient
-};
 use crate::mitm::flow::state_store::FilterStateLimits;
 use crate::mitm::flow::websocket::dispatch_websocket_handshake;
 use crate::mitm::store_metadata::DbState;
@@ -115,9 +116,9 @@ pub struct PacketMarked {
     pub color: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Extension)]
 struct State {
-    mitm_tls_service_data: TlsAcceptorData,
+    mitm_tls_service_data: TlsServerConfig,
     exec: Executor,
     proxy_body_limit_bytes: Option<usize>,
     flow_dispatcher: FlowDispatcher,
@@ -183,31 +184,34 @@ pub async fn mitm_proxy_main(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
-        new_mitm_tls_service_data().await.context("generate self-signed mitm tls cert")?;
-
-    let upstream_client = new_upstream_client(
-        proxy_mode,
-        ua_profile,
-        connect_ua_profile,
-        Duration::from_millis(upstream_handshake_timeout_ms),
-        Duration::from_secs(upstream_request_timeout_sec),
-    );
+        new_mitm_tls_service_data().context("generate self-signed mitm tls cert")?;
 
     let upstream_proxy = match upstream_proxy {
         None => None,
         Some(a) => {
-            let ip = a.split(":").next().unwrap();
-            let port = a.split(":").last().unwrap();
+            let ip = a.split(':').next().unwrap();
+            let port = a.split(':').next_back().unwrap();
+
             Some(ProxyAddress {
-                address: HostWithPort { host: Host::from(IpAddr::from_str(ip)?), port: port.parse()? },
+                address: HostWithPort {
+                    host: Host::from(IpAddr::from_str(ip)?),
+                    port: port.parse()?,
+                },
                 credential: None,
                 protocol: Some(rama::net::Protocol::HTTP),
             })
         }
     };
     let graceful = rama::graceful::Shutdown::default();
-
     let exec = Executor::graceful(graceful.guard());
+    let upstream_client = new_upstream_client(
+        exec.clone(),
+        proxy_mode,
+        ua_profile,
+        connect_ua_profile,
+        Duration::from_millis(upstream_handshake_timeout_ms),
+        Duration::from_secs(upstream_request_timeout_sec),
+    );
 
     let capture = CaptureService::new(
         store_dbstate.clone(),
@@ -239,7 +243,8 @@ pub async fn mitm_proxy_main(
             upstream_proxy: upstream_proxy.clone(),
             body_save_limit_bytes,
             body_omit_content_types: body_omit_content_types.clone(),
-            filter_state_enabled: filter_state.enabled,
+            filters_enabled: proxy_mode == ProxyMode::Observe,
+            filter_state_enabled: proxy_mode == ProxyMode::Observe && filter_state.enabled,
             filter_state_limits: FilterStateLimits {
                 ttl: Duration::from_secs(filter_state.ttl_sec),
                 max_entry_bytes: filter_state.max_entry_bytes,
@@ -262,43 +267,40 @@ pub async fn mitm_proxy_main(
     let dbstate = store_dbstate.clone();
     info!(
         ?proxy_mode,
+        filters_enabled = proxy_mode == ProxyMode::Observe,
         request_ua_profile = ?ua_profile,
         connect_ua_profile = ?connect_ua_profile,
         "Starting mitm proxy with upstream proxy"
     );
 
-    let handle = graceful.spawn_task_fn(async move |guard| {
+    let handle = graceful.spawn_task(async {
         info!("starting tcp proxy on {service_port}");
-        let tcp_service = TcpListener::build()
-            .bind(service_port)
+
+        let tcp_service = TcpListener::build(exec.clone())
+            .bind_address(service_port)
             .await
-            .expect("bind tcp proxy to {service_port}}");
+            .expect("bind tcp proxy");
 
         let http_mitm_service = new_http_mitm_proxy(&state);
-        let http_service = HttpServer::auto(exec).service(
+        let http_service = HttpServer::auto(exec.clone()).service(Arc::new(
             (
                 TraceLayer::new_for_http(),
-                // See [`ProxyAuthLayer::with_labels`] for more information,
-                // e.g. can also be used to extract upstream proxy filters
-                // ProxyAuthLayer::new(Basic::new_static("john", "secret")),
                 ConsumeErrLayer::default(),
                 UpgradeLayer::new(
+                    exec,
                     MethodMatcher::CONNECT,
-                    service_fn(http_connect_accept),
+                    DefaultHttpProxyConnectReplyService::new(),
                     service_fn(http_connect_proxy),
                 ),
             )
                 .into_layer(http_mitm_service),
-        );
+        ));
 
         if let Some(proxy_body_limit_bytes) = state.proxy_body_limit_bytes {
             tcp_service
-                .serve_graceful(
-                    guard,
+                .serve(
                     (
                         AddInputExtensionLayer::new(state),
-                        // protect the http proxy from too large bodies,
-                        // both from request and response end
                         BodyLimitLayer::symmetric(proxy_body_limit_bytes),
                     )
                         .into_layer(http_service),
@@ -306,11 +308,7 @@ pub async fn mitm_proxy_main(
                 .await;
         } else {
             tcp_service
-                .serve_graceful(
-                    guard,
-                    AddInputExtensionLayer::new(state)
-                        .into_layer(http_service),
-                )
+                .serve(AddInputExtensionLayer::new(state).into_layer(http_service))
                 .await;
         }
     });
@@ -321,72 +319,24 @@ pub async fn mitm_proxy_main(
     Ok(())
 }
 
-async fn http_connect_accept(mut req: Request) -> Result<(Response, Request), Response> {
-    match RequestContext::try_from(&req).map(|ctx| ctx.host_with_port()) {
-        Ok(authority) => {
-            info!(
-                server.address = %authority.host,
-                server.port = %authority.port,
-                "accept CONNECT (lazy): insert proxy target into context",
-            );
-            req.extensions_mut().insert(ProxyTarget(authority));
-        }
-        Err(err) => {
-            tracing::error!("error extracting authority: {err:?}");
-            return Err(StatusCode::BAD_REQUEST.into_response());
-        }
-    }
-
-    Ok((StatusCode::OK.into_response(), req))
-}
-
-async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
-    // In the past we deleted the request context here, as such:
-    // ```
-    // ctx.remove::<RequestContext>();
-    // ```
-    // This is however not correct, as the request context remains true.
-    // The user proxies here with a target as aim. This target, incoming version
-    // and so on does not change. This initial context remains true
-    // and should be preserved. This is especially important,
-    // as we otherwise might not be able to define the scheme/authority
-    // for upstream http requests.
-    // let state = upgraded.extensions().get::<State>().unwrap();
-    let client_target = upgraded
-        .extensions()
-        .get::<ProxyTarget>()
-        .map(|pt| pt.0.clone())
-        .into_iter();
-
-    let span = info_span!(
-        "https_conn",
-        // ?upstream,
-        ?client_target,
-    );
+async fn http_connect_proxy(upgraded: Upgraded) -> Result<(), Infallible> {
+    let span = info_span!("https_conn");
 
     async move {
-        let state = upgraded.extensions().get::<State>().unwrap();
-        let http_service = new_http_mitm_proxy(state);
-        
-        if let Some(upstream_proxy) = state.flow_dispatcher.upstream_proxy() {
-            upgraded.extensions_mut().insert(upstream_proxy);
-        }
-
-        let executor = upgraded
+        let state = upgraded
             .extensions()
-            .get::<Executor>()
-            .cloned()
-            .unwrap_or_default();
-        let http_transport_service = HttpServer::auto(executor).service(http_service);
+            .get_ref::<State>()
+            .expect("proxy state must be present");
 
-        let https_service = TlsAcceptorLayer::new(
-            upgraded
-                .extensions()
-                .get::<State>()
-                .unwrap()
-                .mitm_tls_service_data
-                .clone(),
-        )
+        let http_service = new_http_mitm_proxy(state);
+        let executor = state.exec.clone();
+
+        let mut http_transport = HttpServer::auto(executor);
+        http_transport.h2_mut().set_enable_connect_protocol();
+
+        let http_transport_service = http_transport.service(http_service);
+
+        let https_service = TlsAcceptorLayer::new(state.mitm_tls_service_data.clone())
             .with_store_client_hello(true)
             .into_layer(http_transport_service);
 
@@ -404,31 +354,36 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
         .await
 }
 
-fn new_http_mitm_proxy(state: &State) -> impl Service<Request, Output = Response, Error = Infallible> {
-    (
-        MapResponseBodyLayer::new(Body::new),
-        TraceLayer::new_for_http(),
-        ConsumeErrLayer::default(),
-        UserAgentEmulateLayer::new(state.ua_db.clone())
-            .with_try_auto_detect_user_agent(state.proxy_mode == ProxyMode::Emulate)
-            .with_is_optional(true),
-        // RemoveResponseHeaderLayer::hop_by_hop(),
-        // RemoveRequestHeaderLayer::hop_by_hop(),
-        CompressionLayer::new(),
-        AddRequiredRequestHeadersLayer::new(),
-        EmulateTlsProfileLayer::new(),
+fn new_http_mitm_proxy(
+    state: &State,
+) -> impl Service<Request, Output = Response, Error = Infallible> + Clone {
+    Arc::new(
+        (
+            MapResponseBodyLayer::new(Body::new),
+            TraceLayer::new_for_http(),
+            ConsumeErrLayer::default(),
+            UserAgentEmulateLayer::new(state.ua_db.clone())
+                .with_try_auto_detect_user_agent(state.proxy_mode == ProxyMode::Emulate)
+                .with_is_optional(true),
+            CompressionLayer::new(),
+            AddRequiredRequestHeadersLayer::new(),
+            EmulateTlsProfileLayer::new(),
+        )
+            .into_layer(service_fn(http_mitm_proxy)),
     )
-        .into_layer(service_fn(http_mitm_proxy))
 }
 
 async fn http_mitm_proxy(req: Request) -> Result<Response, Infallible> {
-    let state = req.extensions().get::<State>().cloned().unwrap();
+    let state = req
+        .extensions()
+        .get_ref::<State>()
+        .expect("proxy state must be present")
+        .clone();
 
     if WebSocketMatcher::new().matches(None, &req) {
-        return Ok(dispatch_websocket_handshake(
-            &state.flow_dispatcher,
-            req,
-        ).await);
+        return Ok(
+            dispatch_websocket_handshake(&state.flow_dispatcher, req).await,
+        );
     }
 
     state.flow_dispatcher.dispatch(req).await
@@ -438,16 +393,13 @@ async fn http_mitm_proxy(req: Request) -> Result<Response, Infallible> {
 // NOTE: for a production service you ideally use
 // an issued TLS cert (if possible via ACME). Or at the very least
 // load it in from memory/file, so that your clients can install the certificate for trust.
-async fn new_mitm_tls_service_data() -> Result<TlsAcceptorData, OpaqueError> {
+fn new_mitm_tls_service_data() -> Result<TlsServerConfig, BoxError> {
     let dynamic_issuer = DynamicIssuer::default();
 
-    let tls_server_config = ServerConfig::new(
-        ServerAuth::CertIssuer(rama::net::tls::server::ServerCertIssuerData {
+    Ok(TlsServerConfig::new()
+        .with_alpn_http_auto()
+        .with_cert_issuer(ServerCertIssuerData {
             kind: dynamic_issuer.into(),
-            cache_kind: rama::net::tls::server::CacheKind::Disabled,
-        }));
-
-    tls_server_config
-        .try_into()
-        .context("create tls server config")
+            cache_kind: CacheKind::Disabled,
+        }))
 }

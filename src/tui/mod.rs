@@ -2051,6 +2051,10 @@ pub async fn run_tui(
     tui_mode: TuiMode,
     dbstate: Arc<DbState>,
 ) -> anyhow::Result<()> {
+    // Detect light/dark before entering raw mode so terminal-colorsaurus
+    // can talk to /dev/tty cleanly.
+    let _ = theme::popup_bg();
+
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
     let detail_bus = DetailActionBus::default();
 

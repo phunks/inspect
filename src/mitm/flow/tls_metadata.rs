@@ -1,41 +1,33 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use rama::extensions::{Extensions, InputExtensions};
-use rama::net::tls::DataEncoding;
+use rama::extensions::Extensions;
 use rama::tls::boring::client::ExtendedTlsParameters;
 use rama::tls::boring::core::hash::MessageDigest;
 use rama::tls::boring::core::x509::X509;
 use serde_json::{json, Value};
+
 use crate::mitm::tls_sni::IngressSNI;
 
 pub fn tls_sni_from_extensions(extensions: &Extensions) -> Option<String> {
     extensions
-        .get::<IngressSNI>()
+        .get_ref::<IngressSNI>()
         .map(|sni| sni.0.to_string())
 }
 
 pub(crate) fn upstream_tls_info_from_extensions(extensions: &Extensions) -> Option<Value> {
-    let params = extensions
-        .get::<ExtendedTlsParameters>()
-        .or_else(|| {
-            extensions
-                .get::<InputExtensions>()
-                .and_then(|input| input.0.get::<ExtendedTlsParameters>())
-        })?;
+    let params = extensions.get_ref::<ExtendedTlsParameters>()?;
 
     let negotiated = &params.negotiated;
 
-    let certificates = match negotiated.peer_certificate_chain.as_ref() {
-        Some(DataEncoding::DerStack(chain)) => chain
-            .iter()
-            .filter_map(|der| certificate_der_to_json(der).ok())
-            .collect::<Vec<_>>(),
-        Some(DataEncoding::Der(der)) => certificate_der_to_json(der)
-            .ok()
-            .into_iter()
-            .collect::<Vec<_>>(),
-        Some(DataEncoding::Pem(_)) | None => Vec::new(),
-    };
+    let certificates = negotiated
+        .peer_certificate_chain
+        .as_ref()
+        .map_or(Vec::new(), |chain| {
+            chain
+                .iter()
+                .filter_map(|der| certificate_der_to_json(der).ok())
+                .collect()
+        });
 
     Some(json!({
         "secure_protocol": params

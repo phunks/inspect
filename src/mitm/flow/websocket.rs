@@ -3,12 +3,9 @@ use std::sync::atomic::Ordering;
 use chrono::{DateTime, Utc};
 use rama::{
     http::{
-        service::web::response::IntoResponse,
         Request,
         Response,
-        StatusCode,
     },
-    net::http::RequestContext,
 };
 use rama::extensions::ExtensionsRef;
 use serde_json::json;
@@ -46,16 +43,34 @@ pub(crate) async fn dispatch_websocket_handshake(
 
     let tls_sni = tls_sni_from_extensions(req.extensions());
 
-    let req_ctx = match RequestContext::try_from(&req) {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            tracing::error!("error extracting websocket request context: {err:?}");
-            return StatusCode::BAD_REQUEST.into_response();
-        }
+    // let req_ctx = match RequestContext::try_from(&req) {
+    //     Ok(ctx) => ctx,
+    //     Err(err) => {
+    //         tracing::error!("error extracting websocket request context: {err:?}");
+    //         return StatusCode::BAD_REQUEST.into_response();
+    //     }
+    // };
+    // 
+    // let req_protocol = websocket_scheme_from_http_scheme(&req_ctx.protocol.to_string());
+    // let req_host = req_ctx.authority.host.to_string();
+
+    let req_protocol = if tls_sni.is_some() {
+        "wss".to_owned()
+    } else {
+        "ws".to_owned()
     };
 
-    let req_protocol = websocket_scheme_from_http_scheme(&req_ctx.protocol.to_string());
-    let req_host = req_ctx.authority.host.to_string();
+    let req_host = req
+        .uri()
+        .host()
+        .map(|host| host.to_str().into_owned())
+        .or_else(|| {
+            req.headers()
+                .get(rama::http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
 
     let id = Uuid::new_v4();
     let time = Utc::now();
@@ -123,8 +138,14 @@ pub(crate) async fn dispatch_websocket_handshake(
             method: req_method,
             protocol: req_protocol.clone(),
             host: req_host.clone(),
-            uri: uri.path().to_string(),
-            query_str: uri.query().unwrap_or_default().into(),
+            uri: uri
+                .path()
+                .map(|path| path.as_encoded_str().to_string())
+                .unwrap_or_else(|| "/".to_owned()),
+            query_str: uri
+                .query()
+                .map(|query| query.as_encoded_str().to_string())
+                .unwrap_or_default(),
             version: version_to_string(parts.version),
             tls_sni,
             headers: headers_to_json(&parts.headers),
@@ -151,8 +172,14 @@ pub(crate) async fn dispatch_websocket_handshake(
             method: "WS".to_string(),
             protocol: req_protocol.clone(),
             host: req_host.clone(),
-            uri: uri.path().to_string(),
-            query_str: uri.query().unwrap_or_default().to_string(),
+            uri: uri
+                .path()
+                .map(|path| path.as_encoded_str().to_string())
+                .unwrap_or_else(|| "/".to_owned()),
+            query_str: uri
+                .query()
+                .map(|query| query.as_encoded_str().to_string())
+                .unwrap_or_default(),
             version: version_to_string(parts.version),
             marks: Vec::new(),
         }));
@@ -217,13 +244,13 @@ pub(crate) async fn dispatch_websocket_handshake(
     Response::from_parts(parts, body)
 }
 
-fn websocket_scheme_from_http_scheme(scheme: &str) -> String {
-    match scheme {
-        "https" => "wss".to_string(),
-        "http" => "ws".to_string(),
-        other => other.to_string(),
-    }
-}
+// fn websocket_scheme_from_http_scheme(scheme: &str) -> String {
+//     match scheme {
+//         "https" => "wss".to_string(),
+//         "http" => "ws".to_string(),
+//         other => other.to_string(),
+//     }
+// }
 
 fn rfc3999z(time: &DateTime<Utc>) -> String {
     time.to_rfc3339_opts(chrono::format::SecondsFormat::Millis, true)

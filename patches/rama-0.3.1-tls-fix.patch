@@ -1,0 +1,190 @@
+diff --git a/rama-tls-boring/src/client/connector.rs b/rama-tls-boring/src/client/connector.rs
+index ee061179..3242b6a0 100644
+--- a/rama-tls-boring/src/client/connector.rs
++++ b/rama-tls-boring/src/client/connector.rs
+@@ -2,7 +2,7 @@ use rama_boring_tokio::{HandshakeError, SslStream};
+ use rama_core::conversion::RamaTryInto;
+ use rama_core::error::BoxErrorExt as _;
+ use rama_core::error::{BoxError, ErrorContext as _, ErrorExt};
+-use rama_core::extensions::{Extensions, ExtensionsRef};
++use rama_core::extensions::{Extension, Extensions, ExtensionsRef};
+ use rama_core::io::Io;
+ use rama_core::telemetry::tracing;
+ use rama_core::{Layer, Service};
+@@ -23,6 +23,20 @@ use crate::{TlsStream, types::TlsTunnel};
+ #[cfg(feature = "http")]
+ use rama_tls::TlsAlpn;
+ 
++#[derive(Debug, Clone, Extension)]
++pub struct ExtendedTlsParameters {
++    pub negotiated: NegotiatedTlsParameters,
++    pub protocol_version: Option<String>,
++    pub cipher: Option<String>,
++    pub cipher_standard_name: Option<String>,
++    pub cipher_description: Option<String>,
++    pub bits: Option<u32>,
++    pub algorithm_bits: Option<u32>,
++    pub curve_name: Option<String>,
++    pub client_random: Vec<u8>,
++    pub server_random: Vec<u8>,
++}
++
+ #[cfg(feature = "http")]
+ use rama_net::http::{TargetHttpVersion, Version};
+ 
+@@ -219,7 +233,8 @@ where
+         let sni_domain = sni_domain_for(&authority.host);
+         let connector_data = self.connector_data(input.extensions(), sni_domain.as_deref())?;
+ 
+-        let (stream, negotiated_params) = handshake(connector_data, conn).await?;
++        let (stream, negotiated_params, extended_tls_params) =
++            handshake(connector_data, conn).await?;
+ 
+         tracing::trace!(
+             server.address = %authority.host,
+@@ -227,12 +242,15 @@ where
+             "TlsConnector(auto): protocol secure, established tls connection",
+         );
+ 
++        input.extensions().insert(extended_tls_params.clone());
++
+         let conn = AutoTlsStream::secure(stream);
+ 
+         #[cfg(feature = "http")]
+         set_target_http_version(input.extensions(), conn.extensions(), &negotiated_params)?;
+ 
+         conn.extensions().insert(negotiated_params);
++        conn.extensions().insert(extended_tls_params);
+         conn.extensions().insert(StreamTransformed {
+             by: "rama-tls-boring::TlsConnector",
+         });
+@@ -265,13 +283,18 @@ where
+         let sni_domain = sni_domain_for(&authority.host);
+         let connector_data = self.connector_data(input.extensions(), sni_domain.as_deref())?;
+ 
+-        let (conn, negotiated_params) = handshake(connector_data, conn).await?;
++        let (conn, negotiated_params, extended_tls_params) =
++            handshake(connector_data, conn).await?;
++
++        input.extensions().insert(extended_tls_params.clone());
++
+         let conn = TlsStream::new(conn);
+ 
+         #[cfg(feature = "http")]
+         set_target_http_version(input.extensions(), conn.extensions(), &negotiated_params)?;
+ 
+         conn.extensions().insert(negotiated_params);
++        conn.extensions().insert(extended_tls_params);
+         conn.extensions().insert(StreamTransformed {
+             by: "rama-tls-boring::TlsConnector",
+         });
+@@ -313,13 +336,18 @@ where
+ 
+         let connector_data = self.connector_data(input.extensions(), maybe_sni_overwrite)?;
+ 
+-        let (stream, negotiated_params) = handshake(connector_data, conn).await?;
++        let (stream, negotiated_params, extended_tls_params) =
++            handshake(connector_data, conn).await?;
++
++        input.extensions().insert(extended_tls_params.clone());
++
+         let conn = AutoTlsStream::secure(stream);
+ 
+         #[cfg(feature = "http")]
+         set_target_http_version(input.extensions(), conn.extensions(), &negotiated_params)?;
+ 
+         conn.extensions().insert(negotiated_params);
++        conn.extensions().insert(extended_tls_params);
+         conn.extensions().insert(StreamTransformed {
+             by: "rama-tls-boring::TlsConnector",
+         });
+@@ -488,7 +516,7 @@ where
+ async fn handshake<T>(
+     connector_data: TlsConnectorData,
+     stream: T,
+-) -> Result<(SslStream<T>, NegotiatedTlsParameters), BoxError>
++) -> Result<(SslStream<T>, NegotiatedTlsParameters, ExtendedTlsParameters), BoxError>
+ where
+     T: Io + Unpin + ExtensionsRef,
+ {
+@@ -552,7 +580,9 @@ where
+         }
+     };
+ 
+-    let params = match stream.ssl().session() {
++    let ssl = stream.ssl();
++
++    let params = match ssl.session() {
+         Some(ssl_session) => {
+             let protocol_version = ssl_session
+                 .protocol_version()
+@@ -561,8 +591,7 @@ where
+                     BoxError::from_static_str("boring ssl connector: cast min proto version")
+                         .context_field("protocol_version", v)
+                 })?;
+-            let application_layer_protocol = stream
+-                .ssl()
++            let application_layer_protocol = ssl
+                 .selected_alpn_protocol()
+                 .map(ApplicationProtocol::from);
+             if let Some(ref proto) = application_layer_protocol {
+@@ -570,7 +599,7 @@ where
+             }
+ 
+             let server_certificate_chain = match store_server_certificate_chain
+-                .then(|| stream.ssl().peer_cert_chain())
++                .then(|| ssl.peer_cert_chain())
+                 .flatten()
+             {
+                 Some(chain) => Some(chain.rama_try_into()?),
+@@ -611,7 +640,28 @@ where
+         );
+     }
+ 
+-    Ok((stream, params))
++    let cipher = ssl.current_cipher();
++
++    let mut client_random = vec![0u8; ssl.client_random(&mut [])];
++    ssl.client_random(&mut client_random);
++
++    let mut server_random = vec![0u8; ssl.server_random(&mut [])];
++    ssl.server_random(&mut server_random);
++
++    let extended_params = ExtendedTlsParameters {
++        negotiated: params.clone(),
++        protocol_version: Some(ssl.version_str().to_string()),
++        cipher: cipher.map(|cipher| cipher.name().to_string()),
++        cipher_standard_name: cipher.and_then(|cipher| cipher.standard_name().map(str::to_string)),
++        cipher_description: cipher.map(|cipher| cipher.description()),
++        bits: cipher.map(|cipher| cipher.bits().secret as u32),
++        algorithm_bits: cipher.map(|cipher| cipher.bits().algorithm as u32),
++        curve_name: ssl.curve_name().map(str::to_string),
++        client_random,
++        server_random,
++    };
++
++    Ok((stream, params, extended_params))
+ }
+ 
+ #[non_exhaustive]
+diff --git a/rama-tls-boring/src/client/mod.rs b/rama-tls-boring/src/client/mod.rs
+index ce8332fd..696a08e6 100644
+--- a/rama-tls-boring/src/client/mod.rs
++++ b/rama-tls-boring/src/client/mod.rs
+@@ -11,8 +11,14 @@ pub use rama_boring_tokio::SslStream as BoringTlsStream;
+ mod connector;
+ #[doc(inline)]
+ pub use connector::{
+-    ConnectorKindAuto, ConnectorKindSecure, ConnectorKindTunnel, TlsConnectError, TlsConnector,
+-    TlsConnectorLayer, tls_connect,
++    ConnectorKindAuto,
++    ConnectorKindSecure,
++    ConnectorKindTunnel,
++    ExtendedTlsParameters,
++    TlsConnectError,
++    TlsConnector,
++    TlsConnectorLayer,
++    tls_connect,
+ };
+ 
+ mod config;
