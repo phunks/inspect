@@ -57,6 +57,49 @@ index 17565c4..9f6f688 100644
 +    assert_eq!(state.display_progress(), 1.0);
 +}
 \ No newline at end of file
+diff --git a/src/widget/widgets/input.rs b/src/widget/widgets/input.rs
+index 7cce4ae..4085e5f 100644
+--- a/src/widget/widgets/input.rs
++++ b/src/widget/widgets/input.rs
+@@ -28,6 +28,7 @@ pub struct Input {
+     multiline: bool,
+     placeholder: Option<Box<Text>>,
+     selected_style: Option<Style>,
++    suppress_next_reveal: bool,
+ }
+ 
+ impl Input {
+@@ -155,6 +156,10 @@ impl DelegateWidget for Input {
+         revelation: &mut Revelation,
+         _align: Vec2<Option<Align>>,
+     ) {
++        if std::mem::take(&mut self.suppress_next_reveal) {
++            return;
++        }
++
+         let cursor_idx = self.editor.get_cursor_index(&*self.text);
+         let cursor_pos = self
+             .text
+@@ -190,9 +195,19 @@ impl Input {
+             multiline: false,
+             placeholder: None,
+             selected_style: None,
++            suppress_next_reveal: false,
+         })
+     }
+ 
++    /// Prevents the next focus/reveal request from scrolling an ancestor pane.
++    ///
++    /// This is useful when an editor should open at the beginning of its text
++    /// while preserving a cursor that was intentionally initialized elsewhere.
++    pub fn suppress_next_reveal(mut self: Box<Self>) -> Box<Self> {
++        self.suppress_next_reveal = true;
++        self
++    }
++
+     /// Builder form of [`Input::set_content`].
+     pub fn content(mut self: Box<Self>, content: impl Into<String>) -> Box<Self> {
+         self.set_content(content.into());
 diff --git a/src/widget/widgets/pane.rs b/src/widget/widgets/pane.rs
 index 0c41e7e..01639d2 100644
 --- a/src/widget/widgets/pane.rs

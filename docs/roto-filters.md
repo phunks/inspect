@@ -44,7 +44,51 @@ fn ping() -> bool {
 
 ## Where filters run
 
-Roto filters run inside the HTTP MITM flow after request/response bodies are collected.
+Roto is the semantic processing layer of an ordinary HTTP MITM flow. Filters run
+after request/response bodies are collected and before the corresponding capture
+record is committed.
+
+Roto behavior depends on `--proxy-mode`:
+
+| Proxy mode | Roto request/response/completed filters | Patches | Synthetic response / drop | Capture and TLS metadata |
+| --- | --- | --- | --- | --- |
+| `observe` | enabled | enabled | enabled | enabled |
+| `emulate` | disabled | disabled | disabled | enabled |
+
+`emulate` prioritizes browser-like upstream behavior. It intentionally bypasses
+all Roto actions, including request and response mutation, synthetic responses,
+drops, completed filters, and Roto outbound HTTP jobs. This prevents semantic
+MITM actions from making an emulated browser profile inconsistent with its
+upstream HTTP, TLS, or HTTP/2 wire behavior.
+
+The ordinary HTTP flow is:
+
+```text
+request:
+downstream browser
+  -> MITM TLS termination
+  -> Roto request filter/action                 (observe only)
+  -> request capture
+  -> upstream protocol cleanup
+  -> browser / TLS / HTTP emulation
+  -> upstream origin
+
+response:
+upstream origin
+  -> browser-like response handling/decompression
+  -> Roto response filter/action                (observe only)
+  -> response capture
+  -> downstream browser
+```
+
+Protocol cleanup is intentionally outside Roto. It removes hop-by-hop headers and
+adjusts body-integrity metadata immediately before upstream transmission. A Roto
+script should therefore describe semantic HTTP changes, not transport-specific
+wire framing.
+
+WebSocket upgrades use a separate HTTP/1.1 handshake and relay path. The normal
+HTTP Roto/capture body pipeline does not apply to upgraded WebSocket payload
+frames.
 
 Synthetic responses follow the same response dispatch/capture path as upstream
 responses: the request is captured first, then the synthetic response is filtered,
@@ -56,33 +100,35 @@ side effects are still limited; see the completed phase section below.
 ```mermaid
 flowchart TD
     client[Client / Browser]
-
     proxy[Inspect MITM proxy]
 
     collect_req[Collect request body]
-    request_filter[Request filters<br/>phase = request]
-    apply_req[Apply RequestAction<br/>headers / body / synthetic response]
+    request_filter[Request filters<br/>phase = request<br/>observe only]
+    apply_req[Apply RequestAction<br/>headers / body / synthetic response<br/>observe only]
     save_req[Capture request<br/>request.head / request.body / DB metadata]
 
-    synthetic_check{Synthetic response?}
+    synthetic_check{Synthetic response?<br/>observe only}
+
+    protocol_cleanup[Upstream protocol cleanup<br/>hop-by-hop headers / body integrity]
+    upstream_emulation[Browser / TLS / HTTP emulation<br/>ALPN h2 or HTTP/1.1 negotiation]
+    upstream[Upstream server]
+
+    response_handling[Browser-like response handling<br/>decompression]
+    collect_res[Collect upstream response body]
+    response_filter[Response filters<br/>phase = response<br/>observe only]
+    apply_res[Apply ResponseAction<br/>status / headers / body<br/>observe only]
+    outbound_jobs[Resolve and enqueue outbound HTTP jobs<br/>observe only]
+    save_res[Capture response<br/>response.head / response.body / ssl_tls.json / DB metadata]
+    completed[Completed filters<br/>phase = completed<br/>observe only]
+%%    return_res[Return response to client]
 
     synthetic_res[Build synthetic response]
     collect_synthetic[Collect synthetic response body]
-    response_filter_synthetic[Response filters<br/>phase = response]
-    apply_synthetic_res[Apply ResponseAction<br/>status / headers / body]
+    response_filter_synthetic[Response filters<br/>phase = response<br/>observe only]
+    apply_synthetic_res[Apply ResponseAction<br/>status / headers / body<br/>observe only]
     save_synthetic[Capture synthetic response<br/>response.head / response.body / ssl_tls.json / DB metadata]
-    completed_synthetic[Completed filters<br/>phase = completed]
-    return_synthetic[Return response to client]
-
-    upstream[Upstream server]
-
-    collect_res[Collect upstream response body]
-    response_filter[Response filters<br/>phase = response]
-    apply_res[Apply ResponseAction<br/>status / headers / body]
-    outbound_jobs[Resolve and enqueue outbound HTTP jobs]
-    save_res[Capture response<br/>response.head / response.body / ssl_tls.json / DB metadata]
-    completed[Completed filters<br/>phase = completed]
-    return_res[Return response to client]
+%%    completed_synthetic[Completed filters<br/>phase = completed<br/>observe only]
+%%    return_synthetic[Return response to client]
 
     tui[TUI events<br/>Started / Marked / Completed]
 
@@ -101,26 +147,35 @@ flowchart TD
     collect_synthetic --> response_filter_synthetic
     response_filter_synthetic --> apply_synthetic_res
     apply_synthetic_res --> save_synthetic
-    save_synthetic --> completed_synthetic
-    completed_synthetic --> return_synthetic
-    return_synthetic --> client
-
+    save_synthetic --> completed
+%%    completed_synthetic --> return_synthetic
+%%    return_synthetic --> client
+    
     response_filter_synthetic -. marks/tags/notes .-> tui
     save_synthetic -. completed event .-> tui
 
-    synthetic_check -- no --> upstream
-    upstream --> collect_res
+    synthetic_check -- no --> protocol_cleanup
+    protocol_cleanup --> upstream_emulation
+    upstream_emulation --> upstream
+    upstream --> response_handling
+    response_handling --> collect_res
     collect_res --> response_filter
     response_filter --> apply_res
     apply_res --> outbound_jobs
     outbound_jobs --> save_res
     save_res --> completed
-    completed --> return_res
-    return_res --> client
+%%    completed --> return_res
+%%    return_res --> client
+    completed -. Return response to client .-> client
 
     response_filter -. marks/tags/notes .-> tui
     save_res -. completed event .-> tui
 ```
+
+In `emulate` mode, Inspect bypasses every node labelled `observe only`.
+Request/response capture, TLS metadata, database persistence, and TUI events
+remain active. The request proceeds from body collection and request capture to
+upstream protocol cleanup and browser/TLS/HTTP emulation without Roto mutation.
 
 Current filtering points:
 

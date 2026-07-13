@@ -50,6 +50,7 @@ ignore = "0.4"
 toml = "1.1"
 roto = { git = "https://codeberg.org/NLnetLabs/roto", features = ["selinux-fix"] }
 json-patch = "4.2"
+terminal-colorsaurus = "1"
 
 [patch.crates-io]
 rama-tls-boring = { path = "ext/rama/rama-tls-boring" }
