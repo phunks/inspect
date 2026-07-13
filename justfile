@@ -2,7 +2,6 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 RAMA_REPO := "https://github.com/plabayo/rama.git"
 RAMA_REV := "3955c82ca4003c69e7f3e8f808b2c22efa008b73"
-RAMA_TAG := "rama-0.3.1"
 RAMA_DIR := "ext/rama"
 RAMA_PATCH := "patches/rama-0.3.1-tls-fix.patch"
 
@@ -38,11 +37,18 @@ setup-rama:
 # Reset ext/rama to the target tag and re-apply local TLS patch.
 reset-rama:
     test -d "{{RAMA_DIR}}/.git"
-    cd "{{RAMA_DIR}}" && git fetch --depth 1 origin tag "{{RAMA_TAG}}"
-    cd "{{RAMA_DIR}}" && git reset --hard "{{RAMA_TAG}}"
-    cd "{{RAMA_DIR}}" && git clean -fd
-    cd "{{RAMA_DIR}}" && git apply --check "../../{{RAMA_PATCH}}"
-    cd "{{RAMA_DIR}}" && git apply "../../{{RAMA_PATCH}}"
+    git -C "{{RAMA_DIR}}" fetch --depth 1 origin "{{RAMA_REV}}"
+    git -C "{{RAMA_DIR}}" checkout --detach FETCH_HEAD
+    git -C "{{RAMA_DIR}}" reset --hard HEAD
+    git -C "{{RAMA_DIR}}" clean -fd
+    if git apply --directory="{{RAMA_DIR}}" --check "{{RAMA_PATCH}}"; then \
+      git apply --directory="{{RAMA_DIR}}" "{{RAMA_PATCH}}"; \
+    elif git apply --directory="{{RAMA_DIR}}" -R --check "{{RAMA_PATCH}}"; then \
+      echo "{{RAMA_PATCH}} already applied; skipping"; \
+    else \
+      echo "ERROR: {{RAMA_PATCH}} does not apply cleanly to {{RAMA_DIR}} at {{RAMA_REV}}" >&2; \
+      exit 1; \
+    fi
 
 # Remove ext/rama completely.
 clean-rama:

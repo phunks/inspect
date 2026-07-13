@@ -757,18 +757,6 @@ impl PacketListDelegate {
     }
 
     fn is_list_at_bottom(&self) -> bool {
-        // if self.selected == 0 && self.list
-        //     .get_widget(self.list_id)
-        //     .map(|list| {
-        //         list.get_scroll_ratio(Axis2D::Y) == 1.0})
-        //     .unwrap_or(true) {
-        //     return true;
-        // }
-        // let visible = self.list
-        //     .get_widget(self.list_id).map(|list|list.get_scroll_ratio(Axis2D::Y));
-        //
-        // debug!("is_list_at_bottom: {:?}", visible);
-
         self.list
             .get_widget(self.list_id)
             .map(|list| {
@@ -1192,13 +1180,6 @@ impl PacketListDelegate {
             self.select_row(idx);
         }
     }
-
-    // fn visible_rows(&self) -> &[PacketRow] {
-    //     match self.mode {
-    //         PacketListMode::Main => &self.rows,
-    //         PacketListMode::Search => &self.search_rows,
-    //     }
-    // }
 
     fn visible_rows_len(&self) -> usize {
         match self.mode {

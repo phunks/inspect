@@ -168,15 +168,17 @@ impl EditPanel {
                             .bordered()
                             .border_style(Style::new().fg(theme::panel_border_fg()))
                             .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
+                            .y_scroll(Scrollbar::AutoHide)
                             .children([
                                 Input::new()
                                     .content(editable_text.clone())
+                                    .suppress_next_reveal()
                                     .bindings(ModernBindings::new)
                                     .multiline()
                                     .wrap()
                                     .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
                                     .id(&mut input_id) as Box<dyn Widget>,
-                            ]).y_scroll(Scrollbar::AutoHide) as Box<dyn Widget>,
+                            ]) as Box<dyn Widget>,
                         Pane::new()
                             .vertical()
                             .flex(1)
@@ -704,22 +706,6 @@ impl DelegateWidget for EditPanel {
     fn override_is_focusable(&self) -> bool {
         true
     }
-
-    // fn after_before_layout(&mut self) {
-    //     if self.initial_scroll_synced {
-    //         return;
-    //     }
-    //
-    //     if let Some(pane) = self.root.get_widget_mut(self.input_scroll_id) {
-    //         pane.set_scroll_progress(Axis2D::Y, 0.0);
-    //     }
-    //
-    //     if let Some(pane) = self.root.get_widget_mut(self.preview_scroll_id) {
-    //         pane.set_scroll_progress(Axis2D::Y, 0.0);
-    //     }
-    //
-    //     self.initial_scroll_synced = true;
-    // }
 
     fn override_on_input(&mut self, queue: &mut InputQueue) -> InputResult {
         let Some(event) = queue.peek() else {

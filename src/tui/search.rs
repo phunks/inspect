@@ -358,7 +358,7 @@ pub fn search_capture_files(
             continue;
         };
 
-        if !entry.file_type().is_some_and(|ft| ft.is_file())  {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
 
@@ -370,10 +370,11 @@ pub fn search_capture_files(
             results: Vec::new(),
         };
 
-        let mut searcher = Searcher::new();
         if let Ok(Some(reader)) = open_decompressed_search_reader(path) {
+            let mut searcher = Searcher::new();
             let _ = searcher.search_reader(&matcher, reader, &mut sink);
-        } else {
+        } else if is_searchable_text_file(path) {
+            let mut searcher = Searcher::new();
             let _ = searcher.search_path(&matcher, path, &mut sink);
         }
 
@@ -389,6 +390,26 @@ pub fn search_capture_files(
     });
 
     Ok(results)
+}
+
+fn is_searchable_text_file(path: &Path) -> bool {
+    const PROBE_BYTES: usize = 8 * 1024;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+
+    let mut bytes = Vec::with_capacity(PROBE_BYTES);
+    if file
+        .by_ref()
+        .take(PROBE_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
+    }
+
+    !bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
