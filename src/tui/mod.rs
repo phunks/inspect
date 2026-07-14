@@ -15,6 +15,7 @@ pub mod body;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use chord_macro::chord;
@@ -172,6 +173,33 @@ impl PacketRow {
         if self.line.as_ref() != line {
             self.line = Arc::<str>::from(line);
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct DiffSelection {
+    left_id: Option<String>,
+    right_id: Option<String>,
+}
+
+impl DiffSelection {
+    fn slot_for(&self, id: &str) -> Option<char> {
+        if self.left_id.as_deref() == Some(id) {
+            Some('A')
+        } else if self.right_id.as_deref() == Some(id) {
+            Some('B')
+        } else {
+            None
+        }
+    }
+
+    fn selected_ids(&self) -> Option<(String, String)> {
+        Some((self.left_id.clone()?, self.right_id.clone()?))
+    }
+
+    fn clear(&mut self) {
+        self.left_id = None;
+        self.right_id = None;
     }
 }
 
@@ -409,6 +437,7 @@ struct RowClicked(usize);
 struct PacketListItem {
     _row_index: usize,
     line: Arc<str>,
+    diff_slot: Option<char>,
 }
 
 #[derive(Clone, Debug)]
@@ -436,6 +465,8 @@ pub struct PacketListDelegate {
     search_matcher: Option<SearchMatcher>,
     search_error: Option<String>,
     selected: usize,
+    diff_selection: DiffSelection,
+    external_diff_command: Option<Arc<[String]>>,
     rx: mpsc::Receiver<PacketEvent>,
     list: Box<Pane>,
     list_id: WidgetId<List>,
@@ -520,6 +551,7 @@ impl PacketListDelegate {
         rx: mpsc::Receiver<PacketEvent>,
         detail_tx: UnboundedSender<UiEvent>,
         detail_bus: DetailActionBus,
+        external_diff_command: Option<Vec<String>>,
         time_display: TimeDisplayConfig,
         tui_mode: TuiMode,
         dbstate: Arc<DbState>,
@@ -588,6 +620,7 @@ impl PacketListDelegate {
                 .map(|(row_index, row)| PacketListItem {
                     _row_index: row_index,
                     line: row.line.clone(),
+                    diff_slot: None,
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -607,6 +640,7 @@ impl PacketListDelegate {
                         ctx.row_clicks.clone(),
                         idx,
                         item.line.clone(),
+                        item.diff_slot,
                         idx == ctx.selected,
                     ) as Box<dyn Widget>
                 )
@@ -634,6 +668,8 @@ impl PacketListDelegate {
             search_matcher: None,
             search_error: None,
             selected,
+            diff_selection: DiffSelection::default(),
+            external_diff_command: external_diff_command.map(Arc::from),
             rx,
             list,
             list_id,
@@ -686,6 +722,87 @@ impl PacketListDelegate {
 
         row.refresh_line();
         row
+    }
+
+    fn refresh_diff_markers(&mut self) {
+        self.sync_list();
+        self.invalidate_visible_range(0..self.visible_rows_len());
+        tuie::dirty_layout();
+    }
+
+    fn set_diff_left_from_selected(&mut self) {
+        let Some(id) = self.selected_packet_id().map(str::to_owned) else {
+            self.append_system_line("=== diff A unavailable: select a captured packet ===");
+            return;
+        };
+
+        if self.diff_selection.right_id.as_deref() == Some(id.as_str()) {
+            self.append_system_line("=== diff A unavailable: packet is already marked as B ===");
+            return;
+        }
+
+        self.diff_selection.left_id = Some(id);
+        self.refresh_diff_markers();
+        self.append_system_line("=== marked selected packet as diff A ===");
+        self.invalidate_visible_range(0..self.visible_rows_len());
+    }
+
+    fn set_diff_right_from_selected(&mut self) {
+        let Some(id) = self.selected_packet_id().map(str::to_owned) else {
+            self.append_system_line("=== diff B unavailable: select a captured packet ===");
+            return;
+        };
+
+        if self.diff_selection.left_id.as_deref() == Some(id.as_str()) {
+            self.append_system_line("=== diff B unavailable: packet is already marked as A ===");
+            return;
+        }
+
+        self.diff_selection.right_id = Some(id);
+        self.refresh_diff_markers();
+        self.append_system_line("=== marked selected packet as diff B ===");
+    }
+
+    fn clear_diff_selection(&mut self) {
+        self.diff_selection.clear();
+        self.refresh_diff_markers();
+        self.append_system_line("=== cleared diff A/B selection ===");
+    }
+
+    fn poll_external_diff_requests(&mut self) {
+        for selection in self.detail_bus.take_external_diff_requests() {
+            let Some(command) = self.external_diff_command.clone() else {
+                self.append_system_line(
+                    "=== external diff unavailable: configure external_diff_command ===",
+                );
+                continue;
+            };
+
+            let Some((left_id, right_id)) = self.diff_selection.selected_ids() else {
+                self.append_system_line("=== external diff unavailable: mark packets with a and b ===");
+                continue;
+            };
+
+            let db = self.dbstate.clone();
+            let time_formatter = self.time_formatter.clone();
+
+            tokio::spawn(async move {
+                let left = load_detail_content(db.clone(), left_id, time_formatter.clone()).await;
+                let right = load_detail_content(db, right_id, time_formatter).await;
+
+                let (left, right) = match (left, right) {
+                    (Ok(left), Ok(right)) => external_diff_text(selection, left, right),
+                    (Err(err), _) | (_, Err(err)) => {
+                        tracing::warn!(error = ?err, "failed to load external diff content");
+                        return;
+                    }
+                };
+
+                if let Err(err) = spawn_external_diff(command.as_ref(), left, right) {
+                    tracing::warn!(error = ?err, "failed to start external diff");
+                }
+            });
+        }
     }
 
     fn poll_open_edit_requests(&mut self) {
@@ -942,6 +1059,7 @@ impl PacketListDelegate {
                 .map(|(row_index, row)| PacketListItem {
                     _row_index: row_index,
                     line: row.line.clone(),
+                    diff_slot: self.diff_selection.slot_for(&row.id),
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -953,6 +1071,7 @@ impl PacketListDelegate {
                     self.rows.get(row_index).map(|row| PacketListItem {
                         _row_index: row_index,
                         line: row.line.clone(),
+                        diff_slot: self.diff_selection.slot_for(&row.id),
                     })
                 })
                 .collect::<Vec<_>>()
@@ -978,6 +1097,7 @@ impl PacketListDelegate {
                             ctx.row_clicks.clone(),
                             idx,
                             item.line.clone(),
+                            item.diff_slot,
                             idx == ctx.selected,
                         ) as Box<dyn Widget>
                     )
@@ -1087,88 +1207,13 @@ impl PacketListDelegate {
         let time_formatter = self.time_formatter.clone();
 
         tokio::spawn(async move {
-            let req = db.select_request_by_id(id.clone()).await;
-            let res = db.select_response_by_id(id.clone()).await;
-
-            let detail = match (req, res) {
-                (Ok(mut req), Ok(res)) => {
-                    if let Some(epoch_ms) = req.epoch_ms {
-                        let raw_time = req.time.as_deref().unwrap_or_default();
-                        req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
-                    }
-
-                    let req_body = read_body_file(
-                        req.request_body_path.as_deref(),
-                        &req.headers,
-                    ).await;
-                    let res_body = read_body_file(
-                        res.response_body_path.as_deref(),
-                        &res.headers,
-                    ).await;
-                    let req_body = format_body_with_size(req.body_size_line(), req_body);
-                    let res_body = format_body_with_size(res.body_size_line(), res_body);
-                    let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
-                    let ssl_tls_info = format_ssl_tls_info(
-                        req.tls_sni.as_deref(),
-                        res.tls_upstream.as_deref(),
-                    );
-
-                    DetailContent {
-                        request_meta: req.to_string(),
-                        request_body: req_body,
-                        response_meta: res.to_string(),
-                        response_body: res_body,
-                        ssl_tls_info,
-                        id,
-                        dir,
-                    }
-                }
-                (Ok(mut req), Err(e)) => {
-                    if let Some(epoch_ms) = req.epoch_ms {
-                        let raw_time = req.time.as_deref().unwrap_or_default();
-                        req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
-                    }
-
-                    let req_body = read_body_file(
-                        req.request_body_path.as_deref(),
-                        &req.headers,
-                    ).await;
-                    let req_body = format_body_with_size(req.body_size_line(), req_body);
-                    let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
-                    let ssl_tls_info = format_ssl_tls_info(req.tls_sni.as_deref(), None);
-
-                    DetailContent {
-                        request_meta: req.to_string(),
-                        request_body: req_body,
-                        response_meta: format!("response error: {e:#}"),
-                        response_body: String::new(),
-                        ssl_tls_info,
-                        id,
-                        dir,
-                    }
-                }
-                (Err(e1), Err(e2)) => {
-                    DetailContent {
-                        request_meta: format!("request error: {e1:#}"),
-                        request_body: String::new(),
-                        response_meta: format!("response error: {e2:#}"),
-                        response_body: String::new(),
-                        ssl_tls_info: format_ssl_tls_info(None, None),
-                        id,
-                        dir: String::new(),
-                    }
-                }
-                (Err(e), _) => {
-                    DetailContent {
-                        request_meta: format!("request error: {e:#}"),
-                        request_body: String::new(),
-                        response_meta: String::new(),
-                        response_body: String::new(),
-                        ssl_tls_info: format_ssl_tls_info(None, None),
-                        id,
-                        dir: String::new(),
-                    }
-                }
+            let detail = match load_detail_content(db, id.clone(), time_formatter).await {
+                Ok(detail) => detail,
+                Err(err) => DetailContent {
+                    request_meta: format!("detail error: {err:#}"),
+                    id,
+                    ..DetailContent::default()
+                },
             };
 
             let _ = detail_tx.send(UiEvent::ShowDetail {
@@ -1699,6 +1744,82 @@ impl PacketListDelegate {
     }
 }
 
+async fn load_detail_content(
+    db: Arc<DbState>,
+    id: String,
+    time_formatter: TimeFormatter,
+) -> anyhow::Result<DetailContent> {
+    let req = db.select_request_by_id(id.clone()).await?;
+    let res = db.select_response_by_id(id.clone()).await?;
+
+    let mut req = req;
+    if let Some(epoch_ms) = req.epoch_ms {
+        let raw_time = req.time.as_deref().unwrap_or_default();
+        req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
+    }
+
+    let req_body = read_body_file(req.request_body_path.as_deref(), &req.headers).await;
+    let res_body = read_body_file(res.response_body_path.as_deref(), &res.headers).await;
+
+    let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
+    let ssl_tls_info = format_ssl_tls_info(req.tls_sni.as_deref(), res.tls_upstream.as_deref());
+
+    Ok(DetailContent {
+        request_meta: req.to_string(),
+        request_body: format_body_with_size(req.body_size_line(), req_body),
+        response_meta: res.to_string(),
+        response_body: format_body_with_size(res.body_size_line(), res_body),
+        ssl_tls_info,
+        id,
+        dir,
+    })
+}
+
+fn external_diff_text(
+    selection: DetailTabSelection,
+    left: DetailContent,
+    right: DetailContent,
+) -> (String, String) {
+    match (selection.primary_tab, selection.message_part) {
+        (DetailPrimaryTabSelection::Request, DetailMessagePartSelection::Meta) => {
+            (left.request_meta, right.request_meta)
+        }
+        (DetailPrimaryTabSelection::Request, DetailMessagePartSelection::Body) => {
+            (left.request_body, right.request_body)
+        }
+        (DetailPrimaryTabSelection::Response, DetailMessagePartSelection::Meta) => {
+            (left.response_meta, right.response_meta)
+        }
+        (DetailPrimaryTabSelection::Response, DetailMessagePartSelection::Body) => {
+            (left.response_body, right.response_body)
+        }
+        (DetailPrimaryTabSelection::SslTls | DetailPrimaryTabSelection::Info, _) => {
+            unreachable!("external diff requests only support request/response")
+        }
+    }
+}
+
+fn spawn_external_diff(command: &[String], left: String, right: String) -> anyhow::Result<()> {
+    let Some(program) = command.first().filter(|program| !program.is_empty()) else {
+        anyhow::bail!("external_diff_command must start with a program name");
+    };
+
+    const SCRIPT: &str =
+        r#"exec "$@" <(printf '%s' "$INSPECT_DIFF_LEFT") <(printf '%s' "$INSPECT_DIFF_RIGHT")"#;
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(SCRIPT)
+        .arg("--")
+        .arg(program)
+        .args(&command[1..])
+        .env("INSPECT_DIFF_LEFT", left)
+        .env("INSPECT_DIFF_RIGHT", right)
+        .spawn()?;
+
+    Ok(())
+}
+
 async fn read_body_file(path: Option<&str>, headers: &serde_json::Value) -> String {
     let Some(path) = path else {
         return "<no path>".to_string();
@@ -1825,6 +1946,7 @@ impl DelegateWidget for PacketListDelegate {
         self.poll_search_requests();
         self.poll_full_text_select_requests();
         self.poll_open_edit_requests();
+        self.poll_external_diff_requests();
         self.list.as_mut()
     }
 
@@ -1843,6 +1965,21 @@ impl DelegateWidget for PacketListDelegate {
             chord!(LeftClick) => {
                 tuie::focus_widget(self.get_id());
                 return InputResult::Rejected
+            }
+            chord!(Char('a')) if queue.is_unhandled() => {
+                queue.next();
+                self.set_diff_left_from_selected();
+                return InputResult::Handled;
+            }
+            chord!(Char('b')) if queue.is_unhandled() => {
+                queue.next();
+                self.set_diff_right_from_selected();
+                return InputResult::Handled;
+            }
+            chord!(Char('x')) if queue.is_unhandled() => {
+                queue.next();
+                self.clear_diff_selection();
+                return InputResult::Handled;
             }
             // filter shortcut
             chord!(Char('f')) if queue.is_unhandled() => {
@@ -2048,6 +2185,7 @@ struct ClickablePacketRow {
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     visible_idx: usize,
     text: Arc<str>,
+    diff_slot: Option<char>,
     selected: bool,
     pressed: std::cell::Cell<bool>,
 }
@@ -2058,6 +2196,7 @@ impl ClickablePacketRow {
         row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
         visible_idx: usize,
         text: Arc<str>,
+        diff_slot: Option<char>,
         selected: bool,
     ) -> Box<Self> {
         Box::new(Self {
@@ -2066,6 +2205,7 @@ impl ClickablePacketRow {
             row_clicks,
             visible_idx,
             text,
+            diff_slot,
             selected,
             pressed: std::cell::Cell::new(false),
         })
@@ -2092,8 +2232,14 @@ impl Widget for ClickablePacketRow {
 
     fn render(&self, mut ctx: RenderContext) {
         ctx.clear();
+
         let prefix = if self.selected { "> " } else { "  " };
-        write!(ctx, "{}{}", prefix, self.text);
+        let marker = self
+            .diff_slot
+            .map(|slot| format!(" [{slot}]"))
+            .unwrap_or_default();
+
+        write!(ctx, "{}{}{}", prefix, self.text, marker);
     }
 
     fn measure_constraints(&mut self) -> Constraints {
@@ -2137,6 +2283,7 @@ impl Widget for ClickablePacketRow {
 pub async fn run_tui(
     rx: mpsc::Receiver<PacketEvent>,
     quit_tx: watch::Sender<bool>,
+    external_diff_command: Option<Vec<String>>,
     time_display: TimeDisplayConfig,
     tui_mode: TuiMode,
     dbstate: Arc<DbState>,
@@ -2152,6 +2299,7 @@ pub async fn run_tui(
         rx,
         detail_tx,
         detail_bus.clone(),
+        external_diff_command,
         time_display,
         tui_mode,
         dbstate,

@@ -45,9 +45,17 @@ async fn main() -> Result<(), AnyError> {
 
         let (_tx, rx) = mpsc::channel(TUI_EVENT_BUFFER);
         let (quit_tx, _quit_rx) = watch::channel(false);
+
         let tui_dbstate = Arc::new(ReadDbState::new_for_paths(paths).await.expect("tui dbstate"));
 
-        if let Err(e) = run_tui(rx, quit_tx, time_display, TuiMode::Viewer, tui_dbstate).await {
+        if let Err(e) = run_tui(
+            rx,
+            quit_tx,
+            opt.external_diff_command.clone(),
+            time_display,
+            TuiMode::Viewer,
+            tui_dbstate,
+        ).await {
             eprintln!("tui error: {e}");
         }
 
@@ -146,7 +154,14 @@ async fn main() -> Result<(), AnyError> {
         }
     });
 
-    if let Err(e) = run_tui(rx, quit_tx.clone(), time_display, TuiMode::Capture, tui_dbstate).await {
+    if let Err(e) = run_tui(
+        rx,
+        quit_tx.clone(),
+        opt.external_diff_command.clone(),
+        time_display,
+        TuiMode::Capture,
+        tui_dbstate,
+    ).await {
         eprintln!("tui error: {e}");
     }
 

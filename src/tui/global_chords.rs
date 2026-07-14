@@ -6,8 +6,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use crate::tui::theme;
 
-const HELP_TEXT: &str = "\
-Key bindings
+const HELP_TEXT: &str = r#"Key bindings
 
   q / Ctrl+C        quit
   ?                 show / close this help
@@ -24,10 +23,18 @@ Navigation
   G                 jump to bottom
   Esc               close popup
 
-Packet
+Packet list
   Enter             open details
+  a                 mark selected connection as [A] (diff left)
+  b                 mark selected connection as [B] (diff right)
+  x                 clear both A/B marks
   S                 export HAR
   i                 show filter stats
+
+Detail pane
+  D                 open external diff for A/B
+                    Uses the selected request/response meta/body tab.
+                    Available for request and response tabs only.
 
 Search
   f                 filter packets
@@ -41,7 +48,7 @@ Filter query examples
   status:2xx
   re:/api/.*
   method:POST && status:4xx
-";
+"#;
 
 struct HelpPopup {
     root: Box<Pane>,

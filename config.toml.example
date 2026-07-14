@@ -242,6 +242,29 @@ tui_time_tz = "utc"
 #
 # Uncomment and edit examples as needed.
 
+# External diff command used by the TUI.
+#
+# Select two packet rows with `a` (left/A) and `b` (right/B), then select a
+# request/response meta/body tab in the detail pane and press `D`.
+#
+# The command is executed through bash with process substitution:
+#
+#   meld <(A content) <(B content)
+#
+# Unix only. The first item is the executable and remaining items are its
+# fixed arguments.
+#
+# Examples:
+# external_diff_command = ["meld"]
+# external_diff_command = ["vimdiff"]
+#
+# Visual Studio Code (`code --diff`) is not supported here because it requires
+# regular files rather than the /dev/fd/* paths provided by Bash process
+# substitution.
+#
+# Default: unset
+# external_diff_command = ["meld"]
+
 # [[outbound_http_clients]]
 # name = "webhook"
 # base_url = "http://127.0.0.1:3000"
@@ -251,7 +274,6 @@ tui_time_tz = "utc"
 # name = "logstash"
 # base_url = "http://localhost:5044"
 # timeout_ms = 5000
-
 
 [filter_state]
 # Enable connection/flow-scoped state APIs in Roto:

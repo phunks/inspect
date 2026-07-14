@@ -159,6 +159,7 @@ pub fn new_upstream_client(
 
             let request_ua = request_ua.clone();
             let http_client = static_client.clone();
+            let websocket_base_tls_config = base_tls_config.clone();
 
             let call: UpstreamCall = Arc::new(move |req: Request| {
                 let static_client = static_client.clone();
@@ -224,9 +225,38 @@ pub fn new_upstream_client(
             });
 
             let websocket_call: UpstreamWebSocketCall = Arc::new(move |req: Request| {
-                let client = http_client.clone();
+                let static_client = http_client.clone();
+                let base_tls_config = websocket_base_tls_config.clone();
+
+                let connect_ua_from_client = dynamic_connect_ua_from_request
+                    .then(|| req.headers().get(USER_AGENT).cloned())
+                    .flatten();
 
                 Box::pin(async move {
+                    let client = if dynamic_connect_ua_from_request {
+                        Arc::new(
+                            EasyHttpWebClient::connector_builder()
+                                .with_default_transport_connector()
+                                .with_tls_proxy_support_using_boringssl()
+                                .with_proxy_support()
+                                .with_custom_connector(CustomProxyUaLayer {
+                                    ua_value: connect_ua_from_client,
+                                })
+                                .with_tls_support_using_boringssl(Some(base_tls_config))
+                                .with_default_http_connector()
+                                .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
+                                .build_client()
+                                .with_jit_layer(
+                                    TimeoutLayer::with_status_code(
+                                        StatusCode::GATEWAY_TIMEOUT,
+                                        request_timeout,
+                                    ),
+                                ),
+                        )
+                    } else {
+                        static_client
+                    };
+
                     mitm_websocket(client.as_ref(), req).await
                 })
             });
@@ -268,7 +298,7 @@ pub fn new_upstream_client(
                     match client.serve(req).await {
                         Ok(res) => {
                             let status = Some(res.status().as_u16());
-                            // (res, None, status)
+
                             UpstreamResult {
                                 response: res,
                                 upstream_err: None,
@@ -284,7 +314,7 @@ pub fn new_upstream_client(
                             let fallback_status = Some(res.status().as_u16());
 
                             let msg = format!("upstream error: {err_text}");
-                            // (res, Some(msg), upstream_status.or(fallback_status))
+
                             UpstreamResult {
                                 response: res,
                                 upstream_err: Some(msg),

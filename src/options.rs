@@ -68,6 +68,7 @@ struct FileConfig {
     view_capture: Option<std::path::PathBuf>,
     verbosity: Option<u8>,
     upstream_proxy: Option<String>,
+    external_diff_command: Option<Vec<String>>,
     ua_profile: Option<UaProfile>,
     connect_ua_profile: Option<UaProfile>,
     proxy_mode: Option<ProxyMode>,
@@ -102,6 +103,10 @@ pub struct Opt {
     #[arg(short, long, default_value = "127.0.0.1")]
     /// Set ip to listen on
     pub ip: String,
+
+    #[arg(skip)]
+    /// External diff command configured in config.toml.
+    pub external_diff_command: Option<Vec<String>>,
 
     #[arg(long, value_name = "DIR", help = "Open an existing capture directory in read-only TUI view mode")]
     pub view_capture: Option<std::path::PathBuf>,
@@ -210,6 +215,15 @@ impl Opt {
             && let Some(value) = config.ip {
             self.ip = value;
         }
+
+        if let Some(value) = config.external_diff_command {
+            self.external_diff_command = Some(value);
+        }
+
+        tracing::warn!(
+            external_diff_command = ?self.external_diff_command,
+            "loaded external diff configuration"
+        );
 
         if !cli_specified(matches, "view_capture")
             && let Some(value) = config.view_capture {
@@ -335,6 +349,7 @@ impl Opt {
             view_capture = ?self.view_capture,
             verbosity = self.verbosity,
             upstream_proxy = ?self.upstream_proxy,
+            external_diff_command = ?self.external_diff_command,
             ua_profile = ?self.ua_profile,
             connect_ua_profile = ?self.connect_ua_profile,
             proxy_mode = ?self.proxy_mode,

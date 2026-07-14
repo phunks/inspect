@@ -7,6 +7,8 @@ use crate::tui::segmented_control::SegmentedControl;
 
 pub type SharedDetailEditState = Arc<Mutex<DetailEditState>>;
 pub type SharedOpenEditRequests = Arc<Mutex<Vec<()>>>;
+pub type SharedExternalDiffRequests = Arc<Mutex<Vec<DetailTabSelection>>>;
+
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DetailPrimaryTab {
@@ -104,23 +106,10 @@ impl Default for DetailEditState {
 pub struct DetailActionBus {
     edit_state: SharedDetailEditState,
     open_edit_requests: SharedOpenEditRequests,
+    external_diff_requests: SharedExternalDiffRequests,
 }
 
-// impl Default for DetailActionBus {
-//      fn default() -> Self {
-//          Self::new()
-//      }
-// }
-
-
 impl DetailActionBus {
-    // pub fn new() -> Self {
-    //     Self {
-    //         edit_state: Arc::new(Mutex::new(DetailEditState::default())),
-    //         open_edit_requests: Arc::new(Mutex::new(Vec::new())),
-    //     }
-    // }
-
     pub fn set_edit_state(&self, state: DetailEditState) {
         *self.edit_state.lock() = state;
     }
@@ -150,6 +139,22 @@ impl DetailActionBus {
         let count = requests.len();
         requests.clear();
         count
+    }
+    
+    pub fn request_external_diff_if_supported(&self) -> bool {
+        let selection = self.edit_state().selection;
+
+        match selection.primary_tab {
+            DetailPrimaryTabSelection::Request | DetailPrimaryTabSelection::Response => {
+                self.external_diff_requests.lock().push(selection);
+                true
+            }
+            DetailPrimaryTabSelection::SslTls | DetailPrimaryTabSelection::Info => false,
+        }
+    }
+
+    pub fn take_external_diff_requests(&self) -> Vec<DetailTabSelection> {
+        std::mem::take(&mut *self.external_diff_requests.lock())
     }
 }
 
@@ -434,6 +439,11 @@ impl DelegateWidget for DetailPane {
         };
 
         match &event.chord {
+            chord!(D) if queue.is_unhandled() => {
+                queue.next();
+                let _ = self.bus.request_external_diff_if_supported();
+                InputResult::Handled
+            }
             chord!(E) if queue.is_unhandled() => {
                 queue.next();
                 let _ = self.bus.request_open_edit_if_supported();

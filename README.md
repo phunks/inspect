@@ -393,6 +393,10 @@ Viewer mode is read-only:
 - `i`: show filter stats
 - `n`: jump to the next retained full-text search result
 - `p`: jump to the previous retained full-text search result
+- `a`: mark selected connection as [A] (diff left)
+- `b`: mark selected connection as [B] (diff right)
+- `x`: clear both A/B marks
+- `D`: open external diff for A/B
 
 ## Filtering
 
@@ -502,18 +506,90 @@ Use:
 - `n`: jump to the next retained search result
 - `p`: jump to the previous retained search result
 
+## External diff for captured connections
 
+The TUI can open the same request or response part from two captured
+connections in an external diff application.
 
-## Notes
-- HTTPS inspection requires trusting the local CA/certificate used by the proxy.
-- Bodies are stored with a size limit, so large payloads may be truncated.
-- This project is intended for local debugging and traffic analysis.
-- CA certificate can be generated/exported locally for client trust setup.
-- Metadata is stored in SQLite using SQLx.
-- Non-text bodies may be rendered as hex for inspection.
-- The packet detail view includes the flow directory for easier correlation with on-disk captures.
-- Auto-scroll follows appended items even when scrollbar remains at top. [^1]
-- Upstream TLS metadata in `ssl_tls.json` depends on the local rama TLS patch. [^2]
+This feature is intended for Unix-like environments with Bash available.
+The external program receives two Bash process-substitution paths.
+
+### Configuration
+
+Configure the diff command at the top level of `config.toml`:
+
+```toml
+external_diff_command = ["/opt/homebrew/bin/meld"]
+```
+
+The first array element is the executable. Remaining elements, if any, are
+passed as fixed arguments.
+
+```toml
+external_diff_command = ["meld"]
+external_diff_command = ["vimdiff"]
+```
+
+> `external_diff_command` must be a top-level TOML key. In particular, do not
+> place it below `[filter_state]` or another TOML table header.
+
+Conceptually, Inspect launches:
+
+```bash
+meld <(A-content) <(B-content)
+```
+
+### Usage
+
+1. Select the first captured connection in the packet list and press `a`.
+   The row is marked as `[A]`; this is the left-hand diff input.
+2. Select the second captured connection and press `b`.
+   The row is marked as `[B]`; this is the right-hand diff input.
+3. In the detail pane, select one of:
+  - `request` → `meta`
+  - `request` → `body`
+  - `response` → `meta`
+  - `response` → `body`
+4. Press `D` to open the configured external diff tool.
+5. Press `x` in the packet list to clear both A/B selections.
+
+The A/B selections are stored by captured connection ID rather than packet-list
+position, so they remain valid while filtering, searching, or receiving new
+packets.
+
+### Key bindings
+
+| Context | Key | Action |
+| --- | --- | --- |
+| Packet list | `a` | Mark the selected connection as A / left input |
+| Packet list | `b` | Mark the selected connection as B / right input |
+| Packet list | `x` | Clear A and B selections |
+| Detail pane | `D` | Diff the selected request/response meta/body part of A and B |
+
+External diff is unavailable for the `ssl/tls` and `info` detail tabs.
+
+### Compatibility
+
+The current implementation passes both diff inputs through Bash process
+substitution (`/dev/fd/*`). Use an external diff tool that can read these
+paths, such as `meld` or `vimdiff`.
+
+Visual Studio Code (`code --diff`) does **not** support these `/dev/fd/*`
+inputs reliably on macOS or Linux. Do not configure VS Code as the external
+diff command with the current implementation.
+
+```toml
+# Supported examples
+external_diff_command = ["meld"]
+external_diff_command = ["vimdiff"]
+
+# Not supported: VS Code requires regular file paths.
+# external_diff_command = ["code", "--diff"]
+```
+
+Supporting VS Code requires an alternative implementation that writes the two
+selected values to temporary regular files and invokes `code --diff` with
+those file paths.
 
 ## WebSocket / WSS handling
 
@@ -556,6 +632,17 @@ client <-> inspect <-> upstream
 
 Depending on where you capture packets and which TLS session you want to decrypt, you may need the corresponding key log.
 
+
+## Notes
+- HTTPS inspection requires trusting the local CA/certificate used by the proxy.
+- Bodies are stored with a size limit, so large payloads may be truncated.
+- This project is intended for local debugging and traffic analysis.
+- CA certificate can be generated/exported locally for client trust setup.
+- Metadata is stored in SQLite using SQLx.
+- Non-text bodies may be rendered as hex for inspection.
+- The packet detail view includes the flow directory for easier correlation with on-disk captures.
+- Auto-scroll follows appended items even when scrollbar remains at top. [^1]
+- Upstream TLS metadata in `ssl_tls.json` depends on the local rama TLS patch. [^2]
 
 [^1]: Temporary patch applied to tuie 0.2 crate `patches/tuie-0.2.4-scroll-fix.patch`
 [^2]: Temporary patch applied to rama 0.3.0-alpha.4 crate `patches/rama-0.3.0-alpha.4-tls-fix.patch`

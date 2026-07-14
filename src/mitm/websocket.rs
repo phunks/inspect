@@ -53,6 +53,10 @@ where
     };
 
     let target_version = req.version();
+    tracing::debug!(
+        user_agent = ?req.headers().get(rama::http::header::USER_AGENT),
+        "websocket request immediately before egress handshake"
+    );
     tracing::debug!("forcing egress http connection as {target_version:?} to ensure WS upgrade");
 
     let mut extensions = Extensions::new();
