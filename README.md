@@ -158,7 +158,7 @@ This clones and patches:
 - `ext/rama`
   - `patches/rama-0.3.0-alpha.4-tls-fix.patch`
 - `ext/tuie`
-  - `patches/tuie-0.2.3-scroll-fix.patch`
+  - `patches/tuie-0.2.4-scroll-fix.patch`
 
 Useful maintenance commands:
 ```bash
@@ -375,7 +375,7 @@ Viewer mode is read-only:
 - Existing `flows/` files are used for detail view and full text search.
 
 ## TUI keys
-- `?`: show / close help
+- `?`: show help
 - `q` / `Ctrl+C`: quit
 - `j` / `Down`: move down
 - `k` / `Up`: move up
@@ -384,6 +384,7 @@ Viewer mode is read-only:
 - `h` / `Left`: move left
 - `l` / `Right`: move right
 - `G`: jump to bottom
+- `E`: open the selected request/response in the editor
 - `Enter`: open details
 - `Tab`: move to next focus
 - `Shift+Tab`: move to previous focus

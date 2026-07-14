@@ -2295,6 +2295,7 @@ pub async fn run_tui(
     let (detail_tx, detail_rx) = mpsc::unbounded_channel::<UiEvent>();
     let detail_bus = DetailActionBus::default();
 
+    let mut packet_list_id = WidgetId::EMPTY;
     let app: Box<dyn Widget> = PacketListDelegate::new(
         rx,
         detail_tx,
@@ -2303,7 +2304,9 @@ pub async fn run_tui(
         time_display,
         tui_mode,
         dbstate,
-    ).await;
+    )
+        .await
+        .id(&mut packet_list_id);
 
     let title = match tui_mode {
         TuiMode::Capture => "Inspect",
@@ -2311,7 +2314,7 @@ pub async fn run_tui(
     };
 
     let mut detail_pane_id = WidgetId::EMPTY;
-    let detail_pane = DetailPane::new(detail_bus)
+    let detail_pane = DetailPane::new(detail_bus.clone())
         .id(&mut detail_pane_id);
 
     let split = Pane::new()
@@ -2355,7 +2358,7 @@ pub async fn run_tui(
     });
 
     let root = RootPane::new(split, detail_rx, detail_pane_id);
-    let root = global_chords::GlobalChords::new(root);
+    let root = global_chords::GlobalChords::new(root, packet_list_id, detail_bus);
 
     tuie::start_tui(root)?;
 

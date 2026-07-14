@@ -4,12 +4,13 @@ use chord_macro::chord;
 use tuie::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
-use crate::tui::theme;
+use crate::tui::tab::DetailActionBus;
+use crate::tui::{theme, PacketListDelegate};
 
 const HELP_TEXT: &str = r#"Key bindings
 
   q / Ctrl+C        quit
-  ?                 show / close this help
+  ?                 show this help
 
 Navigation
   j / Down          move down
@@ -25,16 +26,22 @@ Navigation
 
 Packet list
   Enter             open details
-  a                 mark selected connection as [A] (diff left)
-  b                 mark selected connection as [B] (diff right)
+  a                 mark selected connection as [A]
+                    (diff left)
+  b                 mark selected connection as [B]
+                    (diff right)
   x                 clear both A/B marks
   S                 export HAR
   i                 show filter stats
 
 Detail pane
   D                 open external diff for A/B
-                    Uses the selected request/response meta/body tab.
-                    Available for request and response tabs only.
+                    Uses the selected request/response
+                    meta/body tab.
+                    Available for request and response
+                    tabs only.
+  E                 open the selected request/response
+                    in the editor
 
 Search
   f                 filter packets
@@ -184,6 +191,8 @@ fn open_help_popup() {
 /// Root widget wrapper that intercepts app-wide key chords.
 pub struct GlobalChords {
     inner: Box<dyn Widget>,
+    packet_list_id: WidgetId<PacketListDelegate>,
+    detail_bus: DetailActionBus,
 }
 
 impl DelegateWidget for GlobalChords {
@@ -194,17 +203,51 @@ impl DelegateWidget for GlobalChords {
             return InputResult::Rejected;
         };
 
-        // let _ = std::fs::OpenOptions::new()
-        //     .create(true)
-        //     .append(true)
-        //     .open("/tmp/mitm_proxy_tuie_keys.log")
-        //     .and_then(|mut f| {
-        //         use std::io::Write;
-        //         writeln!(f, "queue={}", queue.to_string())?;
-        //         writeln!(f, "peek={:?}", event.chord)
-        //     });
-
         match &event.chord {
+            chord!(Char('f')) if queue.is_unhandled() => {
+                queue.next();
+                if let Some(packet_list) = self.inner.get_widget_mut(self.packet_list_id) {
+                    packet_list.open_search();
+                }
+            }
+            chord!(Char('g')) if queue.is_unhandled() => {
+                queue.next();
+                if let Some(packet_list) = self.inner.get_widget_mut(self.packet_list_id) {
+                    packet_list.open_full_text_search();
+                }
+            }
+            chord!(Char('S')) if queue.is_unhandled() => {
+                queue.next();
+                if let Some(packet_list) = self.inner.get_widget_mut(self.packet_list_id) {
+                    packet_list.open_har_export_dialog();
+                }
+            }
+            chord!(Char('i')) if queue.is_unhandled() => {
+                queue.next();
+                if let Some(packet_list) = self.inner.get_widget_mut(self.packet_list_id) {
+                    packet_list.open_filter_stats();
+                }
+            }
+            chord!(Char('n')) if queue.is_unhandled() => {
+                queue.next();
+                if let Some(packet_list) = self.inner.get_widget_mut(self.packet_list_id) {
+                    packet_list.move_retained_full_text_next();
+                }
+            }
+            chord!(Char('p')) if queue.is_unhandled() => {
+                queue.next();
+                if let Some(packet_list) = self.inner.get_widget_mut(self.packet_list_id) {
+                    packet_list.move_retained_full_text_previous();
+                }
+            }
+            chord!(D) if queue.is_unhandled() => {
+                queue.next();
+                let _ = self.detail_bus.request_external_diff_if_supported();
+            }
+            chord!(E) if queue.is_unhandled() => {
+                queue.next();
+                let _ = self.detail_bus.request_open_edit_if_supported();
+            }
             chord!(Tab) if queue.is_unhandled() => {
                 queue.next();
                 tuie::focus_next_tab_order(Sign::Positive);
@@ -221,19 +264,28 @@ impl DelegateWidget for GlobalChords {
                 queue.next();
                 open_help_popup();
             }
-            chord!(Ctrl + c|q) => {
+            chord!(Ctrl + c | q) => {
                 queue.next();
                 tuie::quit(0);
             }
             _ => return InputResult::Rejected,
         }
+
         InputResult::Handled
     }
 }
 
 impl GlobalChords {
     /// Wraps `inner` in a [`GlobalChords`] handler.
-    pub fn new(inner: Box<dyn Widget>) -> Box<Self> {
-        Box::new(Self { inner })
+    pub fn new(
+        inner: Box<dyn Widget>,
+        packet_list_id: WidgetId<PacketListDelegate>,
+        detail_bus: DetailActionBus,
+    ) -> Box<Self> {
+        Box::new(Self {
+            inner,
+            packet_list_id,
+            detail_bus,
+        })
     }
 }
