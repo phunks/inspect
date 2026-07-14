@@ -156,7 +156,7 @@ just setup-ext
 This clones and patches:
 
 - `ext/rama`
-  - `patches/rama-0.3.0-alpha.4-tls-fix.patch`
+  - `patches/rama-0.3.1-tls-fix.patch`
 - `ext/tuie`
   - `patches/tuie-0.2.3-scroll-fix.patch`
 
@@ -513,4 +513,4 @@ Depending on where you capture packets and which TLS session you want to decrypt
 
 
 [^1]: Temporary patch applied to tuie 0.2 crate `patches/tuie-0.2.4-scroll-fix.patch`
-[^2]: Temporary patch applied to rama 0.3.0-alpha.4 crate `patches/rama-0.3.0-alpha.4-tls-fix.patch`
+[^2]: Temporary patch applied to rama 0.3.1 crate `patches/rama-0.3.1-tls-fix.patch`
