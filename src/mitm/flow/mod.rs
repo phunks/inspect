@@ -10,6 +10,7 @@ pub mod filter_runtime;
 pub mod event_bridge;
 pub mod state_store;
 pub(crate) mod body_encoding;
+pub(crate) mod sse_capture;
 
 pub use capture_service::{
     CaptureService,

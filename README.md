@@ -317,6 +317,51 @@ HTTP `Content-Encoding: deflate` is rarely seen in modern traffic: historically,
 some implementations interpreted it as zlib-wrapped deflate while others used
 raw deflate, so gzip/br/zstd are generally more predictable in practice.
 
+### Server-Sent Events (SSE)
+
+Responses with `Content-Type: text/event-stream` are forwarded as streaming
+responses. Inspect does not collect the complete SSE body before returning it to
+the client, because SSE connections are commonly long-lived or never terminate.
+
+Inspect can capture the first events from an SSE stream while continuing to
+forward all events to the client. The capture limit is configured in
+`config.toml`:
+```toml
+# Maximum number of SSE events to save for a text/event-stream response.
+# 0 disables SSE event-body capture while preserving SSE proxying.
+# Default: 100
+sse_capture_max_events = 100
+
+# Maximum stored bytes for one SSE event.
+# Oversized events are truncated for capture only; the client stream is unchanged.
+# Default: 65536
+sse_capture_max_event_bytes = 65536
+```
+
+SSE event boundaries are recognized across HTTP body-frame boundaries. Inspect
+accepts the standard blank-line separators using LF, CRLF, or CR line endings.
+
+Captured SSE events are stored separately from ordinary response bodies:
+```text
+response.head
+response.body.sse
+response.body.001
+response.body.002
+...
+response.body.partial
+```
+
+`response.body.sse` marks the response as an SSE capture. Event files use
+zero-padded sequence numbers and are displayed by the TUI in sequence order.
+When the capture event limit is reached, Inspect stops saving further events but
+keeps the SSE connection and client forwarding active. If the stream ends with
+an incomplete event, the remaining bytes are written to
+`response.body.partial`.
+
+SSE response bodies are not passed through ordinary whole-body response
+filtering or response-body rewriting. Header and status based response handling
+remains available; event-level rewriting requires a dedicated streaming filter
+model.
 
 ## Viewer mode
 Use --view-capture to open an existing capture directory without starting the proxy.

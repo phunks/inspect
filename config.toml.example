@@ -131,6 +131,16 @@ body_omit_content_types = [
     "application/vnd.yt-ump",
 ]
 
+# Maximum number of SSE events to save for a text/event-stream response.
+# 0 disables SSE event-body capture while preserving SSE proxying.
+# Default: 100
+sse_capture_max_events = 100
+
+# Maximum stored bytes for one SSE event.
+# Oversized events are truncated for capture only; the client stream is unchanged.
+# Default: 65536
+sse_capture_max_event_bytes = 65536
+
 # Generate or reuse persistent local MITM root CA and exit.
 # CLI: --generate-ca
 # Default: false

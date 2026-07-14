@@ -174,6 +174,8 @@ pub async fn mitm_proxy_main(
     upstream_request_timeout_sec: u64,
     body_save_limit_bytes: Option<usize>,
     body_omit_content_types: Vec<String>,
+    sse_capture_max_events: usize,
+    sse_capture_max_event_bytes: usize,
     outbound_http_pool: Option<OutboundHttpClientPool>,
     filter_manager: FilterManager,
     flow_events: FlowEventPublisher,
@@ -239,6 +241,8 @@ pub async fn mitm_proxy_main(
             upstream_proxy: upstream_proxy.clone(),
             body_save_limit_bytes,
             body_omit_content_types: body_omit_content_types.clone(),
+            sse_capture_max_events,
+            sse_capture_max_event_bytes,
             filter_state_enabled: filter_state.enabled,
             filter_state_limits: FilterStateLimits {
                 ttl: Duration::from_secs(filter_state.ttl_sec),

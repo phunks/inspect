@@ -3,16 +3,20 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use bytes::Bytes;
 use chrono::Utc;
 use http_body_util::BodyExt;
 use rama::{
+    error::OpaqueError,
     http::{
+        body::{Frame, SizeHint},
         service::web::response::IntoResponse,
         Body,
         Request,
         Response,
         StatusCode,
+        StreamingBody,
         Version,
     },
     net::{
@@ -78,7 +82,7 @@ use crate::mitm::flow::tls_metadata::{
     tls_sni_from_extensions,
     upstream_tls_info_from_extensions
 };
-
+use crate::mitm::flow::sse_capture::SseCapture;
 
 pub type FlowDispatchResult<T> = Result<T, FlowDispatchError>;
 
@@ -119,6 +123,8 @@ pub struct FlowDispatcherConfig {
     pub upstream_proxy: Option<ProxyAddress>,
     pub body_save_limit_bytes: Option<usize>,
     pub body_omit_content_types: Arc<[String]>,
+    pub sse_capture_max_events: usize,
+    pub sse_capture_max_event_bytes: usize,
     pub filter_state_enabled: bool,
     pub filter_state_limits: FilterStateLimits,
 }
@@ -437,6 +443,13 @@ impl FlowDispatcher {
         let elapsed_ms = input.started_at.elapsed().as_millis() as i64;
 
         let (mut res_parts, res_body) = response.into_parts();
+
+        if is_sse_response(&res_parts.headers) {
+            return self
+                .dispatch_sse_response(input, res_parts, res_body, elapsed_ms)
+                .await;
+        }
+
         let mut res_body_bytes = collect_body(res_body, "response").await;
 
         let response_filter_output = self.dispatch_response_filters(
@@ -492,6 +505,45 @@ impl FlowDispatcher {
         }
 
         Ok(Response::from_parts(res_parts, Body::from(res_body_bytes)))
+    }
+
+    async fn dispatch_sse_response(
+        &self,
+        input: ResponseDispatchInput,
+        res_parts: rama::http::response::Parts,
+        res_body: Body,
+        elapsed_ms: i64,
+    ) -> FlowDispatchResult<Response> {
+        tracing::debug!(
+            id = %input.id,
+            flow_key = %input.flow_key,
+            status = %res_parts.status,
+            max_events = self.config.sse_capture_max_events,
+            max_event_bytes = self.config.sse_capture_max_event_bytes,
+            "proxy SSE response as a streaming body"
+        );
+
+        // Commit headers and response metadata now, rather than waiting for EOF.
+        // SSE streams may be long-lived or intentionally never terminate.
+        let response_commit = self
+            .commit_response(&input, &res_parts, &Bytes::new(), elapsed_ms)
+            .await?;
+
+        publish_response_committed(&self.events, &response_commit, Vec::new());
+
+        let capture = SseCapture::start(
+            input.flow_dir.clone(),
+            self.config.sse_capture_max_events,
+            self.config.sse_capture_max_event_bytes,
+        );
+
+        Ok(Response::from_parts(
+            res_parts,
+            Body::new(SseCaptureBody {
+                inner: res_body,
+                capture,
+            }),
+        ))
     }
 
     async fn commit_response(
@@ -680,6 +732,53 @@ async fn collect_body(body: Body, label: &str) -> Bytes {
             Bytes::new()
         }
     }
+}
+
+struct SseCaptureBody {
+    inner: Body,
+    capture: SseCapture,
+}
+
+impl StreamingBody for SseCaptureBody {
+    type Data = Bytes;
+    type Error = OpaqueError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match Pin::new(&mut self.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(bytes) = frame.data_ref() {
+                    self.capture.push(bytes.as_ref());
+                }
+
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(None) => {
+                self.capture.finish();
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+fn is_sse_response(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 fn build_synthetic_response(

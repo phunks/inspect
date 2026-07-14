@@ -14,7 +14,7 @@ pub mod body;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use chord_macro::chord;
@@ -41,7 +41,10 @@ use crate::mitm::proxy::{
     PacketStarted
 };
 use crate::mitm::capture::CapturePaths;
-use crate::tui::body::format_body_for_display_with_headers;
+use crate::tui::body::{
+    format_body_for_display,
+    format_body_for_display_with_headers,
+};
 use crate::tui::har::open_har_export_popup;
 use crate::tui::read_metadata::PacketSummary;
 use crate::tui::tab::{
@@ -501,6 +504,11 @@ fn is_body_file_name(file_name: &str) -> bool {
         || file_name.ends_with(".body.zst")
         || file_name.ends_with(".body.zstd")
         || file_name.ends_with(".body.deflate")
+        || file_name == "response.body.sse"
+        || file_name == "response.body.partial"
+        || file_name
+        .strip_prefix("response.body.")
+        .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
 }
 
 impl PacketListDelegate {
@@ -1696,10 +1704,92 @@ async fn read_body_file(path: Option<&str>, headers: &serde_json::Value) -> Stri
         return "<no path>".to_string();
     };
 
+    let path = Path::new(path);
+
+    match read_sse_body_files(path).await {
+        Ok(Some(body)) => return body,
+        Ok(None) => {}
+        Err(err) => return format!("<read SSE body error: {err}>"),
+    }
+
     match tokio::fs::read(path).await {
         Ok(bytes) => format_body_for_display_with_headers(headers, &bytes),
         Err(e) => format!("<read error: {e}>"),
     }
+}
+
+async fn read_sse_body_files(path: &Path) -> std::io::Result<Option<String>> {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+
+    if !file_name.starts_with("response.body") {
+        return Ok(None);
+    }
+
+    let Some(flow_dir) = path.parent() else {
+        return Ok(None);
+    };
+
+    let marker_path = flow_dir.join("response.body.sse");
+    if !tokio::fs::try_exists(&marker_path).await? {
+        return Ok(None);
+    }
+
+    let mut entries = tokio::fs::read_dir(flow_dir).await?;
+    let mut event_paths = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+
+        let Some(sequence) = file_name
+            .strip_prefix("response.body.")
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+        else {
+            continue;
+        };
+
+        event_paths.push((sequence, entry.path()));
+    }
+
+    event_paths.sort_unstable_by_key(|(sequence, _)| *sequence);
+
+    let mut bytes = Vec::new();
+
+    for (sequence, event_path) in event_paths {
+        let event = tokio::fs::read(&event_path).await?;
+        bytes.extend_from_slice(
+            format!("\n<< SSE event {sequence:03} >>\n").as_bytes(),
+        );
+        bytes.extend_from_slice(&event);
+    }
+
+    let partial_path = flow_dir.join("response.body.partial");
+    if tokio::fs::try_exists(&partial_path).await? {
+        let partial = tokio::fs::read(&partial_path).await?;
+        bytes.extend_from_slice(b"\n<< SSE partial event at stream end >>\n");
+        bytes.extend_from_slice(&partial);
+    }
+
+    let saved_event_count = bytes
+        .windows(b"<< SSE event ".len())
+        .filter(|window| *window == b"<< SSE event ")
+        .count();
+
+    let header = format!(
+        "<< Server-Sent Events capture: {saved_event_count} saved event(s) >>\n"
+    );
+
+    if bytes.is_empty() {
+        return Ok(Some(format!(
+            "{header}\n<no complete SSE event has been captured yet>"
+        )));
+    }
+
+    Ok(Some(format!("{header}\n{}", format_body_for_display(&bytes))))
 }
 
 fn format_body_with_size(body_size: String, body: String) -> String {

@@ -80,6 +80,8 @@ async fn main() -> Result<(), AnyError> {
     let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
     let body_save_limit_bytes = opt.effective_body_save_limit_bytes();
     let body_omit_content_types = opt.body_omit_content_types.clone();
+    let sse_capture_max_events = opt.sse_capture_max_events as usize;
+    let sse_capture_max_event_bytes = opt.sse_capture_max_event_bytes as usize;
     let filter_state = opt.filter_state.clone();
     let outbound_http_configs = opt
         .outbound_http_clients
@@ -130,6 +132,8 @@ async fn main() -> Result<(), AnyError> {
             upstream_request_timeout_sec,
             body_save_limit_bytes,
             body_omit_content_types,
+            sse_capture_max_events,
+            sse_capture_max_event_bytes,
             outbound_http_pool,
             filter_manager,
             flow_events,

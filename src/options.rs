@@ -76,6 +76,8 @@ struct FileConfig {
     body_save_limit_bytes: Option<usize>,
     body_save_unlimited: Option<bool>,
     body_omit_content_types: Option<Vec<String>>,
+    sse_capture_max_events: Option<i32>,
+    sse_capture_max_event_bytes: Option<i32>,
     outbound_http_clients: Option<Vec<NamedHttpClientConfig>>,
     generate_ca: Option<bool>,
     force_regenerate_ca: Option<bool>,
@@ -135,6 +137,14 @@ pub struct Opt {
 
     #[arg(long, value_delimiter = ',', help = "Do not save bodies for matching Content-Type prefixes")]
     pub body_omit_content_types: Vec<String>,
+
+    #[arg(skip = 100)]
+    /// Maximum number of SSE events captured per text/event-stream response.
+    pub sse_capture_max_events: i32,
+
+    #[arg(skip = 64 * 1024)]
+    /// Maximum captured bytes for each SSE event.
+    pub sse_capture_max_event_bytes: i32,
 
     #[arg(skip)]
     pub outbound_http_clients: Vec<NamedHttpClientConfig>,
@@ -256,6 +266,14 @@ impl Opt {
             self.body_omit_content_types = value;
         }
 
+        if let Some(value) = config.sse_capture_max_events {
+            self.sse_capture_max_events = value;
+        }
+
+        if let Some(value) = config.sse_capture_max_event_bytes {
+            self.sse_capture_max_event_bytes = value;
+        }
+
         if let Some(value) = config.outbound_http_clients {
             self.outbound_http_clients = value;
         }
@@ -326,6 +344,8 @@ impl Opt {
             body_save_unlimited = self.body_save_unlimited,
             effective_body_save_limit_bytes = ?self.effective_body_save_limit_bytes(),
             body_omit_content_types = ?self.body_omit_content_types,
+            sse_capture_max_events = self.sse_capture_max_events,
+            sse_capture_max_event_bytes = self.sse_capture_max_event_bytes,
             outbound_http_clients = ?self.outbound_http_clients,
             filter_state = ?self.filter_state,
             generate_ca = self.generate_ca,
