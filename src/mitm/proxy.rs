@@ -179,6 +179,7 @@ pub async fn mitm_proxy_main(
     service_port: String,
     ua_profile: UaProfile,
     connect_ua_profile: Option<UaProfile>,
+    connect_ua: Option<String>,
     proxy_mode: ProxyMode,
     upstream_handshake_timeout_ms: u64,
     upstream_request_timeout_sec: u64,
@@ -197,10 +198,18 @@ pub async fn mitm_proxy_main(
     let mitm_tls_service_data =
         new_mitm_tls_service_data().await.context("generate self-signed mitm tls cert")?;
 
+    info!(
+        ?proxy_mode,
+        connect_ua_profile = ?connect_ua_profile,
+        connect_ua = ?connect_ua,
+        "Starting mitm proxy with upstream proxy"
+    );
+    
     let upstream_client = new_upstream_client(
         proxy_mode,
         ua_profile,
         connect_ua_profile,
+        connect_ua,
         Duration::from_millis(upstream_handshake_timeout_ms),
         Duration::from_secs(upstream_request_timeout_sec),
     );
@@ -274,12 +283,6 @@ pub async fn mitm_proxy_main(
     };
 
     let dbstate = store_dbstate.clone();
-    info!(
-        ?proxy_mode,
-        request_ua_profile = ?ua_profile,
-        connect_ua_profile = ?connect_ua_profile,
-        "Starting mitm proxy with upstream proxy"
-    );
 
     let handle = graceful.spawn_task_fn(async move |guard| {
         info!("starting tcp proxy on {service_port}");

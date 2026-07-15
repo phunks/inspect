@@ -11,11 +11,11 @@ pub mod tab;
 mod segmented_control;
 mod har;
 pub mod body;
+pub mod external_diff;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use chord_macro::chord;
@@ -37,10 +37,6 @@ use crate::tui::time::{
 };
 use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketMarked, PacketStarted, PacketTunnelFailed};
 use crate::mitm::capture::CapturePaths;
-use crate::tui::body::{
-    format_body_for_display,
-    format_body_for_display_with_headers,
-};
 use crate::tui::har::open_har_export_popup;
 use crate::tui::read_metadata::PacketSummary;
 use crate::tui::tab::{
@@ -54,6 +50,13 @@ use crate::tui::tab::{
 };
 use crate::tui::editor_pane::open_edit_popup;
 use crate::tui::filter_stats::open_filter_stats_popup;
+use crate::tui::external_diff::{
+    spawn_external_diff,
+    external_diff_paths,
+    format_body_with_size,
+    read_body_file,
+    format_ssl_tls_info
+};
 use read_metadata::DbState;
 pub use read_metadata::DbState as ReadDbState;
 
@@ -107,6 +110,53 @@ impl PacketRow {
         } else {
             format!("{}{}{}?{}", scheme, self.host, self.uri, self.query_str)
         }
+    }
+
+    fn display_line(&self, diff_slot: Option<char>) -> Arc<str> {
+        if diff_slot.is_none() {
+            return self.line.clone();
+        }
+
+        let mut line = String::with_capacity(self.line.len() + 4);
+        let status = self.status.map_or("----".to_string(), |s| s.to_string());
+
+        let _ = write!(
+            &mut line,
+            "#{:06} {} {:<7} {:<4} ",
+            self.seq,
+            self.time,
+            self.method,
+            status,
+        );
+
+        if let Some(ms) = self.elapsed_ms {
+            let _ = write!(&mut line, "{ms:>5}ms ");
+        } else {
+            line.push_str("        ");
+        }
+
+        if let Some(slot) = diff_slot {
+            let _ = write!(&mut line, "[{slot}] ");
+        }
+
+        for mark in &self.marks {
+            let _ = write!(&mut line, "[{}] ", mark.label);
+        }
+
+        let _ = write!(
+            &mut line,
+            "{}://{}{}",
+            self.protocol,
+            self.host,
+            self.uri,
+        );
+
+        if !self.query_str.is_empty() {
+            line.push('?');
+            line.push_str(&self.query_str);
+        }
+
+        Arc::<str>::from(line)
     }
 
     fn edit_context(&self) -> PacketRowEditContext {
@@ -433,7 +483,6 @@ struct RowClicked(usize);
 struct PacketListItem {
     _row_index: usize,
     line: Arc<str>,
-    diff_slot: Option<char>,
 }
 
 #[derive(Clone, Debug)]
@@ -501,7 +550,7 @@ struct FullTextSelectRequest {
 }
 
 fn detail_tab_selection_from_search_path(path: &str) -> Option<DetailTabSelection> {
-    let file_name = std::path::Path::new(path)
+    let file_name = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(path);
@@ -626,7 +675,6 @@ impl PacketListDelegate {
                 .map(|(row_index, row)| PacketListItem {
                     _row_index: row_index,
                     line: row.line.clone(),
-                    diff_slot: None,
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -646,7 +694,6 @@ impl PacketListDelegate {
                         ctx.row_clicks.clone(),
                         idx,
                         item.line.clone(),
-                        item.diff_slot,
                         idx == ctx.selected,
                     ) as Box<dyn Widget>
                 )
@@ -805,21 +852,19 @@ impl PacketListDelegate {
             };
 
             let db = self.dbstate.clone();
-            let time_formatter = self.time_formatter.clone();
 
             tokio::spawn(async move {
-                let left = load_detail_content(db.clone(), left_id, time_formatter.clone()).await;
-                let right = load_detail_content(db, right_id, time_formatter).await;
+                let paths = external_diff_paths(db, selection, left_id, right_id).await;
 
-                let (left, right) = match (left, right) {
-                    (Ok(left), Ok(right)) => external_diff_text(selection, left, right),
-                    (Err(err), _) | (_, Err(err)) => {
-                        tracing::warn!(error = ?err, "failed to load external diff content");
+                let (left, right) = match paths {
+                    Ok(paths) => (paths.left, paths.right),
+                    Err(err) => {
+                        tracing::warn!(error = ?err, "failed to resolve external diff paths");
                         return;
                     }
                 };
 
-                if let Err(err) = spawn_external_diff(command.as_ref(), left, right) {
+                if let Err(err) = spawn_external_diff(command.as_ref(), &left, &right) {
                     tracing::warn!(error = ?err, "failed to start external diff");
                 }
             });
@@ -1169,10 +1214,12 @@ impl PacketListDelegate {
                 .rows
                 .iter()
                 .enumerate()
-                .map(|(row_index, row)| PacketListItem {
-                    _row_index: row_index,
-                    line: row.line.clone(),
-                    diff_slot: self.diff_selection.slot_for(&row.id),
+                .map(|(row_index, row)| {
+                    let diff_slot = self.diff_selection.slot_for(&row.id);
+                    PacketListItem {
+                        _row_index: row_index,
+                        line: row.display_line(diff_slot),
+                    }
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -1181,10 +1228,12 @@ impl PacketListDelegate {
                 .iter()
                 .filter_map(|id| {
                     let row_index = self.id_to_row_index.get(id).copied()?;
-                    self.rows.get(row_index).map(|row| PacketListItem {
-                        _row_index: row_index,
-                        line: row.line.clone(),
-                        diff_slot: self.diff_selection.slot_for(&row.id),
+                    self.rows.get(row_index).map(|row| {
+                        let diff_slot = self.diff_selection.slot_for(&row.id);
+                        PacketListItem {
+                            _row_index: row_index,
+                            line: row.display_line(diff_slot),
+                        }
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1210,7 +1259,6 @@ impl PacketListDelegate {
                             ctx.row_clicks.clone(),
                             idx,
                             item.line.clone(),
-                            item.diff_slot,
                             idx == ctx.selected,
                         ) as Box<dyn Widget>
                     )
@@ -1306,6 +1354,7 @@ impl PacketListDelegate {
             })
     }
 
+    #[allow(unused)]
     fn on_select_packet(&self, id: String) {
         self.on_select_packet_with_highlight(id, None, None);
     }
@@ -1321,14 +1370,13 @@ impl PacketListDelegate {
         let time_formatter = self.time_formatter.clone();
 
         tokio::spawn(async move {
-            let detail = match load_detail_content(db, id.clone(), time_formatter).await {
-                Ok(detail) => detail,
-                Err(err) => DetailContent {
+            let detail = load_detail_content(db, id.clone(), time_formatter)
+                .await
+                .unwrap_or_else(|err| DetailContent {
                     request_meta: format!("detail error: {err:#}"),
                     id,
                     ..DetailContent::default()
-                },
-            };
+                });
 
             let _ = detail_tx.send(UiEvent::ShowDetail {
                 detail,
@@ -1356,13 +1404,6 @@ impl PacketListDelegate {
             self.select_row(idx);
         }
     }
-
-    // fn visible_rows(&self) -> &[PacketRow] {
-    //     match self.mode {
-    //         PacketListMode::Main => &self.rows,
-    //         PacketListMode::Search => &self.search_rows,
-    //     }
-    // }
 
     fn visible_rows_len(&self) -> usize {
         match self.mode {
@@ -1934,165 +1975,8 @@ async fn load_detail_content(
     }
 }
 
-fn external_diff_text(
-    selection: DetailTabSelection,
-    left: DetailContent,
-    right: DetailContent,
-) -> (String, String) {
-    match (selection.primary_tab, selection.message_part) {
-        (DetailPrimaryTabSelection::Request, DetailMessagePartSelection::Meta) => {
-            (left.request_meta, right.request_meta)
-        }
-        (DetailPrimaryTabSelection::Request, DetailMessagePartSelection::Body) => {
-            (left.request_body, right.request_body)
-        }
-        (DetailPrimaryTabSelection::Response, DetailMessagePartSelection::Meta) => {
-            (left.response_meta, right.response_meta)
-        }
-        (DetailPrimaryTabSelection::Response, DetailMessagePartSelection::Body) => {
-            (left.response_body, right.response_body)
-        }
-        (DetailPrimaryTabSelection::SslTls | DetailPrimaryTabSelection::Info, _) => {
-            unreachable!("external diff requests only support request/response")
-        }
-    }
-}
 
-fn spawn_external_diff(command: &[String], left: String, right: String) -> anyhow::Result<()> {
-    let Some(program) = command.first().filter(|program| !program.is_empty()) else {
-        anyhow::bail!("external_diff_command must start with a program name");
-    };
 
-    const SCRIPT: &str =
-        r#"exec "$@" <(printf '%s' "$INSPECT_DIFF_LEFT") <(printf '%s' "$INSPECT_DIFF_RIGHT")"#;
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(SCRIPT)
-        .arg("--")
-        .arg(program)
-        .args(&command[1..])
-        .env("INSPECT_DIFF_LEFT", left)
-        .env("INSPECT_DIFF_RIGHT", right)
-        .spawn()?;
-
-    Ok(())
-}
-
-async fn read_body_file(path: Option<&str>, headers: &serde_json::Value) -> String {
-    let Some(path) = path else {
-        return "<no path>".to_string();
-    };
-
-    let path = Path::new(path);
-
-    match read_sse_body_files(path).await {
-        Ok(Some(body)) => return body,
-        Ok(None) => {}
-        Err(err) => return format!("<read SSE body error: {err}>"),
-    }
-
-    match tokio::fs::read(path).await {
-        Ok(bytes) => format_body_for_display_with_headers(headers, &bytes),
-        Err(e) => format!("<read error: {e}>"),
-    }
-}
-
-async fn read_sse_body_files(path: &Path) -> std::io::Result<Option<String>> {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(None);
-    };
-
-    if !file_name.starts_with("response.body") {
-        return Ok(None);
-    }
-
-    let Some(flow_dir) = path.parent() else {
-        return Ok(None);
-    };
-
-    let marker_path = flow_dir.join("response.body.sse");
-    if !tokio::fs::try_exists(&marker_path).await? {
-        return Ok(None);
-    }
-
-    let mut entries = tokio::fs::read_dir(flow_dir).await?;
-    let mut event_paths = Vec::new();
-
-    while let Some(entry) = entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-
-        let Some(sequence) = file_name
-            .strip_prefix("response.body.")
-            .and_then(|suffix| suffix.parse::<usize>().ok())
-        else {
-            continue;
-        };
-
-        event_paths.push((sequence, entry.path()));
-    }
-
-    event_paths.sort_unstable_by_key(|(sequence, _)| *sequence);
-
-    let mut bytes = Vec::new();
-
-    for (sequence, event_path) in event_paths {
-        let event = tokio::fs::read(&event_path).await?;
-        bytes.extend_from_slice(
-            format!("\n<< SSE event {sequence:03} >>\n").as_bytes(),
-        );
-        bytes.extend_from_slice(&event);
-    }
-
-    let partial_path = flow_dir.join("response.body.partial");
-    if tokio::fs::try_exists(&partial_path).await? {
-        let partial = tokio::fs::read(&partial_path).await?;
-        bytes.extend_from_slice(b"\n<< SSE partial event at stream end >>\n");
-        bytes.extend_from_slice(&partial);
-    }
-
-    let saved_event_count = bytes
-        .windows(b"<< SSE event ".len())
-        .filter(|window| *window == b"<< SSE event ")
-        .count();
-
-    let header = format!(
-        "<< Server-Sent Events capture: {saved_event_count} saved event(s) >>\n"
-    );
-
-    if bytes.is_empty() {
-        return Ok(Some(format!(
-            "{header}\n<no complete SSE event has been captured yet>"
-        )));
-    }
-
-    Ok(Some(format!("{header}\n{}", format_body_for_display(&bytes))))
-}
-
-fn format_body_with_size(body_size: String, body: String) -> String {
-    format!("body size : {body_size}\n\n{body}")
-}
-
-fn format_ssl_tls_info(tls_sni: Option<&str>, tls_upstream: Option<&str>) -> String {
-    let upstream_tls = tls_upstream
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-        .unwrap_or(serde_json::Value::Null);
-
-    let value = serde_json::json!({
-        "request": {
-            "tls_sni": tls_sni,
-        },
-        "response": {
-            "upstream_tls": upstream_tls,
-        }
-    });
-
-    serde_json::to_string_pretty(&value)
-        .unwrap_or_else(|_| value.to_string())
-}
 
 impl DelegateWidget for PacketListDelegate {
     fn get_delegate(&self) -> &dyn Widget {
@@ -2344,7 +2228,6 @@ struct ClickablePacketRow {
     row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
     visible_idx: usize,
     text: Arc<str>,
-    diff_slot: Option<char>,
     selected: bool,
     pressed: std::cell::Cell<bool>,
 }
@@ -2355,7 +2238,6 @@ impl ClickablePacketRow {
         row_clicks: Arc<parking_lot::Mutex<Vec<usize>>>,
         visible_idx: usize,
         text: Arc<str>,
-        diff_slot: Option<char>,
         selected: bool,
     ) -> Box<Self> {
         Box::new(Self {
@@ -2364,7 +2246,6 @@ impl ClickablePacketRow {
             row_clicks,
             visible_idx,
             text,
-            diff_slot,
             selected,
             pressed: std::cell::Cell::new(false),
         })
@@ -2393,12 +2274,8 @@ impl Widget for ClickablePacketRow {
         ctx.clear();
 
         let prefix = if self.selected { "> " } else { "  " };
-        let marker = self
-            .diff_slot
-            .map(|slot| format!(" [{slot}]"))
-            .unwrap_or_default();
 
-        write!(ctx, "{}{}{}", prefix, self.text, marker);
+        write!(ctx, "{}{}", prefix, self.text);
     }
 
     fn measure_constraints(&mut self) -> Constraints {
@@ -2482,7 +2359,6 @@ pub async fn run_tui(
         .gap(EDITOR_PANE_GAP)
         .children([Split::new(
             SplitPane::new()
-                // .gap(EDITOR_PANE_GAP)
                 .children([
                     SplitPaneChild::from(Pane::new()
                         .min_width(56)

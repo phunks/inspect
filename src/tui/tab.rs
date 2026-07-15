@@ -146,11 +146,13 @@ impl DetailActionBus {
         let selection = self.edit_state().selection;
 
         match selection.primary_tab {
-            DetailPrimaryTabSelection::Request | DetailPrimaryTabSelection::Response => {
+            DetailPrimaryTabSelection::Request
+            | DetailPrimaryTabSelection::Response
+            | DetailPrimaryTabSelection::SslTls => {
                 self.external_diff_requests.lock().push(selection);
                 true
             }
-            DetailPrimaryTabSelection::SslTls | DetailPrimaryTabSelection::Info => false,
+            DetailPrimaryTabSelection::Info => false,
         }
     }
 

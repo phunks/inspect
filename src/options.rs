@@ -71,6 +71,7 @@ struct FileConfig {
     external_diff_command: Option<Vec<String>>,
     ua_profile: Option<UaProfile>,
     connect_ua_profile: Option<UaProfile>,
+    connect_ua: Option<String>,
     proxy_mode: Option<ProxyMode>,
     upstream_handshake_timeout_ms: Option<u64>,
     upstream_request_timeout_sec: Option<u64>,
@@ -124,6 +125,9 @@ pub struct Opt {
 
     #[arg(long, value_enum, help = "UA for upstream proxy CONNECT. If omitted, inherits --ua-profile")]
     pub connect_ua_profile: Option<UaProfile>,
+
+    #[arg(long, help = "Raw User-Agent header value for upstream proxy CONNECT. Overrides --connect-ua-profile")]
+    pub connect_ua: Option<String>,
 
     #[arg(long, value_enum, default_value_t = ProxyMode::Observe)]
     pub proxy_mode: ProxyMode,
@@ -250,6 +254,11 @@ impl Opt {
             self.connect_ua_profile = Some(value);
         }
 
+        if !cli_specified(matches, "connect_ua")
+            && let Some(value) = config.connect_ua {
+            self.connect_ua = Some(value);
+        }
+
         if !cli_specified(matches, "proxy_mode")
             && let Some(value) = config.proxy_mode {
             self.proxy_mode = value;
@@ -352,6 +361,7 @@ impl Opt {
             external_diff_command = ?self.external_diff_command,
             ua_profile = ?self.ua_profile,
             connect_ua_profile = ?self.connect_ua_profile,
+            connect_ua = ?self.connect_ua,
             proxy_mode = ?self.proxy_mode,
             upstream_handshake_timeout_ms = self.upstream_handshake_timeout_ms,
             upstream_request_timeout_sec = self.upstream_request_timeout_sec,

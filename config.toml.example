@@ -78,6 +78,9 @@ ua_profile = "auto"
 # connect_ua_profile = "chrome"
 # connect_ua_profile = ""
 
+# User-Agent/TLS emulation profile for upstream proxy CONNECT.
+# connect_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+
 # Proxy behavior mode.
 # CLI: --proxy-mode
 # Default: "observe"
@@ -245,22 +248,29 @@ tui_time_tz = "utc"
 # External diff command used by the TUI.
 #
 # Select two packet rows with `a` (left/A) and `b` (right/B), then select a
-# request/response meta/body tab in the detail pane and press `D`.
+# request/response meta/body tab or the ssl/tls tab in the detail pane and
+# press `D`.
 #
-# The command is executed through bash with process substitution:
+# Inspect passes regular file paths to the external diff command:
 #
-#   meld <(A content) <(B content)
+#   meld /path/to/A /path/to/B
 #
-# Unix only. The first item is the executable and remaining items are its
-# fixed arguments.
+# The first item is the executable and remaining items are fixed arguments
+# inserted before the two diff input paths.
 #
 # Examples:
 # external_diff_command = ["meld"]
 # external_diff_command = ["vimdiff"]
+# external_diff_command = ["code", "--wait", "--diff"]
 #
-# Visual Studio Code (`code --diff`) is not supported here because it requires
-# regular files rather than the /dev/fd/* paths provided by Bash process
-# substitution.
+# Notes:
+# - request.head, response.head, and ssl_tls.json are passed directly.
+# - body files are passed directly when possible.
+# - if either side is compressed (.gz/.br/.zst/.zstd/.deflate) or an SSE
+#   chunked capture, both sides are normalized to text files under:
+#     capture/<timestamp>/.external-diff/
+# - .external-diff is outside flows/, so it is not included in TUI full-text
+#   search results.
 #
 # Default: unset
 # external_diff_command = ["meld"]

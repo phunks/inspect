@@ -118,6 +118,7 @@ pub fn new_upstream_client(
     proxy_mode: ProxyMode,
     request_ua_profile: UaProfile,
     connect_ua_profile: Option<UaProfile>,
+    connect_ua: Option<String>,
     handshake_timeout: Duration,
     request_timeout: Duration,
 ) -> UpstreamClient {
@@ -128,17 +129,21 @@ pub fn new_upstream_client(
 
     let request_ua = ua_header_for_profile(request_ua_profile);
     let connect_ua_from_profile = connect_ua_profile.and_then(ua_header_for_profile);
+    let connect_ua_raw = connect_ua
+        .as_deref()
+        .and_then(|value| HeaderValue::from_str(value).ok());
 
     let static_proxy_ua = match proxy_mode {
-        ProxyMode::Observe => connect_ua_from_profile.clone().or_else(|| request_ua.clone()),
-        ProxyMode::Emulate => connect_ua_from_profile
+        ProxyMode::Observe => connect_ua_raw
             .clone()
+            .or_else(|| connect_ua_from_profile.clone())
+            .or_else(|| request_ua.clone()),
+        ProxyMode::Emulate => connect_ua_raw
+            .clone()
+            .or_else(|| connect_ua_from_profile.clone())
             .or_else(|| request_ua.clone())
             .or_else(|| Some(HeaderValue::from_static(CHROME_UA))),
     };
-
-    let dynamic_connect_ua_from_request =
-        proxy_mode == ProxyMode::Observe && static_proxy_ua.is_none();
 
     match proxy_mode {
         ProxyMode::Observe => {
@@ -159,12 +164,10 @@ pub fn new_upstream_client(
 
             let request_ua = request_ua.clone();
             let http_client = static_client.clone();
-            let websocket_base_tls_config = base_tls_config.clone();
 
             let call: UpstreamCall = Arc::new(move |req: Request| {
-                let static_client = static_client.clone();
+                let client = static_client.clone();
                 let request_ua = request_ua.clone();
-                let base_tls_config = base_tls_config.clone();
 
                 Box::pin(async move {
                     let mut req = req;
@@ -172,26 +175,6 @@ pub fn new_upstream_client(
                     if let Some(ua) = request_ua {
                         req.headers_mut().insert(USER_AGENT, ua);
                     }
-
-                    let client = if dynamic_connect_ua_from_request {
-                        let connect_ua_from_client = req.headers().get(USER_AGENT).cloned();
-                        Arc::new(
-                            EasyHttpWebClient::connector_builder()
-                                .with_default_transport_connector()
-                                .with_tls_proxy_support_using_boringssl()
-                                .with_proxy_support()
-                                .with_custom_connector(CustomProxyUaLayer { ua_value: connect_ua_from_client })
-                                .with_tls_support_using_boringssl(Some(base_tls_config))
-                                .with_default_http_connector()
-                                .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
-                                .build_client()
-                                .with_jit_layer(
-                                    TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, request_timeout),
-                                ),
-                        )
-                    } else {
-                        static_client
-                    };
 
                     match client.serve(req).await {
                         Ok(res) => {
@@ -212,7 +195,6 @@ pub fn new_upstream_client(
                             let fallback_status = Some(res.status().as_u16());
 
                             let msg = format!("upstream error: {err_text}");
-                            // (res, Some(msg), upstream_status.or(fallback_status))
                             UpstreamResult {
                                 response: res,
                                 upstream_err: Some(msg),
@@ -225,38 +207,9 @@ pub fn new_upstream_client(
             });
 
             let websocket_call: UpstreamWebSocketCall = Arc::new(move |req: Request| {
-                let static_client = http_client.clone();
-                let base_tls_config = websocket_base_tls_config.clone();
-
-                let connect_ua_from_client = dynamic_connect_ua_from_request
-                    .then(|| req.headers().get(USER_AGENT).cloned())
-                    .flatten();
+                let client = http_client.clone();
 
                 Box::pin(async move {
-                    let client = if dynamic_connect_ua_from_request {
-                        Arc::new(
-                            EasyHttpWebClient::connector_builder()
-                                .with_default_transport_connector()
-                                .with_tls_proxy_support_using_boringssl()
-                                .with_proxy_support()
-                                .with_custom_connector(CustomProxyUaLayer {
-                                    ua_value: connect_ua_from_client,
-                                })
-                                .with_tls_support_using_boringssl(Some(base_tls_config))
-                                .with_default_http_connector()
-                                .with_custom_connector(ServiceTimeoutLayer::new(handshake_timeout))
-                                .build_client()
-                                .with_jit_layer(
-                                    TimeoutLayer::with_status_code(
-                                        StatusCode::GATEWAY_TIMEOUT,
-                                        request_timeout,
-                                    ),
-                                ),
-                        )
-                    } else {
-                        static_client
-                    };
-
                     mitm_websocket(client.as_ref(), req).await
                 })
             });

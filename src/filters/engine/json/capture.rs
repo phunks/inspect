@@ -277,24 +277,24 @@ fn diff_json_value(
                 );
             }
 
-            for idx in common_len..original_items.len() {
+            for (idx, item) in original_items.iter().enumerate().skip(common_len) {
                 let mut next_path = path.clone();
                 next_path.push(DiffPathSegment::JsonIndex(idx));
 
                 events.push(DiffEvent::Delete {
                     path: DiffPath::body_json(next_path),
-                    old: json_value_to_diff_node(&original_items[idx]),
+                    old: json_value_to_diff_node(item),
                     source: DiffSource::Body(Json),
                 });
             }
 
-            for idx in common_len..edited_items.len() {
+            for (idx, item) in edited_items.iter().enumerate().skip(common_len) {
                 let mut next_path = path.clone();
                 next_path.push(DiffPathSegment::JsonIndex(idx));
 
                 events.push(DiffEvent::Insert {
                     path: DiffPath::body_json(next_path),
-                    node: json_value_to_diff_node(&edited_items[idx]),
+                    node: json_value_to_diff_node(item),
                     source: DiffSource::Body(Json),
                 });
             }

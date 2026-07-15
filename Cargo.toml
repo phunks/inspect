@@ -3,10 +3,10 @@ name = "inspect"
 version = "0.7.0"
 edition = "2024"
 
-[profile.release]
-debug = true
-strip = false
-split-debuginfo = "packed"
+#[profile.release]
+#debug = true
+#strip = false
+#split-debuginfo = "packed"
 
 [profile.dev]
 debug = true

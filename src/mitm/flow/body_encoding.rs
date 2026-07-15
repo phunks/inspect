@@ -69,6 +69,7 @@ pub(crate) fn decode_body_by_magic_number(body: &Bytes) -> Option<Bytes> {
     None
 }
 
+#[allow(unused)]
 pub(crate) fn body_file_name(base: &str, headers: &HeaderMap) -> String {
     let suffixes = content_encoding_suffixes(headers);
 
@@ -79,6 +80,7 @@ pub(crate) fn body_file_name(base: &str, headers: &HeaderMap) -> String {
     }
 }
 
+#[allow(unused)]
 pub(crate) fn content_encoding_suffixes(headers: &HeaderMap) -> Vec<&'static str> {
     let Some(content_encoding) = headers
         .get(http::header::CONTENT_ENCODING)

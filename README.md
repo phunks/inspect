@@ -509,11 +509,14 @@ Use:
 
 ## External diff for captured connections
 
-The TUI can open the same request or response part from two captured
-connections in an external diff application.
+The TUI can open the same request, response, or SSL/TLS detail from two
+captured connections in an external diff application.
 
-This feature is intended for Unix-like environments with Bash available.
-The external program receives two Bash process-substitution paths.
+Inspect passes regular file paths to the external diff command. Request and
+response headers, and `ssl_tls.json`, are passed directly from the capture
+directory. Body files are also passed directly when possible. If either side is
+a compressed body or an SSE chunked capture, Inspect writes normalized text
+views under `capture/<timestamp>/.external-diff/` and passes those files instead.
 
 ### Configuration
 
@@ -524,11 +527,12 @@ external_diff_command = ["/opt/homebrew/bin/meld"]
 ```
 
 The first array element is the executable. Remaining elements, if any, are
-passed as fixed arguments.
+passed as fixed arguments before the two diff input paths.
 
 ```toml
 external_diff_command = ["meld"]
 external_diff_command = ["vimdiff"]
+external_diff_command = ["code", "--wait", "--diff"]
 ```
 
 > `external_diff_command` must be a top-level TOML key. In particular, do not
@@ -537,7 +541,12 @@ external_diff_command = ["vimdiff"]
 Conceptually, Inspect launches:
 
 ```bash
-meld <(A-content) <(B-content)
+meld /path/to/A /path/to/B
+```
+
+or, for VS Code:
+```bash
+code --wait --diff /path/to/A /path/to/B
 ```
 
 ### Usage
@@ -547,10 +556,11 @@ meld <(A-content) <(B-content)
 2. Select the second captured connection and press `b`.
    The row is marked as `[B]`; this is the right-hand diff input.
 3. In the detail pane, select one of:
-  - `request` → `meta`
-  - `request` → `body`
-  - `response` → `meta`
-  - `response` → `body`
+   - `request` → `meta`
+   - `request` → `body`
+   - `response` → `meta`
+   - `response` → `body`
+   - `ssl/tls`
 4. Press `D` to open the configured external diff tool.
 5. Press `x` in the packet list to clear both A/B selections.
 
@@ -565,32 +575,33 @@ packets.
 | Packet list | `a` | Mark the selected connection as A / left input |
 | Packet list | `b` | Mark the selected connection as B / right input |
 | Packet list | `x` | Clear A and B selections |
-| Detail pane | `D` | Diff the selected request/response meta/body part of A and B |
+| Detail pane | `D` | Diff the selected request/response/SSL-TLS part of A and B |
 
-External diff is unavailable for the `ssl/tls` and `info` detail tabs.
+External diff is unavailable for the `info` detail tab.
 
 ### Compatibility
 
-The current implementation passes both diff inputs through Bash process
-substitution (`/dev/fd/*`). Use an external diff tool that can read these
-paths, such as `meld` or `vimdiff`.
+The external diff command receives regular file paths, so tools such as `meld`,
+`vimdiff`, and Visual Studio Code are supported.
 
-Visual Studio Code (`code --diff`) does **not** support these `/dev/fd/*`
-inputs reliably on macOS or Linux. Do not configure VS Code as the external
-diff command with the current implementation.
 
 ```toml
 # Supported examples
 external_diff_command = ["meld"]
 external_diff_command = ["vimdiff"]
-
-# Not supported: VS Code requires regular file paths.
-# external_diff_command = ["code", "--diff"]
+external_diff_command = ["code", "--diff"]
 ```
 
-Supporting VS Code requires an alternative implementation that writes the two
-selected values to temporary regular files and invokes `code --diff` with
-those file paths.
+For body diffs, compressed captures such as `.gz`, `.br`, `.zst`, `.zstd`, and
+`.deflate`, and SSE captures split into `response.body.NNN` files, are
+normalized to text files under:
+
+```text
+capture//.external-diff/
+```
+
+These files are derived views for external diff and are not searched by the
+TUI full-text search, which searches `flows/`.
 
 ## WebSocket / WSS handling
 

@@ -352,14 +352,6 @@ fn rfc3999_to_local(rfc3339_str: &str) -> String {
     local_time.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-fn source_kind_short(value: &str) -> &'static str {
-    match value {
-        "persistent" => "pers",
-        "generated" => "gen",
-        _ => "unk",
-    }
-}
-
 fn bool_short(value: i64) -> &'static str {
     if value == 0 {
         "no"
@@ -373,26 +365,6 @@ fn bool_valid(value: i64) -> &'static str {
         "invalid"
     } else {
         "valid"
-    }
-}
-
-fn compact_loaded_at(value: &str) -> String {
-    let value = value.trim();
-
-    if value.len() >= 16 {
-        let month_day = value.get(5..10).unwrap_or(value);
-        let hour_min = value.get(11..16).unwrap_or("");
-        return format!("{month_day} {hour_min}");
-    }
-
-    truncate(value, 12)
-}
-
-fn bool_text(value: i64) -> &'static str {
-    if value == 0 {
-        "false"
-    } else {
-        "true"
     }
 }
 

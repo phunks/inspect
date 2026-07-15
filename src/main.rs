@@ -19,7 +19,7 @@ use inspect::mitm::flow::{FlowEventDispatcher, FlowEventPublisher, TuiSink};
 use inspect::mitm::store_metadata::DbState as StoreDbState;
 use inspect::tui::ReadDbState;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 async fn main() -> Result<(), AnyError> {
     let opt = Opt::init()?;
     let _logger = Logger::build(opt.verbosity);
@@ -83,6 +83,7 @@ async fn main() -> Result<(), AnyError> {
     let upstream_proxy = opt.upstream_proxy.clone();
     let ua_profile = opt.ua_profile;
     let connect_ua_profile = opt.connect_ua_profile;
+    let connect_ua = opt.connect_ua.clone();
     let proxy_mode = opt.proxy_mode;
     let upstream_handshake_timeout_ms = opt.upstream_handshake_timeout_ms;
     let upstream_request_timeout_sec = opt.upstream_request_timeout_sec;
@@ -135,6 +136,7 @@ async fn main() -> Result<(), AnyError> {
             service_port,
             ua_profile,
             connect_ua_profile,
+            connect_ua,
             proxy_mode,
             upstream_handshake_timeout_ms,
             upstream_request_timeout_sec,

@@ -1763,6 +1763,7 @@ fn choose_original_host(original_host: &str, edited_host: &str) -> String {
     }
 }
 
+#[allow(unused)]
 fn body_rewrite_anchor(
     original_body_text: Option<&str>,
     edited_body_text: Option<&str>,
