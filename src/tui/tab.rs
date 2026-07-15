@@ -71,6 +71,7 @@ pub struct DetailContent {
     pub response_meta: String,
     pub response_body: String,
     pub ssl_tls_info: String,
+    pub tunnel_info: Option<String>,
     pub id: String,
     pub dir: String,
 }
@@ -140,7 +141,7 @@ impl DetailActionBus {
         requests.clear();
         count
     }
-    
+
     pub fn request_external_diff_if_supported(&self) -> bool {
         let selection = self.edit_state().selection;
 
@@ -271,11 +272,34 @@ impl DetailPane {
         highlight_query: Option<String>,
         tab_selection: Option<DetailTabSelection>,
     ) {
+        let was_tunnel_failure = self.is_tunnel_failure();
+
         self.content = content;
         self.highlight_query = highlight_query;
+        self.sync_primary_tab_labels();
 
-        if let Some(tab_selection) = tab_selection {
-            self.select_tab(tab_selection);
+        if self.is_tunnel_failure() {
+            if !matches!(self.primary_tab, DetailPrimaryTab::SslTls | DetailPrimaryTab::Info) {
+                self.primary_tab = DetailPrimaryTab::SslTls;
+            }
+
+            self.message_part = DetailMessagePart::Meta;
+
+            let primary_tab_index = self.primary_tab_index();
+
+            if let Some(ctrl) = self.root.get_widget_mut(self.primary_tab_id) {
+                ctrl.set_selected(primary_tab_index);
+            }
+        } else {
+            if let Some(tab_selection) = tab_selection {
+                self.select_tab(tab_selection);
+            } else if was_tunnel_failure {
+                let primary_tab_index = self.primary_tab_index();
+
+                if let Some(ctrl) = self.root.get_widget_mut(self.primary_tab_id) {
+                    ctrl.set_selected(primary_tab_index);
+                }
+            }
         }
 
         self.sync_message_part_visibility();
@@ -305,17 +329,46 @@ impl DetailPane {
         });
     }
 
-    fn select_tab(&mut self, tab_selection: DetailTabSelection) {
-        self.primary_tab = tab_selection.primary_tab.into();
-        self.message_part = tab_selection.message_part.into();
+    fn is_tunnel_failure(&self) -> bool {
+        self.content.tunnel_info.is_some()
+    }
+
+    fn sync_primary_tab_labels(&mut self) {
+        let tunnel_failure = self.is_tunnel_failure();
 
         if let Some(ctrl) = self.root.get_widget_mut(self.primary_tab_id) {
-            ctrl.set_selected(match self.primary_tab {
+            if tunnel_failure {
+                ctrl.set_labels(&["ssl/tls", "info"]);
+            } else {
+                ctrl.set_labels(&["request", "response", "ssl/tls", "info"]);
+            }
+        }
+    }
+
+    fn primary_tab_index(&self) -> usize {
+        if self.is_tunnel_failure() {
+            match self.primary_tab {
+                DetailPrimaryTab::Info => 1,
+                _ => 0,
+            }
+        } else {
+            match self.primary_tab {
                 DetailPrimaryTab::Request => 0,
                 DetailPrimaryTab::Response => 1,
                 DetailPrimaryTab::SslTls => 2,
                 DetailPrimaryTab::Info => 3,
-            });
+            }
+        }
+    }
+
+    fn select_tab(&mut self, tab_selection: DetailTabSelection) {
+        self.primary_tab = tab_selection.primary_tab.into();
+        self.message_part = tab_selection.message_part.into();
+
+        let primary_tab_index = self.primary_tab_index();
+
+        if let Some(ctrl) = self.root.get_widget_mut(self.primary_tab_id) {
+            ctrl.set_selected(primary_tab_index);
         }
 
         if let Some(ctrl) = self.root.get_widget_mut(self.message_part_id) {
@@ -373,11 +426,18 @@ impl DetailPane {
 
     fn sync_from_controls(&mut self) {
         if let Some(ctrl) = self.root.get_widget(self.primary_tab_id) {
-            self.primary_tab = match ctrl.get_selected() {
-                1 => DetailPrimaryTab::Response,
-                2 => DetailPrimaryTab::SslTls,
-                3 => DetailPrimaryTab::Info,
-                _ => DetailPrimaryTab::Request,
+            self.primary_tab = if self.is_tunnel_failure() {
+                match ctrl.get_selected() {
+                    1 => DetailPrimaryTab::Info,
+                    _ => DetailPrimaryTab::SslTls,
+                }
+            } else {
+                match ctrl.get_selected() {
+                    1 => DetailPrimaryTab::Response,
+                    2 => DetailPrimaryTab::SslTls,
+                    3 => DetailPrimaryTab::Info,
+                    _ => DetailPrimaryTab::Request,
+                }
             };
         }
 

@@ -41,8 +41,9 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use chrono::Utc;
 use rama::net::address::{Host, HostWithPort, ProxyAddress};
 use serde::Serialize;
 use rama::http::ws::handshake::server::WebSocketMatcher;
@@ -51,19 +52,14 @@ use rama::net::tls::server::SniRouter;
 use tracing::{info, info_span};
 use tracing_futures::Instrument;
 use tokio::sync::watch;
+use uuid::Uuid;
 use crate::filters::FilterManager;
 use crate::filters::http_client::OutboundHttpClientPool;
 use crate::mitm::capture::CapturePaths;
 use crate::mitm::client::{new_upstream_client, UpstreamClient};
 use crate::mitm::dynamic_ca::DynamicIssuer;
 use crate::mitm::flow::dispatcher::UpstreamFlowResult;
-use crate::mitm::flow::{
-    CaptureService,
-    FlowDispatcher,
-    FlowDispatcherConfig,
-    FlowEventPublisher,
-    UpstreamFlowClient
-};
+use crate::mitm::flow::{CaptureService, FlowDispatcher, FlowDispatcherConfig, FlowEvent, TunnelFailed, FlowEventPublisher, UpstreamFlowClient, TunnelFailureCapture};
 use crate::mitm::flow::state_store::FilterStateLimits;
 use crate::mitm::flow::websocket::dispatch_websocket_handshake;
 use crate::mitm::store_metadata::DbState;
@@ -82,6 +78,20 @@ pub enum PacketEvent {
     Started(PacketStarted),
     Completed(PacketCompleted),
     Marked(PacketMarked),
+    TunnelFailed(PacketTunnelFailed),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PacketTunnelFailed {
+    pub id: String,
+    pub seq: u64,
+    pub flow_key: String,
+    pub time: String,
+    pub epoch_ms: i64,
+    pub host: String,
+    pub port: u16,
+    pub stage: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -359,19 +369,22 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
     let client_target = upgraded
         .extensions()
         .get::<ProxyTarget>()
-        .map(|pt| pt.0.clone())
-        .into_iter();
+        .map(|pt| pt.0.clone());
 
     let span = info_span!(
         "https_conn",
-        // ?upstream,
         ?client_target,
     );
 
     async move {
-        let state = upgraded.extensions().get::<State>().unwrap();
-        let http_service = new_http_mitm_proxy(state);
-        
+        let state = upgraded
+            .extensions()
+            .get::<State>()
+            .cloned()
+            .unwrap();
+
+        let http_service = new_http_mitm_proxy(&state);
+
         if let Some(upstream_proxy) = state.flow_dispatcher.upstream_proxy() {
             upgraded.extensions_mut().insert(upstream_proxy);
         }
@@ -399,7 +412,63 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
         });
 
         if let Err(err) = sni_router.serve(upgraded).await {
-            tracing::error!("error serving HTTPS connection: {err:?}");
+            let error = format!("{err:#}");
+
+            tracing::error!(
+                    error = %error,
+                    "error serving HTTPS connection"
+                );
+
+            if let Some(target) = client_target.as_ref() {
+                let now = Utc::now();
+                let id = Uuid::new_v4().to_string();
+                let seq = state
+                    .flow_dispatcher
+                    .seq()
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+                let flow_key = format!("{seq:06}-{}", &id[..8]);
+                let flow_dir = state
+                    .flow_dispatcher
+                    .capture()
+                    .paths()
+                    .flows_dir
+                    .join(&flow_key);
+
+                let capture = TunnelFailureCapture {
+                    id: id.clone(),
+                    seq,
+                    flow_key: flow_key.clone(),
+                    flow_dir,
+                    time: now,
+                    host: target.host.to_string(),
+                    port: target.port,
+                    stage: "TLS accept / handshake".to_string(),
+                    error: error.clone(),
+                };
+
+                if let Err(err) = state.flow_dispatcher.capture().commit_tunnel_failure(capture).await {
+                    tracing::error!(
+                            error = ?err,
+                            flow_key = %flow_key,
+                            "failed to persist TLS tunnel failure"
+                        );
+                }
+
+                state.flow_dispatcher.events().publish(FlowEvent::TunnelFailed(
+                    TunnelFailed {
+                        id,
+                        seq,
+                        flow_key,
+                        time: now.to_rfc3339(),
+                        epoch_ms: now.timestamp_millis(),
+                        host: target.host.to_string(),
+                        port: target.port,
+                        stage: "TLS accept / handshake".to_string(),
+                        error,
+                    },
+                ));
+            }
         }
 
         Ok(())

@@ -35,12 +35,7 @@ use crate::tui::time::{
     TimeDisplayConfig,
     TimeFormatter
 };
-use crate::mitm::proxy::{
-    PacketCompleted,
-    PacketEvent,
-    PacketMarked,
-    PacketStarted
-};
+use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketMarked, PacketStarted, PacketTunnelFailed};
 use crate::mitm::capture::CapturePaths;
 use crate::tui::body::{
     format_body_for_display,
@@ -80,6 +75,7 @@ struct PacketRow {
     id: String,
     seq: u64,
     flow_key: String,
+    flow_dir: Option<PathBuf>,
     time: String,
     method: String,
     status: Option<u16>,
@@ -140,7 +136,7 @@ impl PacketRow {
 
         let _ = write!(
             &mut line,
-            "#{:06} {} {:<6} {:<4} ",
+            "#{:06} {} {:<7} {:<4} ",
             self.seq,
             self.time,
             self.method,
@@ -454,6 +450,14 @@ enum PacketListMode {
     Search,
 }
 
+#[derive(Clone, Debug)]
+struct TunnelFailureDetail {
+    stage: String,
+    error: String,
+    host: String,
+    port: u16,
+}
+
 pub struct PacketListDelegate {
     rows: Vec<PacketRow>,
     search_row_ids: Vec<String>,
@@ -466,6 +470,7 @@ pub struct PacketListDelegate {
     search_error: Option<String>,
     selected: usize,
     diff_selection: DiffSelection,
+    tunnel_failures: HashMap<String, TunnelFailureDetail>,
     external_diff_command: Option<Arc<[String]>>,
     rx: mpsc::Receiver<PacketEvent>,
     list: Box<Pane>,
@@ -573,6 +578,7 @@ impl PacketListDelegate {
                 id: String::new(),
                 seq: 0,
                 flow_key: String::new(),
+                flow_dir: None,
                 time: String::new(),
                 method: String::new(),
                 status: None,
@@ -669,6 +675,7 @@ impl PacketListDelegate {
             search_error: None,
             selected,
             diff_selection: DiffSelection::default(),
+            tunnel_failures: HashMap::new(),
             external_diff_command: external_diff_command.map(Arc::from),
             rx,
             list,
@@ -704,10 +711,17 @@ impl PacketListDelegate {
             raw_time.to_string()
         };
 
+        let flow_dir = summary.flow_dir.map(PathBuf::from);
+        let is_tunnel_failure = summary.method.as_deref() == Some("CONNECT")
+            && flow_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("ssl_tls.json").is_file());
+
         let mut row = PacketRow {
             id: summary.id,
             seq: summary.seq.max(0) as u64,
             flow_key: summary.flow_key,
+            flow_dir,
             time: display_time,
             method: summary.method.unwrap_or_default(),
             status: summary.status.map(|status| status as u16),
@@ -716,7 +730,14 @@ impl PacketListDelegate {
             host: summary.host.unwrap_or_default(),
             uri: summary.uri.unwrap_or_default(),
             query_str: summary.query_str.unwrap_or_default(),
-            marks: Vec::new(),
+            marks: if is_tunnel_failure {
+                vec![RowMark {
+                    label: "TLS FAILED".to_string(),
+                    color: Some("red".to_string()),
+                }]
+            } else {
+                Vec::new()
+            },
             line: Arc::<str>::from(""),
         };
 
@@ -818,10 +839,58 @@ impl PacketListDelegate {
     }
 
     fn show_detail(&mut self) {
-        let selected_id = self.selected_packet_id().map(str::to_owned);
+        self.show_detail_with(None, None);
+    }
 
-        if let Some(id) = selected_id {
-            self.on_select_packet(id);
+    fn show_detail_with(
+        &mut self,
+        highlight_query: Option<String>,
+        tab_selection: Option<DetailTabSelection>,
+    ) {
+        let Some(row) = self.current_row().cloned() else {
+            return;
+        };
+
+        if let Some(tunnel) = self.tunnel_failures.get(&row.id).cloned() {
+            let ssl_tls_info = serde_json::to_string_pretty(&serde_json::json!({
+                    "kind": "tls_tunnel_failure",
+                    "method": "CONNECT",
+                    "target": format!("{}:{}", tunnel.host, tunnel.port),
+                    "host": tunnel.host,
+                    "port": tunnel.port,
+                    "stage": tunnel.stage,
+                    "result": "failed",
+                    "error": tunnel.error,
+                }))
+                .unwrap_or_else(|err| format!("failed to format TLS failure detail: {err}"));
+
+            let _ = self.detail_tx.send(UiEvent::ShowDetail {
+                detail: DetailContent {
+                    ssl_tls_info,
+                    tunnel_info: Some(String::new()),
+                    id: row.id,
+                    dir: row
+                        .flow_dir
+                        .as_deref()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    ..Default::default()
+                },
+                highlight_query,
+                tab_selection: Some(DetailTabSelection {
+                    primary_tab: DetailPrimaryTabSelection::SslTls,
+                    message_part: DetailMessagePartSelection::Meta,
+                }),
+            });
+            return;
+        }
+
+        if !row.id.is_empty() {
+            self.on_select_packet_with_highlight(
+                row.id,
+                highlight_query,
+                tab_selection,
+            );
         }
     }
 
@@ -927,6 +996,9 @@ impl PacketListDelegate {
                 PacketEvent::Marked(pkt) => {
                     self.on_packet_marked(pkt);
                 }
+                PacketEvent::TunnelFailed(pkt) => {
+                    self.on_tunnel_failed(pkt);
+                }
             }
 
             changed = true;
@@ -956,6 +1028,7 @@ impl PacketListDelegate {
             id: pkt.id,
             seq: pkt.seq,
             flow_key: pkt.flow_key,
+            flow_dir: None,
             time: display_time,
             method: pkt.method,
             status: None,
@@ -981,6 +1054,46 @@ impl PacketListDelegate {
             self.search_row_ids.push(row.id.clone());
         }
 
+        self.rows.push(row);
+    }
+
+    fn on_tunnel_failed(&mut self, pkt: PacketTunnelFailed) {
+        let display_time = self.time_formatter.format_packet_time(&pkt.time, pkt.epoch_ms);
+        let id = pkt.id;
+
+        self.tunnel_failures.insert(
+            id.clone(),
+            TunnelFailureDetail {
+                stage: pkt.stage,
+                error: pkt.error,
+                host: pkt.host.clone(),
+                port: pkt.port,
+            },
+        );
+
+        let mut row = PacketRow {
+            id: id.clone(),
+            seq: pkt.seq,
+            flow_key: pkt.flow_key.clone(),
+            flow_dir: Some(self.capture_flows_dir.join(&pkt.flow_key)),
+            time: display_time,
+            method: "CONNECT".to_string(),
+            status: None,
+            elapsed_ms: None,
+            protocol: "https".to_string(),
+            host: pkt.host,
+            uri: format!(":{}", pkt.port),
+            query_str: String::new(),
+            marks: vec![RowMark {
+                label: "TLS FAILED".to_string(),
+                color: Some("red".to_string()),
+            }],
+            line: Arc::<str>::from(""),
+        };
+        row.refresh_line();
+
+        let idx = self.rows.len();
+        self.id_to_row_index.insert(id, idx);
         self.rows.push(row);
     }
 
@@ -1165,6 +1278,7 @@ impl PacketListDelegate {
             id: String::new(),
             seq: 0,
             flow_key: String::new(),
+            flow_dir: None,
             time: "test time".to_string(),
             method: "test method".to_string(),
             status: None,
@@ -1228,10 +1342,7 @@ impl PacketListDelegate {
         if idx < self.visible_rows_len() {
             self.set_current_selected(idx);
             self.sync_list_and_reveal_selected();
-
-            if let Some(id) = self.selected_packet_id().map(str::to_owned) {
-                self.on_select_packet(id);
-            }
+            self.show_detail();
         }
     }
 
@@ -1331,6 +1442,7 @@ impl PacketListDelegate {
                         response_meta: res.to_string(),
                         response_body: res_body,
                         ssl_tls_info,
+                        tunnel_info: None,
                         id,
                         dir,
                     }
@@ -1355,6 +1467,7 @@ impl PacketListDelegate {
                         response_meta: format!("response error: {e:#}"),
                         response_body: String::new(),
                         ssl_tls_info,
+                        tunnel_info: None,
                         id,
                         dir,
                     }
@@ -1365,6 +1478,7 @@ impl PacketListDelegate {
                     response_meta: format!("response error: {e2:#}"),
                     response_body: String::new(),
                     ssl_tls_info: format_ssl_tls_info(None, None),
+                    tunnel_info: None,
                     id,
                     dir: String::new(),
                 },
@@ -1374,6 +1488,7 @@ impl PacketListDelegate {
                     response_meta: String::new(),
                     response_body: String::new(),
                     ssl_tls_info: format_ssl_tls_info(None, None),
+                    tunnel_info: None,
                     id,
                     dir: String::new(),
                 },
@@ -1704,9 +1819,7 @@ impl PacketListDelegate {
         self.sync_list_and_reveal_selected();
         self.invalidate_visible_range(0..self.visible_rows_len());
 
-        if let Some(id) = self.selected_packet_id().map(str::to_owned) {
-            self.on_select_packet_with_highlight(id, highlight_query, tab_selection);
-        }
+        self.show_detail_with(highlight_query, tab_selection);
     }
 
     fn on_packet_marked(&mut self, pkt: PacketMarked) {
@@ -1750,7 +1863,32 @@ async fn load_detail_content(
     time_formatter: TimeFormatter,
 ) -> anyhow::Result<DetailContent> {
     let req = db.select_request_by_id(id.clone()).await?;
-    let res = db.select_response_by_id(id.clone()).await?;
+
+    let flow_dir = req.flow_dir.as_deref().unwrap_or_default();
+    let ssl_tls_path = Path::new(flow_dir).join("ssl_tls.json");
+    let is_tunnel_failure = req.method.as_deref() == Some("CONNECT")
+        && tokio::fs::try_exists(&ssl_tls_path).await.unwrap_or(false);
+
+    if is_tunnel_failure {
+        let ssl_tls_info = match tokio::fs::read_to_string(&ssl_tls_path).await {
+            Ok(text) => text,
+            Err(err) => format!(
+                "{{\n  \"error\": \"failed to read {}: {}\"\n}}",
+                ssl_tls_path.display(),
+                err,
+            ),
+        };
+
+        return Ok(DetailContent {
+            ssl_tls_info,
+            tunnel_info: Some(String::new()),
+            id,
+            dir: flow_dir.to_string(),
+            ..Default::default()
+        });
+    }
+
+    let res_result = db.select_response_by_id(id.clone()).await;
 
     let mut req = req;
     if let Some(epoch_ms) = req.epoch_ms {
@@ -1758,21 +1896,42 @@ async fn load_detail_content(
         req.time = Some(time_formatter.format_packet_time_rfc3339(raw_time, epoch_ms));
     }
 
-    let req_body = read_body_file(req.request_body_path.as_deref(), &req.headers).await;
-    let res_body = read_body_file(res.response_body_path.as_deref(), &res.headers).await;
-
     let dir = req.flow_dir.as_deref().unwrap_or_default().to_string();
-    let ssl_tls_info = format_ssl_tls_info(req.tls_sni.as_deref(), res.tls_upstream.as_deref());
+    let req_body = read_body_file(req.request_body_path.as_deref(), &req.headers).await;
+    let req_body = format_body_with_size(req.body_size_line(), req_body);
 
-    Ok(DetailContent {
-        request_meta: req.to_string(),
-        request_body: format_body_with_size(req.body_size_line(), req_body),
-        response_meta: res.to_string(),
-        response_body: format_body_with_size(res.body_size_line(), res_body),
-        ssl_tls_info,
-        id,
-        dir,
-    })
+    match res_result {
+        Ok(res) => {
+            let res_body = read_body_file(res.response_body_path.as_deref(), &res.headers).await;
+            let ssl_tls_info =
+                format_ssl_tls_info(req.tls_sni.as_deref(), res.tls_upstream.as_deref());
+
+            Ok(DetailContent {
+                request_meta: req.to_string(),
+                request_body: req_body,
+                response_meta: res.to_string(),
+                response_body: format_body_with_size(res.body_size_line(), res_body),
+                ssl_tls_info,
+                tunnel_info: None,
+                id,
+                dir,
+            })
+        }
+        Err(err) => {
+            let ssl_tls_info = format_ssl_tls_info(req.tls_sni.as_deref(), None);
+
+            Ok(DetailContent {
+                request_meta: req.to_string(),
+                request_body: req_body,
+                response_meta: format!("<no response captured: {err:#}>"),
+                response_body: String::new(),
+                ssl_tls_info,
+                tunnel_info: None,
+                id,
+                dir,
+            })
+        }
+    }
 }
 
 fn external_diff_text(

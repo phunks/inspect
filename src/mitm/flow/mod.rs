@@ -20,6 +20,7 @@ pub use capture_service::{
     RequestCommit,
     ResponseCommit,
     ResponseOrigin,
+    TunnelFailureCapture,
 };
 pub use dispatcher::{
     FlowDispatcher,
@@ -34,6 +35,7 @@ pub use flow_event::{
     FlowEventPublisher,
     FlowEventSink,
     FlowMark,
+    TunnelFailed,
     RequestCommitted,
     ResponseCommitted,
 };

@@ -258,6 +258,14 @@ impl SegmentedControl {
         }
     }
 
+    pub fn set_labels(&mut self, labels: &[&str]) {
+        self.labels = labels.iter().map(|label| (*label).to_string()).collect();
+        self.disabled.set(0);
+        self.selected.set(self.selected.get().min(self.labels.len().saturating_sub(1)));
+        self.set_pressed(None);
+        tuie::dirty_layout();
+    }
+
     /// Clears the selected segment without emitting a [`ChangeEvent`].
     pub fn clear_selected(&mut self) {
         let index = self.labels.len();

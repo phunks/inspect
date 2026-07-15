@@ -8,6 +8,20 @@ use tracing::warn;
 pub enum FlowEvent {
     RequestCommitted(RequestCommitted),
     ResponseCommitted(ResponseCommitted),
+    TunnelFailed(TunnelFailed),
+}
+
+#[derive(Clone, Debug)]
+pub struct TunnelFailed {
+    pub id: String,
+    pub seq: u64,
+    pub flow_key: String,
+    pub time: String,
+    pub epoch_ms: i64,
+    pub host: String,
+    pub port: u16,
+    pub stage: String,
+    pub error: String,
 }
 
 #[derive(Clone, Debug)]

@@ -14,6 +14,19 @@ use crate::mitm::flow::body_encoding::decoded_body_or_raw;
 use crate::mitm::flow::filter_bridge::normalized_content_type;
 use crate::mitm::store_metadata::{DbState, FilterExecStatMetadata, RequestMetadata, RequestResponseEvent, ResponseMetadata};
 
+#[derive(Clone, Debug)]
+pub struct TunnelFailureCapture {
+    pub id: String,
+    pub seq: u64,
+    pub flow_key: String,
+    pub flow_dir: PathBuf,
+    pub time: DateTime<Utc>,
+    pub host: String,
+    pub port: u16,
+    pub stage: String,
+    pub error: String,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FilterResourceStats {
     pub state_read_bytes: i64,
@@ -60,6 +73,67 @@ impl CaptureService {
                 .filter(|value| !value.is_empty())
                 .collect(),
         }
+    }
+
+    pub async fn commit_tunnel_failure(
+        &self,
+        capture: TunnelFailureCapture,
+    ) -> anyhow::Result<()> {
+        tokio::fs::create_dir_all(&capture.flow_dir)
+            .await
+            .with_context(|| format!("create tunnel failure dir {}", capture.flow_dir.display()))?;
+
+        let ssl_tls_path = capture.flow_dir.join("ssl_tls.json");
+
+        let failure = json!({
+            "kind": "tls_tunnel_failure",
+            "method": "CONNECT",
+            "target": format!("{}:{}", capture.host, capture.port),
+            "host": capture.host,
+            "port": capture.port,
+            "time": rfc3999z(&capture.time),
+            "epoch_ms": capture.time.timestamp_millis(),
+            "stage": capture.stage,
+            "result": "failed",
+            "error": capture.error,
+        });
+
+        let failure_json = serde_json::to_vec_pretty(&failure)
+            .context("serialize TLS tunnel failure metadata")?;
+
+        tokio::fs::write(&ssl_tls_path, &failure_json)
+            .await
+            .with_context(|| format!("write {}", ssl_tls_path.display()))?;
+
+        let time = rfc3999z(&capture.time);
+
+        self.dbstate
+            .event_sender
+            .send(RequestResponseEvent::Request(RequestMetadata {
+                id: capture.id,
+                seq: capture.seq as i64,
+                flow_key: capture.flow_key,
+                flow_dir: capture.flow_dir.to_string_lossy().to_string(),
+                request_head_path: String::new(),
+                request_body_path: String::new(),
+                time,
+                epoch_ms: capture.time.timestamp_millis(),
+                method: "CONNECT".to_string(),
+                protocol: "https".to_string(),
+                host: capture.host,
+                uri: String::new(),
+                query_str: String::new(),
+                version: String::new(),
+                tls_sni: None,
+                headers: json!({}),
+                body_size: 0,
+                body_saved_size: 0,
+                body_truncated: false,
+                body_save_limit: None,
+            }))
+            .map_err(|err| anyhow::anyhow!("queue tunnel failure request metadata: {err}"))?;
+
+        Ok(())
     }
 
     pub fn paths(&self) -> &CapturePaths {
