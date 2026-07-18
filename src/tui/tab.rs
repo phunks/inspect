@@ -6,9 +6,9 @@ use crate::tui::{highlight_detail_text, DETAIL_PLACEHOLDER_TEXT};
 use crate::tui::segmented_control::SegmentedControl;
 
 pub type SharedDetailEditState = Arc<Mutex<DetailEditState>>;
-pub type SharedOpenEditRequests = Arc<Mutex<Vec<()>>>;
+pub type SharedOpenEditRequests = Arc<Mutex<usize>>;
 pub type SharedExternalDiffRequests = Arc<Mutex<Vec<DetailTabSelection>>>;
-
+pub type SharedExternalViewRequests = Arc<Mutex<Vec<DetailTabSelection>>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DetailPrimaryTab {
@@ -103,11 +103,12 @@ impl Default for DetailEditState {
     }
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Default)]
 pub struct DetailActionBus {
-    edit_state: SharedDetailEditState,
-    open_edit_requests: SharedOpenEditRequests,
+    edit_state: Arc<Mutex<DetailEditState>>,
+    open_edit_requests: Arc<Mutex<usize>>,
     external_diff_requests: SharedExternalDiffRequests,
+    external_view_requests: SharedExternalViewRequests,
 }
 
 impl DetailActionBus {
@@ -120,7 +121,7 @@ impl DetailActionBus {
     }
 
     pub fn request_open_edit(&self) {
-        self.open_edit_requests.lock().push(());
+        *self.open_edit_requests.lock() += 1;
     }
 
     pub fn request_open_edit_if_supported(&self) -> bool {
@@ -137,8 +138,8 @@ impl DetailActionBus {
 
     pub fn take_open_edit_requests(&self) -> usize {
         let mut requests = self.open_edit_requests.lock();
-        let count = requests.len();
-        requests.clear();
+        let count = *requests;
+        *requests = 0;
         count
     }
 
@@ -156,8 +157,26 @@ impl DetailActionBus {
         }
     }
 
+    pub fn request_external_view_if_supported(&self) -> bool {
+        let selection = self.edit_state().selection;
+
+        match selection.primary_tab {
+            DetailPrimaryTabSelection::Request
+            | DetailPrimaryTabSelection::Response
+            | DetailPrimaryTabSelection::SslTls => {
+                self.external_view_requests.lock().push(selection);
+                true
+            }
+            DetailPrimaryTabSelection::Info => false,
+        }
+    }
+
     pub fn take_external_diff_requests(&self) -> Vec<DetailTabSelection> {
         std::mem::take(&mut *self.external_diff_requests.lock())
+    }
+
+    pub fn take_external_view_requests(&self) -> Vec<DetailTabSelection> {
+        std::mem::take(&mut *self.external_view_requests.lock())
     }
 }
 

@@ -69,6 +69,7 @@ struct FileConfig {
     verbosity: Option<u8>,
     upstream_proxy: Option<String>,
     external_diff_command: Option<Vec<String>>,
+    external_view_command: Option<Vec<String>>,
     ua_profile: Option<UaProfile>,
     connect_ua_profile: Option<UaProfile>,
     connect_ua: Option<String>,
@@ -108,6 +109,10 @@ pub struct Opt {
     #[arg(skip)]
     /// External diff command configured in config.toml.
     pub external_diff_command: Option<Vec<String>>,
+
+    #[arg(skip)]
+    /// External viewer/editor command configured in config.toml.
+    pub external_view_command: Option<Vec<String>>,
 
     #[arg(long, value_name = "DIR", help = "Open an existing capture directory in read-only TUI view mode")]
     pub view_capture: Option<std::path::PathBuf>,
@@ -224,9 +229,14 @@ impl Opt {
             self.external_diff_command = Some(value);
         }
 
+        if let Some(value) = config.external_view_command {
+            self.external_view_command = Some(value);
+        }
+
         tracing::warn!(
             external_diff_command = ?self.external_diff_command,
-            "loaded external diff configuration"
+            external_view_command = ?self.external_view_command,
+            "loaded external command configuration"
         );
 
         if !cli_specified(matches, "view_capture")
@@ -359,6 +369,7 @@ impl Opt {
             verbosity = self.verbosity,
             upstream_proxy = ?self.upstream_proxy,
             external_diff_command = ?self.external_diff_command,
+            external_view_command = ?self.external_view_command,
             ua_profile = ?self.ua_profile,
             connect_ua_profile = ?self.connect_ua_profile,
             connect_ua = ?self.connect_ua,

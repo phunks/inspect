@@ -40,6 +40,9 @@ Detail pane
                     meta/body tab.
                     Available for request and response
                     tabs only.
+  W                 open selected request/response
+                    meta/body or ssl/tls in external
+                    viewer/editor
   E                 open the selected request/response
                     in the editor
 
@@ -243,6 +246,10 @@ impl DelegateWidget for GlobalChords {
             chord!(D) if queue.is_unhandled() => {
                 queue.next();
                 let _ = self.detail_bus.request_external_diff_if_supported();
+            }
+            chord!(W) if queue.is_unhandled() => {
+                queue.next();
+                let _ = self.detail_bus.request_external_view_if_supported();
             }
             chord!(E) if queue.is_unhandled() => {
                 queue.next();

@@ -536,7 +536,18 @@ impl FilterManager {
     }
 
     pub fn validate_filter_file(&self, path: &Path) -> Result<()> {
-        self.load_filter(path, FilterSourceKind::Persistent)
+        let path = absolute_path(path.to_path_buf());
+        let source_kind = if self
+            .filter_dirs
+            .iter()
+            .any(|filter_dir| filter_dir != &self.filters_dir && path.starts_with(filter_dir))
+        {
+            FilterSourceKind::Generated
+        } else {
+            FilterSourceKind::Persistent
+        };
+
+        self.load_filter(&path, source_kind)
             .with_context(|| format!("validate roto filter {}", path.display()))?;
 
         Ok(())

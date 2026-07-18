@@ -227,7 +227,7 @@ impl fmt::Display for EditableFilterSessionError {
                 )
             }
             Self::MissingResponseStatus => write!(f, "editable response is missing status"),
-            Self::Save(err) => write!(f, "failed to save generated filter: {err}"),
+            Self::Save(err) => write!(f, "failed to save generated filter: {err:#}"),
         }
     }
 }

@@ -398,6 +398,7 @@ Viewer mode is read-only:
 - `b`: mark selected connection as [B] (diff right)
 - `x`: clear both A/B marks
 - `D`: open external diff for A/B
+- `W`: open selected detail file in an external viewer/editor
 
 ## Filtering
 
@@ -570,12 +571,12 @@ packets.
 
 ### Key bindings
 
-| Context | Key | Action |
-| --- | --- | --- |
-| Packet list | `a` | Mark the selected connection as A / left input |
-| Packet list | `b` | Mark the selected connection as B / right input |
-| Packet list | `x` | Clear A and B selections |
-| Detail pane | `D` | Diff the selected request/response/SSL-TLS part of A and B |
+| Context         | Key | Action                                                     |
+|-----------------|-----|------------------------------------------------------------|
+| Packet list     | `a` | Mark the selected connection as A / left input             |
+| Packet list     | `b` | Mark the selected connection as B / right input            |
+| Packet list     | `x` | Clear A and B selections                                   |
+| Detail pane     | `D` | Diff the selected request/response/SSL-TLS part of A and B |
 
 External diff is unavailable for the `info` detail tab.
 
@@ -588,7 +589,6 @@ The external diff command receives regular file paths, so tools such as `meld`,
 ```toml
 # Supported examples
 external_diff_command = ["meld"]
-external_diff_command = ["vimdiff"]
 external_diff_command = ["code", "--diff"]
 ```
 
@@ -602,6 +602,70 @@ capture//.external-diff/
 
 These files are derived views for external diff and are not searched by the
 TUI full-text search, which searches `flows/`.
+
+## External view/editor
+
+The TUI can open the currently selected request, response, or SSL/TLS detail in
+an external viewer/editor.
+
+Configure the command at the top level of `config.toml`:
+
+```toml
+external_view_command = ["code", "--wait"]
+```
+
+Press `W` in the detail pane to open the selected detail part.
+
+Supported detail parts:
+
+- `request` → `meta`
+- `request` → `body`
+- `response` → `meta`
+- `response` → `body`
+- `ssl/tls`
+
+Request/response headers and `ssl_tls.json` are opened directly from the capture
+directory. Body files are also opened directly when possible. If the selected
+body is compressed (`.gz`, `.br`, `.zst`, `.zstd`, `.deflate`) or is an SSE
+chunked capture, Inspect writes a normalized text view under:
+
+```text
+capture//.external-diff/
+```
+
+and opens that derived text file instead.
+
+The generated filter editor also uses `external_view_command`: press `W` inside
+the editor popup to save the generated `.roto` filter and open the saved file
+externally.
+
+### Terminal editor compatibility
+
+`external_view_command` should normally be a GUI editor/viewer or a command that
+opens a separate terminal window.
+
+Inspect's TUI already owns the current terminal while it is running: stdin,
+stdout/stderr, raw mode, and the alternate screen are all controlled by the TUI.
+For that reason, terminal UI programs such as `vim`, `less`, and `nano` generally
+do not work correctly when configured directly.
+
+Good examples:
+```toml
+external_view_command = ["code", "--wait"]
+external_view_command = ["open"]
+external_view_command = ["wezterm", "start", "--", "vim"]
+external_view_command = ["kitty", "--detach", "vim"]
+```
+
+Usually bad examples:
+```toml
+external_view_command = ["vim"]
+external_view_command = ["less"]
+external_view_command = ["nano"]
+```
+If you want to use a terminal editor, wrap it in a terminal-launching command or
+a small script that opens a new terminal window and passes the file path to the
+editor.
 
 ## WebSocket / WSS handling
 

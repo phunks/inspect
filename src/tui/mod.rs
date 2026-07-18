@@ -50,13 +50,7 @@ use crate::tui::tab::{
 };
 use crate::tui::editor_pane::open_edit_popup;
 use crate::tui::filter_stats::open_filter_stats_popup;
-use crate::tui::external_diff::{
-    spawn_external_diff,
-    external_diff_paths,
-    format_body_with_size,
-    read_body_file,
-    format_ssl_tls_info
-};
+use crate::tui::external_diff::{spawn_external_diff, external_diff_paths, format_body_with_size, read_body_file, format_ssl_tls_info, external_view_path, spawn_external_view};
 use read_metadata::DbState;
 pub use read_metadata::DbState as ReadDbState;
 
@@ -429,6 +423,7 @@ pub enum UiEvent {
     OpenEdit {
         row: PacketRowEditContext,
         detail: DetailEditState,
+        external_view_command: Option<Arc<[String]>>,
     },
     OpenFilterStats {
         dbstate: Arc<DbState>,
@@ -521,6 +516,7 @@ pub struct PacketListDelegate {
     diff_selection: DiffSelection,
     tunnel_failures: HashMap<String, TunnelFailureDetail>,
     external_diff_command: Option<Arc<[String]>>,
+    external_view_command: Option<Arc<[String]>>,
     rx: mpsc::Receiver<PacketEvent>,
     list: Box<Pane>,
     list_id: WidgetId<List>,
@@ -601,11 +597,13 @@ impl PacketListDelegate {
     const SELECTED_SCROLL_OFF: u16 = 2;
     const WAITING_ROW_TEXT: &'static str = "waiting for packets...";
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         rx: mpsc::Receiver<PacketEvent>,
         detail_tx: UnboundedSender<UiEvent>,
         detail_bus: DetailActionBus,
         external_diff_command: Option<Vec<String>>,
+        external_view_command: Option<Vec<String>>,
         time_display: TimeDisplayConfig,
         tui_mode: TuiMode,
         dbstate: Arc<DbState>,
@@ -724,6 +722,7 @@ impl PacketListDelegate {
             diff_selection: DiffSelection::default(),
             tunnel_failures: HashMap::new(),
             external_diff_command: external_diff_command.map(Arc::from),
+            external_view_command: external_view_command.map(Arc::from),
             rx,
             list,
             list_id,
@@ -866,6 +865,40 @@ impl PacketListDelegate {
 
                 if let Err(err) = spawn_external_diff(command.as_ref(), &left, &right) {
                     tracing::warn!(error = ?err, "failed to start external diff");
+                }
+            });
+        }
+    }
+
+    fn poll_external_view_requests(&mut self) {
+        for selection in self.detail_bus.take_external_view_requests() {
+            let Some(command) = self.external_view_command.clone() else {
+                self.append_system_line(
+                    "=== external view unavailable: configure external_view_command ===",
+                );
+                continue;
+            };
+
+            let Some(id) = self.selected_packet_id().map(str::to_owned) else {
+                self.append_system_line("=== external view unavailable: select a captured packet ===");
+                continue;
+            };
+
+            let db = self.dbstate.clone();
+
+            tokio::spawn(async move {
+                let path = external_view_path(db, selection, id).await;
+
+                let path = match path {
+                    Ok(path) => path.path,
+                    Err(err) => {
+                        tracing::warn!(error = ?err, "failed to resolve external view path");
+                        return;
+                    }
+                };
+
+                if let Err(err) = spawn_external_view(command.as_ref(), &path) {
+                    tracing::warn!(error = ?err, "failed to start external view");
                 }
             });
         }
@@ -1447,6 +1480,7 @@ impl PacketListDelegate {
         let detail_tx = self.detail_tx.clone();
         let time_formatter = self.time_formatter.clone();
         let edit_context = row.edit_context();
+        let external_view_command = self.external_view_command.clone();
         let id = row.id.clone();
 
         tokio::spawn(async move {
@@ -1541,6 +1575,7 @@ impl PacketListDelegate {
                     selection,
                     content: detail,
                 },
+                external_view_command,
             });
         });
     }
@@ -1990,6 +2025,7 @@ impl DelegateWidget for PacketListDelegate {
         self.poll_full_text_select_requests();
         self.poll_open_edit_requests();
         self.poll_external_diff_requests();
+        self.poll_external_view_requests();
         self.list.as_mut()
     }
 
@@ -2142,8 +2178,12 @@ impl RootPane {
                         detail_pane.set_content(detail, highlight_query, tab_selection);
                     }
                 }
-                UiEvent::OpenEdit { row, detail } => {
-                    open_edit_popup(row, detail);
+                UiEvent::OpenEdit {
+                    row,
+                    detail,
+                    external_view_command,
+                } => {
+                    open_edit_popup(row, detail, external_view_command);
                     tuie::dirty_layout();
                 }
                 UiEvent::OpenFilterStats { dbstate, snapshot } => {
@@ -2320,6 +2360,7 @@ pub async fn run_tui(
     rx: mpsc::Receiver<PacketEvent>,
     quit_tx: watch::Sender<bool>,
     external_diff_command: Option<Vec<String>>,
+    external_view_command: Option<Vec<String>>,
     time_display: TimeDisplayConfig,
     tui_mode: TuiMode,
     dbstate: Arc<DbState>,
@@ -2337,6 +2378,7 @@ pub async fn run_tui(
         detail_tx,
         detail_bus.clone(),
         external_diff_command,
+        external_view_command,
         time_display,
         tui_mode,
         dbstate,

@@ -17,6 +17,11 @@ pub(crate) struct ExternalDiffPaths {
     pub(crate) right: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ExternalViewPath {
+    pub(crate) path: PathBuf,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ExternalDiffBodyKind {
     Request,
@@ -91,6 +96,56 @@ pub(crate) async fn external_diff_paths(
     }
 }
 
+pub(crate) async fn external_view_path(
+    db: Arc<DbState>,
+    selection: DetailTabSelection,
+    id: String,
+) -> anyhow::Result<ExternalViewPath> {
+    match (selection.primary_tab, selection.message_part) {
+        (DetailPrimaryTabSelection::Request, DetailMessagePartSelection::Meta) => {
+            let req = db.select_request_by_id(id).await?;
+
+            Ok(ExternalViewPath {
+                path: existing_external_diff_path(req.request_head_path, "request head")?,
+            })
+        }
+        (DetailPrimaryTabSelection::Response, DetailMessagePartSelection::Meta) => {
+            let res = db.select_response_by_id(id).await?;
+
+            Ok(ExternalViewPath {
+                path: existing_external_diff_path(res.response_head_path, "response head")?,
+            })
+        }
+        (DetailPrimaryTabSelection::SslTls, _) => {
+            let req = db.select_request_by_id(id).await?;
+
+            Ok(ExternalViewPath {
+                path: existing_external_diff_path(
+                    ssl_tls_path_from_flow_dir(req.flow_dir.as_deref())?,
+                    "ssl_tls.json",
+                )?,
+            })
+        }
+        (DetailPrimaryTabSelection::Request, DetailMessagePartSelection::Body) => {
+            let source = request_external_diff_body_source(db, id).await?;
+
+            Ok(ExternalViewPath {
+                path: external_view_body_path(source).await?,
+            })
+        }
+        (DetailPrimaryTabSelection::Response, DetailMessagePartSelection::Body) => {
+            let source = response_external_diff_body_source(db, id).await?;
+
+            Ok(ExternalViewPath {
+                path: external_view_body_path(source).await?,
+            })
+        }
+        (DetailPrimaryTabSelection::Info, _) => {
+            anyhow::bail!("external view requests do not support info");
+        }
+    }
+}
+
 async fn request_external_diff_body_source(
     db: Arc<DbState>,
     id: String,
@@ -161,6 +216,19 @@ async fn external_diff_body_paths(
             left: existing_external_diff_path(Some(left.path.to_string_lossy().to_string()), "left body")?,
             right: existing_external_diff_path(Some(right.path.to_string_lossy().to_string()), "right body")?,
         })
+    }
+}
+
+async fn external_view_body_path(
+    source: ExternalDiffBodySource,
+) -> anyhow::Result<PathBuf> {
+    if external_diff_body_needs_view(&source).await {
+        prepare_external_diff_body_view(&source).await
+    } else {
+        existing_external_diff_path(
+            Some(source.path.to_string_lossy().to_string()),
+            "body",
+        )
     }
 }
 
@@ -353,6 +421,97 @@ pub(crate) fn spawn_external_diff(command: &[String], left: &Path, right: &Path)
                 tracing::warn!(
                     error = ?err,
                     "failed to wait external diff process"
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
+pub(crate) fn spawn_external_view(command: &[String], path: &Path) -> anyhow::Result<()> {
+    let Some(program) = command.first().filter(|program| !program.is_empty()) else {
+        anyhow::bail!("external_view_command must start with a program name");
+    };
+
+    let mut child = Command::new(program)
+        .args(&command[1..])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let program = program.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        tracing::debug!(
+                            external_view_program = %program,
+                            stream = "stdout",
+                            message = %line,
+                            "external view output"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            external_view_program = %program,
+                            stream = "stdout",
+                            error = ?err,
+                            "failed to read external view stdout"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let program = program.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        tracing::debug!(
+                            external_view_program = %program,
+                            stream = "stderr",
+                            message = %line,
+                            "external view output"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            external_view_program = %program,
+                            stream = "stderr",
+                            error = ?err,
+                            "failed to read external view stderr"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    std::thread::spawn(move || {
+        match child.wait() {
+            Ok(status) => {
+                tracing::debug!(
+                    status = %status,
+                    "external view process exited"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    "failed to wait external view process"
                 );
             }
         }

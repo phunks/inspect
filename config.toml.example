@@ -271,9 +271,45 @@ tui_time_tz = "utc"
 #     capture/<timestamp>/.external-diff/
 # - .external-diff is outside flows/, so it is not included in TUI full-text
 #   search results.
+# - Terminal UI programs such as vim, less, and nano generally should not be
+#   used directly here unless the command opens a separate terminal window.
+#   Inspect already owns the current terminal's stdin/stdout/stderr while the
+#   TUI is running.
 #
 # Default: unset
 # external_diff_command = ["meld"]
+
+# External viewer/editor command used by the TUI.
+#
+# In the detail pane, press `W` to open the selected request/response
+# meta/body or ssl/tls file externally.
+#
+# In the generated filter editor popup, press `W` to save the generated
+# filter and open the saved .roto file externally.
+#
+# Inspect appends one regular file path to this command:
+#
+#   code --wait /path/to/file
+#
+# Use a GUI editor/viewer or a command that opens a new terminal window.
+# Do NOT directly configure terminal UI programs such as vim, less, or nano
+# unless they are launched inside a separate terminal. Inspect's TUI already
+# owns the current terminal's stdin/stdout/stderr, raw mode, and alternate
+# screen while it is running.
+#
+# Good examples:
+# external_view_command = ["code", "--wait"]
+# external_view_command = ["open"]
+# external_view_command = ["wezterm", "start", "--", "vim"]
+# external_view_command = ["kitty", "--detach", "vim"]
+#
+# Usually bad examples:
+# external_view_command = ["vim"]
+# external_view_command = ["less"]
+# external_view_command = ["nano"]
+#
+# Default: unset
+# external_view_command = ["subl"]
 
 # [[outbound_http_clients]]
 # name = "webhook"

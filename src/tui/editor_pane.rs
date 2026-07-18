@@ -1,12 +1,13 @@
 use std::cell::Cell;
 use std::io::Read;
 use std::rc::Rc;
-
+use std::sync::Arc;
 use tuie::prelude::*;
 use chord_macro::chord;
 use flate2::read::GzDecoder;
 use crate::filters::{EditableFilterSession, EditableFilterSessionPreview, EditableHttpBody, EditableHttpHeader, EditableHttpMessage, EditableHttpMessageKind, FilterManager};
 use crate::mitm::capture::CapturePaths;
+use crate::tui::external_diff::spawn_external_view;
 use crate::tui::PacketRowEditContext;
 use crate::tui::tab::{
     DetailEditState,
@@ -115,12 +116,14 @@ pub struct EditPanel {
     edited_text: String,
     session: Option<EditableFilterSession>,
     preview: EditableFilterSessionPreview,
+    external_view_command: Option<Arc<[String]>>,
 }
 
 impl EditPanel {
     fn new(
         row: PacketRowEditContext,
         detail: DetailEditState,
+        external_view_command: Option<Arc<[String]>>,
         popup_id: Rc<Cell<Option<WidgetId>>>,
     ) -> Box<Self> {
         let title = row.title();
@@ -155,7 +158,7 @@ impl EditPanel {
             .style(Style::new().fg(theme::panel_fg()).bg(theme::panel_inner_bg()))
             .children([
                 Text::new()
-                    .content(format!("{title}    Esc: close  S: save  ^J/^K: scroll  ^Z: undo").fg(theme::panel_fg()).bold())
+                    .content(format!("{title}  Esc: close S: save W: save+ext ^J/^K: scroll ^Z: undo").fg(theme::panel_fg()).bold())
                     .style(Style::new().bg(theme::panel_inner_bg())) as Box<dyn Widget>,
                 Pane::new()
                     .horizontal()
@@ -223,6 +226,7 @@ impl EditPanel {
             edited_text: editable_text,
             session,
             preview,
+            external_view_command,
         })
     }
 
@@ -314,7 +318,71 @@ impl EditPanel {
                 open_save_result_popup(
                     "Save failed",
                     format!(
-                        "Failed to save generated filter:\n\n{err}",
+                        "Failed to save generated filter:\n\n{err:#}",
+                    ),
+                );
+            }
+        }
+    }
+
+    fn save_current_and_open_external(&mut self) {
+        self.refresh_preview();
+
+        let Some(session) = self.session.as_ref() else {
+            open_save_result_popup(
+                "Save failed",
+                "This selection could not be converted into an editable filter session.",
+            );
+            return;
+        };
+
+        if let Err(err) = session.has_changes() {
+            open_save_result_popup(
+                "Save failed",
+                format!("Could not compute changes:\n\n{err}"),
+            );
+            return;
+        }
+
+        if matches!(session.has_changes(), Ok(false)) {
+            open_save_result_popup(
+                "Nothing to save",
+                "No changes were detected, so no generated filter was written.",
+            );
+            return;
+        }
+
+        let Some(command) = self.external_view_command.as_ref() else {
+            open_save_result_popup(
+                "External editor unavailable",
+                "Configure external_view_command in config.toml to open generated filters externally.",
+            );
+            return;
+        };
+
+        let capture_paths = CapturePaths::new();
+        let filter_manager = FilterManager::new("./filters")
+            .with_filter_dir(capture_paths.generated_filters_dir.clone());
+
+        match session.save_generated(&capture_paths, &filter_manager) {
+            Ok(saved) => {
+                if let Err(err) = spawn_external_view(command.as_ref(), &saved.path) {
+                    open_save_result_popup(
+                        "External editor failed",
+                        format!(
+                            "Saved generated Roto filter:\n\n{}\n\nFailed to start external editor:\n\n{err}",
+                            saved.path.display(),
+                        ),
+                    );
+                } else {
+                    self.close();
+                }
+            }
+            Err(err) => {
+                open_save_result_popup(
+                    "Save failed",
+                    format!(
+                        "Failed to save generated filter:\n\n{err:#}",
                     ),
                 );
             }
@@ -326,12 +394,17 @@ impl EditPanel {
     }
 }
 
-pub fn open_edit_popup(row: PacketRowEditContext, detail: DetailEditState) {
+pub fn open_edit_popup(
+    row: PacketRowEditContext,
+    detail: DetailEditState,
+    external_view_command: Option<Arc<[String]>>,
+) {
     let popup_id: Rc<Cell<Option<WidgetId>>> = Rc::new(Cell::new(None));
 
     let panel = EditPanel::new(
         row,
         detail,
+        external_view_command,
         popup_id.clone(),
     );
 
@@ -737,6 +810,11 @@ impl DelegateWidget for EditPanel {
             chord!(S | Ctrl + s) => {
                 queue.next();
                 self.save_current();
+                InputResult::Handled
+            }
+            chord!(W) => {
+                queue.next();
+                self.save_current_and_open_external();
                 InputResult::Handled
             }
             chord!(Ctrl + j) => {
