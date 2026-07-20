@@ -149,6 +149,7 @@ impl FilterManager {
         for filter in next.filters() {
             let (
                 program,
+                has_connect_action,
                 has_on_request,
                 has_on_response,
                 has_request_action,
@@ -172,9 +173,11 @@ impl FilterManager {
                     false,
                     false,
                     false,
+                    false,
                 ),
                 RotoProgram::Compiled { filter, .. } => (
                     "compiled",
+                    filter.has_connect_action(),
                     filter.has_on_request(),
                     filter.has_on_response(),
                     filter.has_request_action(),
@@ -202,6 +205,7 @@ impl FilterManager {
                 path = %filter.definition.path.display(),
                 enabled = filter.definition.metadata.enabled,
                 program,
+                has_connect_action,
                 has_on_request,
                 has_on_response,
                 has_request_action,

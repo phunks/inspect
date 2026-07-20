@@ -1149,6 +1149,21 @@ impl PacketListDelegate {
             },
         );
 
+        let marks = if pkt.marks.is_empty() {
+            vec![RowMark {
+                label: "TLS FAILED".to_string(),
+                color: Some("red".to_string()),
+            }]
+        } else {
+            pkt.marks
+                .into_iter()
+                .map(|mark| RowMark {
+                    label: mark.label,
+                    color: mark.color,
+                })
+                .collect()
+        };
+
         let mut row = PacketRow {
             id: id.clone(),
             seq: pkt.seq,
@@ -1162,10 +1177,7 @@ impl PacketListDelegate {
             host: pkt.host,
             uri: format!(":{}", pkt.port),
             query_str: String::new(),
-            marks: vec![RowMark {
-                label: "TLS FAILED".to_string(),
-                color: Some("red".to_string()),
-            }],
+            marks,
             line: Arc::<str>::from(""),
         };
         row.refresh_line();

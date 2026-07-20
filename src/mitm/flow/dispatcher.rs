@@ -30,6 +30,9 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::filters::{
+    ConnectAction,
+    FilterConnect,
+    FilterConnectView,
     FilterFlow,
     FilterHeader,
     FilterManager,
@@ -118,6 +121,13 @@ pub trait UpstreamFlowClient: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>>;
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ConnectDispatchOutput {
+    pub host: String,
+    pub port: u16,
+    pub action: ConnectAction,
+}
+
 #[derive(Clone)]
 pub struct FlowDispatcherConfig {
     pub upstream_proxy: Option<ProxyAddress>,
@@ -199,6 +209,33 @@ impl FlowDispatcher {
                 tracing::error!(error = ?err, "failed to dispatch HTTP MITM flow");
                 Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response())
             }
+        }
+    }
+
+    pub(crate) fn dispatch_connect_filters(
+        &self,
+        host: String,
+        port: u16,
+    ) -> ConnectDispatchOutput {
+        let connect_view = FilterConnectView {
+            host: &host,
+            port,
+        };
+
+        let connect = FilterConnect {
+            id: Uuid::new_v4().to_string(),
+            // seq: 0,
+            // flow_key: String::new(),
+            host: host.clone(),
+            port,
+        };
+
+        let action = self.filters.run_connect_filters(&connect_view, &connect);
+
+        ConnectDispatchOutput {
+            host,
+            port,
+            action,
         }
     }
 
@@ -349,7 +386,7 @@ impl FlowDispatcher {
         let marks = flow_marks_from_request_action(&request_action);
         let synthetic_response = request_action.synthetic_response;
         let drop_client_response = request_action.drop_client_response;
-        
+
         if let Some(patch) = request_action.request {
             apply_request_patch(req_parts, req_body_bytes, patch);
         }

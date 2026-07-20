@@ -7,6 +7,9 @@ use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::filters::{
+    ConnectAction,
+    FilterConnect,
+    FilterConnectView,
     FilterFlow,
     FilterManager,
     FilterRequest,
@@ -14,12 +17,13 @@ use crate::filters::{
     FilterResponse,
     FilterResponseView,
     RequestAction,
-    ResponseAction,
+    ResponseAction
 };
 use crate::filters::runtime_state::RuntimeStateGuard;
 use crate::mitm::flow::capture_service::FilterResourceStats;
 use crate::mitm::flow::CaptureService;
 use crate::mitm::flow::filter_bridge::{
+    merge_connect_action,
     merge_request_action,
     merge_response_action,
 };
@@ -45,6 +49,29 @@ impl FlowFilterRuntime {
             quarantined_once: Arc::new(Mutex::new(HashSet::new())),
             state_store,
         }
+    }
+
+    pub fn run_connect_filters(
+        &self,
+        connect_view: &FilterConnectView<'_>,
+        connect: &FilterConnect,
+    ) -> ConnectAction {
+        let filters = self.filters.current();
+        let mut combined = ConnectAction::pass();
+
+        for filter in filters.matching_connect(connect_view) {
+            let Some(action) = filter.run_connect_action(connect.clone()) else {
+                continue;
+            };
+
+            merge_connect_action(&mut combined, action);
+
+            if !combined.continue_filters {
+                break;
+            }
+        }
+
+        combined
     }
 
     pub(crate) fn run_request_filters(

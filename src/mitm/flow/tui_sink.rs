@@ -6,7 +6,7 @@ use crate::mitm::flow::flow_event::{
     FlowEventSink,
     FlowMark,
 };
-use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketMarked, PacketStarted, PacketTunnelFailed};
+use crate::mitm::proxy::{PacketCompleted, PacketEvent, PacketEventMark, PacketMarked, PacketStarted, PacketTunnelFailed};
 
 pub struct TuiSink {
     tx: mpsc::Sender<PacketEvent>,
@@ -31,19 +31,25 @@ impl FlowEventSink for TuiSink {
     fn publish(&self, event: Arc<FlowEvent>) {
         match event.as_ref() {
             FlowEvent::TunnelFailed(event) => {
-                let _ = self.tx.try_send(PacketEvent::TunnelFailed(
-                    PacketTunnelFailed {
-                        id: event.id.clone(),
-                        seq: event.seq,
-                        flow_key: event.flow_key.clone(),
-                        time: event.time.clone(),
-                        epoch_ms: event.epoch_ms,
-                        host: event.host.clone(),
-                        port: event.port,
-                        stage: event.stage.clone(),
-                        error: event.error.clone(),
-                    },
-                ));
+                let _ = self.tx.try_send(PacketEvent::TunnelFailed(PacketTunnelFailed {
+                    id: event.id.clone(),
+                    seq: event.seq,
+                    flow_key: event.flow_key.clone(),
+                    time: event.time.clone(),
+                    epoch_ms: event.epoch_ms,
+                    host: event.host.clone(),
+                    port: event.port,
+                    stage: event.stage.clone(),
+                    error: event.error.clone(),
+                    marks: event
+                        .marks
+                        .iter()
+                        .map(|mark| PacketEventMark {
+                            label: mark.label.clone(),
+                            color: mark.color.clone(),
+                        })
+                        .collect(),
+                }));
             }
             FlowEvent::RequestCommitted(event) => {
                 let _ = self.tx.try_send(PacketEvent::Started(PacketStarted {

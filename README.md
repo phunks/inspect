@@ -13,7 +13,7 @@ flowchart LR
   client[Client / Browser] --> proxy[inspect MITM proxy]
   proxy --> upstream[Upstream server]
 
-  proxy --> filters[Roto filters<br/>mark / rewrite / mock]
+  proxy --> filters[Roto filters<br/>mark / rewrite / mock / block]
   filters --> proxy
 
   proxy --> capture[Capture storage<br/>SQLite + flow files]
@@ -28,6 +28,64 @@ Inspect terminates downstream TLS and creates a separate upstream connection. Th
 makes HTTP traffic observable and capturable, but it also means that semantic
 request/response mutation and upstream browser emulation must remain separate
 layers.
+
+## Browser/WAF fingerprint limitations
+Modern large sites and CDN-backed services may use WAF, bot-detection, fraud, or
+anti-abuse systems that evaluate more than the visible HTTP request. They can also
+look at TLS and protocol fingerprints such as JA3, JA4, JA4H, ALPN behavior, HTTP/2
+settings and ordering, header order, Client Hints, JavaScript-visible browser
+features, cookies, account state, IP reputation, and timing.
+
+Because Inspect is a MITM proxy, it terminates the browser-side TLS connection and
+creates a separate upstream TLS connection. That upstream connection can never be
+guaranteed to have exactly the same fingerprint as the original browser connection.
+This is especially visible on strict sites such as YouTube and other video,
+advertising, CDN, or WAF-sensitive endpoints.
+
+Using a current stable browser may reduce these failures because its visible
+browser behavior, Client Hints, JavaScript APIs, cookie/storage behavior, and
+browser-side protocol behavior are more likely to match what modern sites expect.
+Older or non-standard browser builds can be easier for WAF or anti-abuse systems to
+classify as unusual, especially when combined with a MITM proxy.
+
+`--proxy-mode emulate` uses Rama's browser/TLS/HTTP emulation support as an
+experimental best-effort compatibility mode:
+
+```bash
+inspect --proxy-mode emulate
+```
+This mode is intended to reduce some upstream browser/TLS/HTTP inconsistencies by
+prioritizing browser-like wire behavior and disabling Roto mutation. It is not a
+perfect browser impersonation feature, does not guarantee any specific JA3, JA4,
+JA4H, HTTP/2, or WAF fingerprint, and may change or be removed in a future release.
+
+Known symptoms with old or non-standard Chromium-family browsers, such as some
+ungoogled Chromium builds or OS-provided Chromium versions, include site-side
+rejections, failed media loads, and playback failures. For example, YouTube may show
+an error similar to:
+```bash
+Something went wrong. Refresh or try again later.
+```
+
+In some environments this can appear after roughly 50 seconds, especially on media
+or ad-related playback paths. This does not necessarily indicate a capture, Roto, or
+response-rewrite bug in Inspect; it may be the remote site's fingerprinting or
+anti-abuse system rejecting the MITM/upstream-client fingerprint.
+
+For some sites this may be unavoidable: the remote service can choose to reject any
+client whose combined browser, TLS, HTTP, IP, cookie, and timing fingerprint does
+not match its current allow/risk model.
+
+If a site is sensitive to these checks, try:
+
+- using a current stable browser build
+- using `--proxy-mode emulate`
+- disabling Roto filters and request/response patches
+- testing with and without an upstream proxy or VPN
+- comparing captured TLS metadata and HTTP versions across successful and failing runs
+- treating failures on WAF-sensitive media/advertising/CDN paths as potentially
+  fingerprint-related rather than deterministic proxy logic bugs
+
 
 ### Design principles
 
@@ -51,7 +109,7 @@ layers.
 ### Mode behavior
 | Capability | `observe` | `emulate` |
 | --- | --- | --- |
-| Roto request, response, and completed filters | enabled | disabled |
+| Roto connect, request, response, and completed filters | enabled | disabled |
 | Request/response patches | enabled | disabled |
 | Synthetic response and client-response drop | enabled | disabled |
 | Roto outbound HTTP jobs | enabled | disabled |
@@ -60,10 +118,12 @@ layers.
 | Browser/TLS/HTTP emulation | optional | prioritized |
 | Upstream HTTP/2 via ALPN | supported | supported |
 
-`emulate` exists to prioritize browser-like upstream wire behavior. In this mode,
-Roto is deliberately disabled so that semantic mutation cannot make browser
-profiles, HTTP headers, request bodies, TLS fingerprints, or HTTP/2 behavior
-internally inconsistent.
+`emulate` is an experimental best-effort mode for prioritizing browser-like
+upstream wire behavior. In this mode, Roto is deliberately disabled so that
+semantic mutation cannot make browser profiles, HTTP headers, request bodies, TLS
+fingerprints, or HTTP/2 behavior internally inconsistent. This mode is not a
+perfect browser impersonation feature and may change or be removed in a future
+release.
 
 ### Ordinary HTTP request path
 

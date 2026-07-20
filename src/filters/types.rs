@@ -1,17 +1,25 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 use roto::{NoCtx, RotoString, TypedFunc, Val};
-use crate::filters::runtime::{RotoRequestActionData, RotoRequestData, RotoResponseActionData, RotoResponseData};
+use crate::filters::runtime::{
+    RotoRequestActionData,
+    RotoRequestData,
+    RotoResponseActionData,
+    RotoResponseData,
+    RotoConnectActionData,
+    RotoConnectData
+};
 
 pub type RotoOnRequestFn = TypedFunc<NoCtx, fn(Val<RotoRequestData>) -> bool>;
 pub type RotoOnResponseFn = TypedFunc<NoCtx, fn(Val<RotoResponseData>) -> bool>;
 pub type RotoRequestStringFn = TypedFunc<NoCtx, fn(Val<RotoRequestData>) -> RotoString>;
 pub type RotoResponseStringFn = TypedFunc<NoCtx, fn(Val<RotoResponseData>) -> RotoString>;
+pub type RotoConnectActionFn =
+    TypedFunc<NoCtx, fn(Val<RotoConnectData>) -> Val<RotoConnectActionData>>;
 pub type RotoRequestActionFn =
-TypedFunc<NoCtx, fn(Val<RotoRequestData>) -> Val<RotoRequestActionData>>;
+    TypedFunc<NoCtx, fn(Val<RotoRequestData>) -> Val<RotoRequestActionData>>;
 pub type RotoResponseActionFn =
-TypedFunc<NoCtx, fn(Val<RotoResponseData>) -> Val<RotoResponseActionData>>;
-
+    TypedFunc<NoCtx, fn(Val<RotoResponseData>) -> Val<RotoResponseActionData>>;
 
 #[derive(Clone, Debug)]
 pub struct FilterDefinition {
@@ -85,6 +93,7 @@ impl Default for FilterTrigger {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FilterPhase {
+    Connect,
     Request,
     Response,
     Completed,
@@ -98,6 +107,54 @@ pub struct FilterRequestView<'a> {
 }
 
 #[derive(Clone, Debug)]
+pub struct FilterConnectView<'a> {
+    pub host: &'a str,
+    pub port: u16,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConnectAction {
+    pub marks: Vec<FilterMark>,
+    pub continue_filters: bool,
+    pub drop_tunnel: bool,
+    pub reject_status: Option<u16>,
+}
+
+impl ConnectAction {
+    pub fn pass() -> Self {
+        Self {
+            continue_filters: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn drop(mut self) -> Self {
+        self.drop_tunnel = true;
+        self.continue_filters = false;
+        self
+    }
+
+    pub fn reject(mut self, status: u16) -> Self {
+        self.drop_tunnel = true;
+        self.reject_status = Some(status);
+        self.continue_filters = false;
+        self
+    }
+
+    pub fn stop(mut self) -> Self {
+        self.continue_filters = false;
+        self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FilterConnect {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Clone, Debug)]
 pub struct FilterResponseView<'a> {
     pub request: FilterRequestView<'a>,
     pub status: u16,
@@ -105,6 +162,11 @@ pub struct FilterResponseView<'a> {
 }
 
 impl FilterTrigger {
+    pub fn matches_connect(&self, conn: &FilterConnectView<'_>) -> bool {
+        self.matches_phase(FilterPhase::Connect)
+            && self.matches_host(conn.host)
+    }
+
     pub fn matches_request(&self, req: &FilterRequestView<'_>) -> bool {
         self.matches_phase(FilterPhase::Request)
             && self.matches_host(req.host)
@@ -256,6 +318,7 @@ pub struct RequestAction {
     pub outbound_http: Vec<OutboundHttpJob>,
     pub continue_filters: bool,
     pub drop_client_response: bool,
+    pub bypass_upstream_proxy: bool,
 }
 
 impl RequestAction {

@@ -5,12 +5,14 @@ use crate::filters::roto_api::{
     RotoResponseAction,
 };
 use crate::filters::types::{
+    ConnectAction,
+    FilterConnect,
+    FilterMark,
     CompletedAction,
     FilterBodyPatch,
     FilterDefinition,
     FilterFlow,
     FilterHeader,
-    FilterMark,
     FilterRequest,
     FilterRequestPatch,
     FilterRequestView,
@@ -22,10 +24,12 @@ use crate::filters::types::{
     ResponseAction,
     RotoOnRequestFn,
     RotoOnResponseFn,
+    RotoConnectActionFn,
     RotoRequestActionFn,
     RotoRequestStringFn,
     RotoResponseActionFn,
     RotoResponseStringFn,
+    FilterConnectView
 };
 use roto::{library, NoCtx, RotoString, Runtime, Val};
 use regex::Regex;
@@ -70,6 +74,50 @@ pub struct CompiledFilter {
     pub priority: i32,
     pub program: RotoProgram,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RotoConnectData {
+    pub id: RotoString,
+    pub host: RotoString,
+    pub port: u16,
+}
+
+impl From<FilterConnect> for RotoConnectData {
+    fn from(conn: FilterConnect) -> Self {
+        Self {
+            id: conn.id.into(),
+            host: conn.host.into(),
+            port: conn.port,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RotoConnectActionData {
+    pub stop: bool,
+    pub drop: bool,
+    pub reject_status: Option<u16>,
+    pub marks: Vec<RotoString>,
+}
+
+impl From<RotoConnectActionData> for ConnectAction {
+    fn from(action: RotoConnectActionData) -> Self {
+        ConnectAction {
+            marks: action
+                .marks
+                .into_iter()
+                .map(|label| FilterMark {
+                    label: label.to_string(),
+                    color: None,
+                })
+                .collect(),
+            continue_filters: !action.stop,
+            drop_tunnel: action.drop || action.reject_status.is_some(),
+            reject_status: action.reject_status,
+        }
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RotoRequestData {
@@ -184,6 +232,62 @@ struct AppliedBodyRewrite {
 
 fn inspect_roto_runtime() -> anyhow::Result<Runtime<NoCtx>> {
     let lib = library! {
+        /// TLS CONNECT metadata exposed to inspect Roto filters.
+        #[clone] type Connect = Val<RotoConnectData>;
+
+        impl Val<RotoConnectData> {
+            fn id(conn: Val<RotoConnectData>) -> RotoString {
+                conn.id.clone()
+            }
+
+            fn host(conn: Val<RotoConnectData>) -> RotoString {
+                conn.host.clone()
+            }
+
+            fn port(conn: Val<RotoConnectData>) -> u16 {
+                conn.port
+            }
+        }
+
+        /// Action returned from connect_action(conn).
+        #[clone] type ConnectAction = Val<RotoConnectActionData>;
+
+        impl Val<RotoConnectActionData> {
+            fn pass() -> Val<RotoConnectActionData> {
+                Val(RotoConnectActionData::default())
+            }
+
+            fn drop() -> Val<RotoConnectActionData> {
+                Val(RotoConnectActionData {
+                    stop: true,
+                    drop: true,
+                    ..Default::default()
+                })
+            }
+
+            fn deny(status: u16) -> Val<RotoConnectActionData> {
+                Val(RotoConnectActionData {
+                    stop: true,
+                    drop: true,
+                    reject_status: Some(status),
+                    ..Default::default()
+                })
+            }
+
+            fn stop(mut action: Val<RotoConnectActionData>) -> Val<RotoConnectActionData> {
+                action.stop = true;
+                action
+            }
+
+            fn mark(
+                mut action: Val<RotoConnectActionData>,
+                label: RotoString,
+            ) -> Val<RotoConnectActionData> {
+                action.marks.push(label);
+                action
+            }
+        }
+
         /// HTTP request metadata exposed to inspect Roto filters.
         #[clone] type Request = Val<RotoRequestData>;
 
@@ -902,6 +1006,26 @@ impl CompiledFilter {
         self.definition.metadata.trigger.matches_completed(req)
     }
 
+    pub fn run_connect_action(&self, conn: FilterConnect) -> Option<ConnectAction> {
+        match &self.program {
+            RotoProgram::MetadataOnly => None,
+            RotoProgram::Compiled { filter, .. } => {
+                let action = filter.run_connect_action(conn)?;
+
+                tracing::info!(
+                    filter = self.name(),
+                    marks = action.marks.len(),
+                    drop_tunnel = action.drop_tunnel,
+                    reject_status = ?action.reject_status,
+                    continue_filters = action.continue_filters,
+                    "executed roto connect_action"
+                );
+
+                Some(action)
+            }
+        }
+    }
+
     pub fn on_request(&self, req: &FilterRequest) -> anyhow::Result<RequestAction> {
         let req_view = RotoRequest::new(req.clone());
 
@@ -1157,6 +1281,17 @@ impl CompiledFilterSet {
         &self.filters
     }
 
+    pub fn matching_connect<'a>(
+        &'a self,
+        conn: &'a FilterConnectView<'a>,
+    ) -> impl Iterator<Item = &'a CompiledFilter> + 'a {
+        self.filters
+            .iter()
+            .filter(move |filter| {
+                filter.definition.metadata.trigger.matches_connect(conn)
+            })
+    }
+
     pub fn matching_request<'a>(
         &'a self,
         req: &'a FilterRequestView<'_>,
@@ -1201,6 +1336,7 @@ pub struct RotoCompileInfo {
 pub struct CompiledRotoFilter {
     pub on_request: Option<RotoOnRequestFn>,
     pub on_response: Option<RotoOnResponseFn>,
+    pub connect_action: Option<RotoConnectActionFn>,
     pub request_action: Option<RotoRequestActionFn>,
     pub response_action: Option<RotoResponseActionFn>,
     pub request_mark: Option<RotoRequestStringFn>,
@@ -1222,6 +1358,18 @@ impl CompiledRotoFilter {
 
     pub fn has_on_response(&self) -> bool {
         self.on_response.is_some()
+    }
+
+    pub fn has_connect_action(&self) -> bool {
+        self.connect_action.is_some()
+    }
+
+    pub fn run_connect_action(&self, conn: FilterConnect) -> Option<ConnectAction> {
+        let func = self.connect_action.as_ref()?;
+        let conn = RotoConnectData::from(conn);
+        let action = func.call(Val(conn)).0;
+
+        Some(action.into())
     }
 
     pub fn has_request_action(&self) -> bool {
@@ -1287,6 +1435,11 @@ pub fn compile_roto_filter_file(path: &std::path::Path) -> anyhow::Result<Compil
         on_response: package
             .get_function::<fn(Val<RotoResponseData>) -> bool>(
                 "on_response")
+            .ok(),
+        connect_action: package
+            .get_function::<fn(Val<RotoConnectData>) -> Val<RotoConnectActionData>>(
+                "connect_action",
+            )
             .ok(),
         request_action: package
             .get_function::<fn(Val<RotoRequestData>) -> Val<RotoRequestActionData>>(

@@ -76,7 +76,6 @@ ua_profile = "auto"
 #
 # Example:
 # connect_ua_profile = "chrome"
-# connect_ua_profile = ""
 
 # User-Agent/TLS emulation profile for upstream proxy CONNECT.
 # connect_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
@@ -105,22 +104,20 @@ upstream_request_timeout_sec = 60
 # Default: 3072
 #
 # Notes:
-# - This controls saved capture file size.
-# - If body_save_unlimited = true, this value is ignored for saved body truncation.
-# - If MITM body limit is derived from this value, the effective proxy body limit may be:
-#     max(body_save_limit_bytes, 16 MiB)
-#   depending on proxy.rs implementation.
+# - This controls saved capture file size when body_save_unlimited = false.
+# - If body_save_unlimited = true, this value is ignored.
+# - Large binary-like bodies can also be omitted by body_omit_content_types below.
 body_save_limit_bytes = 3072
 
 # Save captured bodies without truncation.
 # CLI: --body-save-unlimited
-# Default: false
+# Default: true
 #
 # Notes:
-# - When true, body_save_limit_bytes is ignored for saved body truncation.
-# - If proxy body limit is also wired to this option, BodyLimitLayer should be disabled.
-# - This can increase memory and disk usage significantly.
-body_save_unlimited = false
+# - When true, body_save_limit_bytes is ignored.
+# - This preserves full captured bodies, but can increase memory and disk usage.
+# - Set to false if you want saved request/response body files to be truncated.
+body_save_unlimited = true
 
 # Do not save bodies for matching Content-Type prefixes.
 # Matching is case-insensitive and ignores parameters after ';'.

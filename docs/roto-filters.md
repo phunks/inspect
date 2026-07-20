@@ -16,6 +16,7 @@ Each file can define metadata in TOML front matter and one or more Roto function
 
 Filters can currently match these phases:
 
+- `connect`
 - `request`
 - `response`
 - `completed`
@@ -23,16 +24,16 @@ Filters can currently match these phases:
 The currently useful script entry points are:
 
 ```text
+fn connect_action(conn: Connect) -> ConnectAction
 fn request_action(req: Request) -> RequestAction
 fn response_action(res: Response) -> ResponseAction
 ```
 
-Legacy/simple entry points such as `on_request`, `on_response`, `request_mark`,
-`response_mark`, `request_header_name`, `request_header_value`,
-`response_header_name`, `response_header_value`, `request_body`,
-`request_body_content_type`, `response_body`, and `response_body_content_type`
-may also be detected by the runtime, but new filters should prefer
-`request_action` and `response_action`.
+`connect_action` runs when an HTTP `CONNECT host:port` tunnel request is received,
+before Inspect accepts the tunnel, before TLS MITM, and before any upstream
+connection is attempted. It is useful for blocking clients or destinations that must
+not be forwarded to the configured upstream proxy or origin.
+
 
 Every executable `.roto` filter must currently define:
 
@@ -61,9 +62,18 @@ drops, completed filters, and Roto outbound HTTP jobs. This prevents semantic
 MITM actions from making an emulated browser profile inconsistent with its
 upstream HTTP, TLS, or HTTP/2 wire behavior.
 
+`emulate` is an experimental best-effort mode and may change or be removed in a
+future release.
+
 The ordinary HTTP flow is:
 
 ```text
+connect:
+client/browser
+  -> HTTP CONNECT tunnel request
+  -> Roto connect filter/action                 (observe only)
+  -> accept CONNECT or deny/drop tunnel
+
 request:
 downstream browser
   -> MITM TLS termination
@@ -102,6 +112,13 @@ flowchart TD
     client[Client / Browser]
     proxy[Inspect MITM proxy]
 
+    connect_req[HTTP CONNECT tunnel request]
+    connect_filter[Connect filters<br/>phase = connect<br/>observe only]
+    apply_connect[Apply ConnectAction<br/>pass / deny / drop / marks<br/>observe only]
+    connect_check{Tunnel allowed?<br/>observe only}
+    tunnel_failed[Reject/drop tunnel<br/>TunnelFailed event]
+    mitm_tls[Accept CONNECT and MITM TLS termination]
+
     collect_req[Collect request body]
     request_filter[Request filters<br/>phase = request<br/>observe only]
     apply_req[Apply RequestAction<br/>headers / body / synthetic response<br/>observe only]
@@ -120,20 +137,27 @@ flowchart TD
     outbound_jobs[Resolve and enqueue outbound HTTP jobs<br/>observe only]
     save_res[Capture response<br/>response.head / response.body / ssl_tls.json / DB metadata]
     completed[Completed filters<br/>phase = completed<br/>observe only]
-%%    return_res[Return response to client]
 
     synthetic_res[Build synthetic response]
     collect_synthetic[Collect synthetic response body]
     response_filter_synthetic[Response filters<br/>phase = response<br/>observe only]
     apply_synthetic_res[Apply ResponseAction<br/>status / headers / body<br/>observe only]
     save_synthetic[Capture synthetic response<br/>response.head / response.body / ssl_tls.json / DB metadata]
-%%    completed_synthetic[Completed filters<br/>phase = completed<br/>observe only]
-%%    return_synthetic[Return response to client]
 
-    tui[TUI events<br/>Started / Marked / Completed]
+    tui[TUI events<br/>Started / Marked / Completed / TunnelFailed]
 
     client --> proxy
-    proxy --> collect_req
+    proxy --> connect_req
+    connect_req --> connect_filter
+    connect_filter --> apply_connect
+    apply_connect --> connect_check
+
+    connect_filter -. marks/tags/notes .-> tui
+    connect_check -- denied/dropped --> tunnel_failed
+    tunnel_failed -. tunnel failed event .-> tui
+
+    connect_check -- allowed --> mitm_tls
+    mitm_tls --> collect_req
     collect_req --> request_filter
     request_filter --> apply_req
     apply_req --> save_req
@@ -148,9 +172,7 @@ flowchart TD
     response_filter_synthetic --> apply_synthetic_res
     apply_synthetic_res --> save_synthetic
     save_synthetic --> completed
-%%    completed_synthetic --> return_synthetic
-%%    return_synthetic --> client
-    
+
     response_filter_synthetic -. marks/tags/notes .-> tui
     save_synthetic -. completed event .-> tui
 
@@ -164,17 +186,16 @@ flowchart TD
     apply_res --> outbound_jobs
     outbound_jobs --> save_res
     save_res --> completed
-%%    completed --> return_res
-%%    return_res --> client
+
     completed -. Return response to client .-> client
 
     response_filter -. marks/tags/notes .-> tui
     save_res -. completed event .-> tui
 ```
 
-In `emulate` mode, Inspect bypasses every node labelled `observe only`.
-Request/response capture, TLS metadata, database persistence, and TUI events
-remain active. The request proceeds from body collection and request capture to
+In `emulate` mode, Inspect bypasses every node labelled `observe only`, including
+CONNECT-phase Roto filtering. Request/response capture, TLS metadata, database
+persistence, tunnel-failure events, and TUI events remain active. The request proceeds from body collection and request capture to
 upstream protocol cleanup and browser/TLS/HTTP emulation without Roto mutation.
 
 Current filtering points:
@@ -340,6 +361,7 @@ method = ["GET", "POST"]
 Supported values:
 
 ```text
+phase = ["connect"]
 phase = ["request"]
 phase = ["response"]
 phase = ["completed"]
@@ -348,7 +370,7 @@ phase = ["completed"]
 Multiple phases can be specified:
 
 ```text
-phase = ["request", "response"]
+phase = ["connect", "request", "response"]
 ```
 
 If `phase` is omitted or empty, the filter can match all phases.
@@ -397,6 +419,69 @@ TODO:
 - [ ] Make the `ping()` error message more explicit.
 - [ ] Consider replacing `ping()` with a more descriptive required function name, such as `inspect_filter()` or `validate()`.
 - [ ] Consider allowing metadata-only filters without `ping()`.
+
+## Connect API
+
+The `Connect` object is available in connect filters.
+
+Connect filters run before TLS MITM and before upstream access.
+
+Currently exposed methods:
+
+```text
+conn.id()
+conn.host()
+conn.port()
+```
+
+Example:
+
+```rust
+//! +++
+//! name = "block connect before upstream"
+//! enabled = true
+//! priority = 10
+//!
+//! [trigger]
+//! host = ["example.com", "*.example.com"]
+//! phase = ["connect"]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+
+fn connect_action(conn: Connect) -> ConnectAction {
+    ConnectAction.deny(403)
+        .mark("connect-deny")
+}
+```
+
+## ConnectAction API
+
+Preferred connect filter function:
+
+```text
+fn connect_action(conn: Connect) -> ConnectAction
+```
+
+Currently exposed methods:
+
+```text
+ConnectAction.pass()
+ConnectAction.drop()
+ConnectAction.deny(403)
+    .mark("label")
+    .stop()
+```
+
+`ConnectAction.drop()` and `ConnectAction.deny(status)` both prevent Inspect from
+accepting the tunnel and prevent any upstream proxy or origin connection.
+
+`deny(status)` returns an explicit CONNECT rejection status to the client.
+`drop()` is intended for hard tunnel blocking; current behavior may still return a
+closed rejection response depending on the HTTP server stack.
+
 
 ## Request API
 
@@ -725,14 +810,17 @@ Currently exposed methods:
 ```text
 ResponseAction.pass()
     .mark("label")
-    .post_json("client-name", "/path", "{\"ok\":true}")
+    .post_json("client-name", "/path", "{"ok":true}")
     .post_text("client-name", "/path", "body")
     .post_request_raw("client-name", "/request")
     .post_response_raw("client-name", "/response")
-    .set_status(418)
-    .set_header("name", "value")
+    .post_request_json("client-name", "/request")
+    .post_response_json("client-name", "/response")
+    .post_flow_json("client-name", "/flow")
+    .set_status(418) .set_header("name", "value")
     .remove_header("name")
     .set_body_text("body", "text/plain; charset=utf-8")
+    .drop()
     .stop()
 ```
 
@@ -1467,8 +1555,6 @@ Currently notable gaps include:
 
 - request ID access
 - request header lookup
-- request body text access
-- request content type access
 - request TLS SNI access
 - response header lookup
 - response upstream status access

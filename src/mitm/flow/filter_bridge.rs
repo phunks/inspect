@@ -6,6 +6,7 @@ use rama::http::StatusCode;
 use uuid::Uuid;
 
 use crate::filters::{
+    ConnectAction,
     FilterBody,
     FilterHeader,
     FilterRequest,
@@ -374,6 +375,32 @@ fn remove_body_integrity_headers(headers: &mut http::HeaderMap) {
     headers.remove(http::header::CONTENT_ENCODING);
     headers.remove(http::header::ETAG);
     headers.remove("content-md5");
+}
+
+#[allow(dead_code)]
+pub(crate) fn flow_marks_from_connect_action(action: &ConnectAction) -> Vec<FlowMark> {
+    action
+        .marks
+        .iter()
+        .map(|mark| FlowMark {
+            label: mark.label.clone(),
+            color: mark.color.clone(),
+        })
+        .collect()
+}
+
+pub(crate) fn merge_connect_action(dst: &mut ConnectAction, src: ConnectAction) {
+    dst.marks.extend(src.marks);
+
+    if src.drop_tunnel {
+        dst.drop_tunnel = true;
+    }
+
+    if src.reject_status.is_some() {
+        dst.reject_status = src.reject_status;
+    }
+
+    dst.continue_filters = src.continue_filters;
 }
 
 #[cfg(test)]

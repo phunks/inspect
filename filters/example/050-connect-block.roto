@@ -1,0 +1,23 @@
+//! +++
+//! name = "block connect before upstream"
+//! enabled = true
+//! priority = 10
+//!
+//! [trigger]
+//! host = [
+//!     "example.com",
+//!     "*.example.com",
+//!     "*.local",
+//!     "*.lan",
+//! ]
+//! phase = ["connect"]
+//! +++
+
+fn ping() -> bool {
+    true
+}
+
+fn connect_action(conn: Connect) -> ConnectAction {
+    ConnectAction.deny(403)
+        .mark("connect-deny")
+}

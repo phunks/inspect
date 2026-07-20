@@ -22,6 +22,7 @@ pub struct TunnelFailed {
     pub port: u16,
     pub stage: String,
     pub error: String,
+    pub marks: Vec<FlowMark>,
 }
 
 #[derive(Clone, Debug)]

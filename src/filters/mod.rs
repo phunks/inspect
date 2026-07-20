@@ -10,7 +10,10 @@ pub mod engine;
 pub mod runtime_state;
 
 pub use manager::FilterManager;
-pub use runtime::{CompiledFilter, CompiledFilterSet};
+pub use runtime::{
+    CompiledFilter,
+    CompiledFilterSet
+};
 pub use engine::diff::{
     DiffEvent,
     DiffNode,
@@ -83,6 +86,9 @@ pub use generator::{
     GeneratedRewriteResponseInput,
 };
 pub use types::{
+    ConnectAction,
+    FilterConnect,
+    FilterConnectView,
     CompletedAction,
     FilterBody,
     FilterBodyPatch,

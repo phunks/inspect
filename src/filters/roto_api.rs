@@ -121,6 +121,11 @@ impl RotoRequestAction {
         self
     }
 
+    pub fn bypass_proxy(mut self) -> Self {
+        self.inner.bypass_upstream_proxy = true;
+        self
+    }
+
     pub fn set_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.inner
             .request

@@ -1,17 +1,18 @@
-pub mod capture_service;
-pub mod dispatcher;
-pub mod filter_bridge;
-pub mod flow_event;
-pub mod tui_sink;
-pub mod websocket;
-pub mod tls_metadata;
-pub mod http_types;
-pub mod filter_runtime;
-pub mod event_bridge;
-pub mod state_store;
+pub(crate) mod capture_service;
+pub(crate) mod dispatcher;
+pub(crate) mod filter_bridge;
+pub(crate) mod flow_event;
+pub(crate) mod tui_sink;
+pub(crate) mod websocket;
+pub(crate) mod tls_metadata;
+pub(crate) mod http_types;
+pub(crate) mod filter_runtime;
+pub(crate) mod event_bridge;
+pub(crate) mod state_store;
 pub(crate) mod body_encoding;
 pub(crate) mod sse_capture;
 
+pub(crate) use filter_bridge::flow_marks_from_connect_action;
 pub use capture_service::{
     CaptureService,
     EffectiveRequestCapture,

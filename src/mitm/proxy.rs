@@ -17,7 +17,7 @@ use rama::{
     },
     layer::{AddInputExtensionLayer, ConsumeErrLayer},
     net::{
-        http::RequestContext, proxy::ProxyTarget, stream::layer::http::BodyLimitLayer,
+        http::RequestContext, proxy::ProxyTarget,
         tls::server::{ServerAuth, ServerConfig},
     },
     rt::Executor,
@@ -59,14 +59,24 @@ use crate::mitm::capture::CapturePaths;
 use crate::mitm::client::{new_upstream_client, UpstreamClient};
 use crate::mitm::dynamic_ca::DynamicIssuer;
 use crate::mitm::flow::dispatcher::UpstreamFlowResult;
-use crate::mitm::flow::{CaptureService, FlowDispatcher, FlowDispatcherConfig, FlowEvent, TunnelFailed, FlowEventPublisher, UpstreamFlowClient, TunnelFailureCapture};
+use crate::mitm::flow::{
+    CaptureService,
+    FlowDispatcher,
+    FlowDispatcherConfig,
+    FlowEvent,
+    TunnelFailed,
+    FlowEventPublisher,
+    UpstreamFlowClient,
+    TunnelFailureCapture,
+    flow_marks_from_connect_action,
+};
 use crate::mitm::flow::state_store::FilterStateLimits;
 use crate::mitm::flow::websocket::dispatch_websocket_handshake;
 use crate::mitm::store_metadata::DbState;
 use crate::mitm::tls_sni::ConnectSniRouterService;
 use crate::options::{FilterStateConfig, ProxyMode, UaProfile};
 
-const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+// const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 // const WEBSOCKET_NOT_CAPTURED_MESSAGE: &str =
 //     "<WebSocket upgraded; payload is not captured by inspect. Use tcpdump + SSLKEYLOGFILE + Wireshark.>\n";
 
@@ -82,6 +92,12 @@ pub enum PacketEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PacketEventMark {
+    pub label: String,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PacketTunnelFailed {
     pub id: String,
     pub seq: u64,
@@ -92,6 +108,7 @@ pub struct PacketTunnelFailed {
     pub port: u16,
     pub stage: String,
     pub error: String,
+    pub marks: Vec<PacketEventMark>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,8 +145,7 @@ pub struct PacketMarked {
 #[derive(Clone)]
 struct State {
     mitm_tls_service_data: TlsAcceptorData,
-    exec: Executor,
-    proxy_body_limit_bytes: Option<usize>,
+    _exec: Executor,
     flow_dispatcher: FlowDispatcher,
     proxy_mode: ProxyMode,
     ua_db: Arc<UserAgentDatabase>,
@@ -139,8 +155,6 @@ impl Debug for State {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("State")
             .field("mitm_tls_service_data", &"...")
-            .field("exec", &self.exec)
-            .field("proxy_body_limit_bytes", &self.proxy_body_limit_bytes)
             .field("proxy_mode", &self.proxy_mode)
             .finish()
     }
@@ -244,8 +258,8 @@ pub async fn mitm_proxy_main(
         .collect::<Vec<_>>()
         .into();
 
-    let proxy_body_limit_bytes = body_save_limit_bytes
-        .map(|limit| limit.max(PROXY_BODY_LIMIT_BYTES));
+    // let proxy_body_limit_bytes = body_save_limit_bytes
+    //     .map(|limit| limit.max(PROXY_BODY_LIMIT_BYTES));
 
     let seq = Arc::new(AtomicU64::new(0));
 
@@ -275,8 +289,7 @@ pub async fn mitm_proxy_main(
 
     let state = State {
         mitm_tls_service_data,
-        exec: exec.clone(),
-        proxy_body_limit_bytes,
+        _exec: exec.clone(),
         flow_dispatcher,
         proxy_mode,
         ua_db: Arc::new(UserAgentDatabase::try_embedded()?),
@@ -308,28 +321,13 @@ pub async fn mitm_proxy_main(
                 .into_layer(http_mitm_service),
         );
 
-        if let Some(proxy_body_limit_bytes) = state.proxy_body_limit_bytes {
-            tcp_service
-                .serve_graceful(
-                    guard,
-                    (
-                        AddInputExtensionLayer::new(state),
-                        // protect the http proxy from too large bodies,
-                        // both from request and response end
-                        BodyLimitLayer::symmetric(proxy_body_limit_bytes),
-                    )
-                        .into_layer(http_service),
-                )
-                .await;
-        } else {
-            tcp_service
-                .serve_graceful(
-                    guard,
-                    AddInputExtensionLayer::new(state)
-                        .into_layer(http_service),
-                )
-                .await;
-        }
+        tcp_service
+            .serve_graceful(
+                guard,
+                AddInputExtensionLayer::new(state)
+                    .into_layer(http_service),
+            )
+            .await;
     });
 
     let _ = shutdown_rx.changed().await;
@@ -339,20 +337,92 @@ pub async fn mitm_proxy_main(
 }
 
 async fn http_connect_accept(mut req: Request) -> Result<(Response, Request), Response> {
-    match RequestContext::try_from(&req).map(|ctx| ctx.host_with_port()) {
-        Ok(authority) => {
-            info!(
-                server.address = %authority.host,
-                server.port = %authority.port,
-                "accept CONNECT (lazy): insert proxy target into context",
-            );
-            req.extensions_mut().insert(ProxyTarget(authority));
-        }
+    let authority = match RequestContext::try_from(&req).map(|ctx| ctx.host_with_port()) {
+        Ok(authority) => authority,
         Err(err) => {
             tracing::error!("error extracting authority: {err:?}");
             return Err(StatusCode::BAD_REQUEST.into_response());
         }
+    };
+
+    if let Some(state) = req.extensions().get::<State>().cloned() {
+        let connect = state.flow_dispatcher.dispatch_connect_filters(
+            authority.host.to_string(),
+            authority.port,
+        );
+
+        if connect.action.drop_tunnel {
+            let status = connect
+                .action
+                .reject_status
+                .and_then(|status| StatusCode::from_u16(status).ok());
+
+            let now = Utc::now();
+            let id = Uuid::new_v4().to_string();
+            let seq = state
+                .flow_dispatcher
+                .seq()
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            let flow_key = format!("{seq:06}-{}", &id[..8]);
+
+            let marks = flow_marks_from_connect_action(&connect.action);
+            let stage = "Roto connect_action".to_string();
+            let error = match status {
+                Some(status) => format!("CONNECT denied by Roto with status {}", status.as_u16()),
+                None => "CONNECT dropped by Roto".to_string(),
+            };
+
+            state.flow_dispatcher.events().publish(FlowEvent::TunnelFailed(
+                TunnelFailed {
+                    id,
+                    seq,
+                    flow_key,
+                    time: now.to_rfc3339(),
+                    epoch_ms: now.timestamp_millis(),
+                    host: connect.host,
+                    port: connect.port,
+                    stage,
+                    error,
+                    marks,
+                },
+            ));
+
+            info!(
+                    server.address = %authority.host,
+                    server.port = %authority.port,
+                    reject_status = ?status,
+                    marks = connect.action.marks.len(),
+                    "CONNECT tunnel blocked by roto connect_action before upstream"
+                );
+
+            if let Some(status) = status {
+                return Err(
+                    Response::builder()
+                        .status(status)
+                        .header("connection", "close")
+                        .body(Body::empty())
+                        .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response())
+                );
+            }
+
+            return Err(
+                Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .header("connection", "close")
+                    .body(Body::empty())
+                    .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response())
+            );
+        }
     }
+
+    info!(
+        server.address = %authority.host,
+        server.port = %authority.port,
+        "accept CONNECT (lazy): insert proxy target into context",
+    );
+
+    req.extensions_mut().insert(ProxyTarget(authority));
 
     Ok((StatusCode::OK.into_response(), req))
 }
@@ -397,7 +467,12 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
             .get::<Executor>()
             .cloned()
             .unwrap_or_default();
-        let http_transport_service = HttpServer::auto(executor).service(http_service);
+        // let http_transport_service = HttpServer::auto(executor).service(http_service);
+        let mut http_transport_server = HttpServer::auto(executor);
+        http_transport_server
+            .http1_mut()
+            .set_header_read_timeout(Duration::from_secs(60));
+        let http_transport_service = http_transport_server.service(http_service);
 
         let https_service = TlsAcceptorLayer::new(
             upgraded
@@ -469,6 +544,7 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
                         port: target.port,
                         stage: "TLS accept / handshake".to_string(),
                         error,
+                        marks: Vec::new(),
                     },
                 ));
             }
