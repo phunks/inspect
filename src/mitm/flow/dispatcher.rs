@@ -488,16 +488,40 @@ impl FlowDispatcher {
                 .await;
         }
 
-        if should_stream_response(
+        let mut res_body_bytes = match response_body_mode(
+            input.filter_request.method.as_str(),
+            res_parts.status,
             &res_parts.headers,
             self.config.stream_body_threshold_bytes,
         ) {
-            return self
-                .dispatch_streaming_response(input, res_parts, res_body, elapsed_ms)
-                .await;
-        }
-
-        let mut res_body_bytes = collect_body(res_body, "response").await;
+            ResponseBodyMode::Collect => collect_body(res_body, "response").await,
+            ResponseBodyMode::Stream => {
+                return self
+                    .dispatch_streaming_response(input, res_parts, res_body, elapsed_ms)
+                    .await;
+            }
+            ResponseBodyMode::Probe => {
+                match probe_response_body(
+                    res_body,
+                    self.config.stream_body_threshold_bytes,
+                ).await {
+                    ProbedResponseBody::Collected(body) => body,
+                    ProbedResponseBody::Stream { prefix, rest } => {
+                        return self
+                            .dispatch_streaming_response(
+                                input,
+                                res_parts,
+                                Body::new(PrefixThenBody {
+                                    prefix: Some(prefix),
+                                    rest,
+                                }),
+                                elapsed_ms,
+                            )
+                            .await;
+                    }
+                }
+            }
+        };
 
         let response_filter_output = self.dispatch_response_filters(
             &input,
@@ -598,7 +622,7 @@ impl FlowDispatcher {
         input: ResponseDispatchInput,
         res_parts: rama::http::response::Parts,
         res_body: Body,
-        elapsed_ms: i64,
+        _elapsed_ms: i64,
     ) -> FlowDispatchResult<Response> {
         tracing::debug!(
             id = %input.id,
@@ -824,6 +848,102 @@ async fn collect_body(body: Body, label: &str) -> Bytes {
     }
 }
 
+enum ResponseBodyMode {
+    Collect,
+    Stream,
+    Probe,
+}
+
+enum ProbedResponseBody {
+    Collected(Bytes),
+    Stream {
+        prefix: Bytes,
+        rest: Body,
+    },
+}
+
+async fn probe_response_body(
+    mut body: Body,
+    threshold: usize,
+) -> ProbedResponseBody {
+    let mut buffered = Vec::new();
+
+    while let Some(frame_result) = body.frame().await {
+        match frame_result {
+            Ok(frame) => {
+                if let Some(bytes) = frame.data_ref() {
+                    buffered.extend_from_slice(bytes);
+
+                    if buffered.len() > threshold {
+                        return ProbedResponseBody::Stream {
+                            prefix: Bytes::from(buffered),
+                            rest: body,
+                        };
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = ?err,
+                    buffered = buffered.len(),
+                    threshold,
+                    "failed while probing unknown-length response body"
+                );
+
+                return ProbedResponseBody::Collected(Bytes::from(buffered));
+            }
+        }
+    }
+
+    ProbedResponseBody::Collected(Bytes::from(buffered))
+}
+
+struct PrefixThenBody {
+    prefix: Option<Bytes>,
+    rest: Body,
+}
+
+impl StreamingBody for PrefixThenBody {
+    type Data = Bytes;
+    type Error = OpaqueError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if let Some(prefix) = self.prefix.take() {
+            return Poll::Ready(Some(Ok(Frame::data(prefix))));
+        }
+
+        Pin::new(&mut self.rest).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.prefix.is_none() && self.rest.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        let mut hint = self.rest.size_hint();
+
+        if let Some(prefix) = self.prefix.as_ref() {
+            let prefix_len = prefix.len() as u64;
+
+            if let Some(exact) = hint.exact() {
+                hint.set_exact(exact.saturating_add(prefix_len));
+            } else {
+                let lower = hint.lower().saturating_add(prefix_len);
+                hint.set_lower(lower);
+
+                if let Some(upper) = hint.upper() {
+                    hint.set_upper(upper.saturating_add(prefix_len));
+                }
+            }
+        }
+
+        hint
+    }
+}
+
 struct SseCaptureBody {
     inner: Body,
     capture: SseCapture,
@@ -1017,20 +1137,47 @@ fn is_sse_response(headers: &http::HeaderMap) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
-fn should_stream_response(headers: &http::HeaderMap, threshold: usize) -> bool {
+fn response_body_mode(
+    method: &str,
+    status: StatusCode,
+    headers: &http::HeaderMap,
+    threshold: usize,
+) -> ResponseBodyMode {
     if threshold == 0 {
-        return false;
+        return ResponseBodyMode::Collect;
+    }
+
+    if method.eq_ignore_ascii_case("HEAD") {
+        return ResponseBodyMode::Collect;
+    }
+
+    if response_status_never_has_body(status) {
+        return ResponseBodyMode::Collect;
+    }
+
+    if let Some(len) = content_length(headers) {
+        return if len > threshold {
+            ResponseBodyMode::Stream
+        } else {
+            ResponseBodyMode::Collect
+        };
     }
 
     if is_compressed_response(headers) {
-        return true;
+        return ResponseBodyMode::Probe;
     }
 
     if is_probably_binary_response(headers) {
-        return true;
+        return ResponseBodyMode::Probe;
     }
 
-    content_length(headers).is_some_and(|len| len > threshold)
+    ResponseBodyMode::Collect
+}
+
+fn response_status_never_has_body(status: StatusCode) -> bool {
+    status.is_informational()
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::NOT_MODIFIED
 }
 
 fn streaming_response_capture_notice(

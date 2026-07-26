@@ -383,15 +383,30 @@ raw deflate, so gzip/br/zstd are generally more predictable in practice.
 
 ### Large and streamed response bodies
 
-Large, binary-like, or content-encoded response bodies can be forwarded to the
-client as streaming responses instead of being fully buffered in memory. This is
-controlled by:
+Large responses and unknown-length binary-like responses can be forwarded to the
+client as streaming responses instead of being fully buffered in memory. Small
+unknown-length responses are first probed up to the streaming threshold; if the
+body ends before the threshold is reached, Inspect keeps the ordinary buffered
+capture path. This means small text, JSON, image, or content-encoded responses
+may still be captured normally even when `Content-Length` is absent.
+
+This behavior is controlled by:
 
 ```toml
 # Stream response bodies larger than this many bytes instead of buffering them.
 # 0 disables threshold-based streaming.
 stream_body_threshold_bytes = 16777216
 ```
+
+When `Content-Length` is known, responses larger than the threshold use the
+streaming path immediately. Responses at or below the threshold use the ordinary
+buffered path.
+
+When `Content-Length` is unknown and the response looks binary-like or
+content-encoded, Inspect probes the body up to `stream_body_threshold_bytes`.
+If the response finishes within that limit, it is captured normally. If the
+threshold is exceeded, Inspect forwards the already-read prefix first and then
+continues forwarding the remaining upstream body as a stream.
 
 When a normal response is switched to the streaming path, Inspect forwards the
 body to the client while counting the body bytes it observes. The response is

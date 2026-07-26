@@ -136,15 +136,13 @@ body_save_limit_bytes = 3072
 # - Set to false if you want saved request/response body files to be truncated.
 body_save_unlimited = true
 
-# Do not save bodies for matching Content-Type prefixes.
-# Matching is case-insensitive and ignores parameters after ';'.
+# Optional: omit noisy media/font bodies from capture files.
+# Large bodies are already protected by stream_body_threshold_bytes, so this is
+# mainly a capture cleanliness setting rather than a memory safety setting.
 body_omit_content_types = [
     "video/",
     "audio/",
-    "image/",
     "font/",
-    "application/octet-stream",
-    "application/wasm",
     "application/vnd.yt-ump",
 ]
 

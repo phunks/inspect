@@ -1804,7 +1804,7 @@ checksum = "03940df8ac11c9903291f4e50567a070902e77b1be42305280b91b23d3ccac19"
 
 [[package]]
 name = "inspect"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "base64",
