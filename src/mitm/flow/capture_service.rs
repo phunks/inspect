@@ -314,7 +314,9 @@ impl CaptureService {
                 format!("write response head {}", response_head_path.display())
             })?;
 
-        let body_size = capture.body_bytes.len() as i64;
+        let body_size = capture
+            .body_size_override
+            .unwrap_or(capture.body_bytes.len() as i64);
         let body_saved_size;
         let body_truncated;
         let body_save_limit;
@@ -322,7 +324,9 @@ impl CaptureService {
         if let Some(msg) = capture.upstream_error_message.as_deref() {
             let storage_info = body_storage_info(msg.len(), self.body_save_limit_bytes);
             body_saved_size = storage_info.saved_size as i64;
-            body_truncated = storage_info.truncated;
+            body_truncated = capture
+                .body_truncated_override
+                .unwrap_or(storage_info.truncated);
             body_save_limit = self.body_save_limit_bytes.map(|limit| limit as i64);
 
             write_body_for_storage(
@@ -358,7 +362,9 @@ impl CaptureService {
             };
 
             body_saved_size = storage_info.saved_size as i64;
-            body_truncated = storage_info.truncated;
+            body_truncated = capture
+                .body_truncated_override
+                .unwrap_or(storage_info.truncated);
             body_save_limit = if omit_reason.is_some() {
                 Some(0)
             } else {
@@ -484,6 +490,8 @@ pub struct EffectiveResponseCapture {
     pub version: Version,
     pub headers: HeaderMap,
     pub body_bytes: Bytes,
+    pub body_size_override: Option<i64>,
+    pub body_truncated_override: Option<bool>,
     pub elapsed_ms: i64,
     pub origin: ResponseOrigin,
     pub upstream_status: Option<u16>,

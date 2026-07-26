@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use bytes::Bytes;
 use chrono::Utc;
@@ -133,6 +133,7 @@ pub struct FlowDispatcherConfig {
     pub upstream_proxy: Option<ProxyAddress>,
     pub body_save_limit_bytes: Option<usize>,
     pub body_omit_content_types: Arc<[String]>,
+    pub stream_body_threshold_bytes: usize,
     pub sse_capture_max_events: usize,
     pub sse_capture_max_event_bytes: usize,
     pub filter_state_enabled: bool,
@@ -487,6 +488,15 @@ impl FlowDispatcher {
                 .await;
         }
 
+        if should_stream_response(
+            &res_parts.headers,
+            self.config.stream_body_threshold_bytes,
+        ) {
+            return self
+                .dispatch_streaming_response(input, res_parts, res_body, elapsed_ms)
+                .await;
+        }
+
         let mut res_body_bytes = collect_body(res_body, "response").await;
 
         let response_filter_output = self.dispatch_response_filters(
@@ -583,6 +593,47 @@ impl FlowDispatcher {
         ))
     }
 
+    async fn dispatch_streaming_response(
+        &self,
+        input: ResponseDispatchInput,
+        res_parts: rama::http::response::Parts,
+        res_body: Body,
+        elapsed_ms: i64,
+    ) -> FlowDispatchResult<Response> {
+        tracing::debug!(
+            id = %input.id,
+            flow_key = %input.flow_key,
+            status = %res_parts.status,
+            content_type = ?normalized_content_type(&res_parts.headers),
+            content_length = ?content_length(&res_parts.headers),
+            threshold = self.config.stream_body_threshold_bytes,
+            "proxy large/binary response as a streaming body"
+        );
+
+        // Unlike SSE, ordinary streamed downloads are committed when the stream
+        // finishes or is dropped. This keeps the TUI "completed" state aligned
+        // with download completion/cancellation rather than header receipt.
+        let finalize = StreamingResponseFinalize::new(
+            self.capture.clone(),
+            self.events.clone(),
+            input,
+            StreamedResponseParts {
+                status: res_parts.status,
+                version: res_parts.version,
+                headers: res_parts.headers.clone(),
+            },
+            self.config.stream_body_threshold_bytes,
+        );
+
+        Ok(Response::from_parts(
+            res_parts,
+            Body::new(StreamingCaptureBody {
+                inner: res_body,
+                finalize,
+            }),
+        ))
+    }
+
     async fn commit_response(
         &self,
         input: &ResponseDispatchInput,
@@ -601,6 +652,8 @@ impl FlowDispatcher {
                 version: res_parts.version,
                 headers: res_parts.headers.clone(),
                 body_bytes: res_body_bytes.clone(),
+                body_size_override: None,
+                body_truncated_override: None,
                 elapsed_ms,
                 origin: input.origin.clone(),
                 upstream_status: input.upstream_status,
@@ -810,12 +863,295 @@ impl StreamingBody for SseCaptureBody {
     }
 }
 
+#[derive(Clone)]
+struct StreamedResponseParts {
+    status: StatusCode,
+    version: Version,
+    headers: http::HeaderMap,
+}
+
+struct StreamingResponseFinalize {
+    capture: CaptureService,
+    events: FlowEventPublisher,
+    input: ResponseDispatchInput,
+    parts: StreamedResponseParts,
+    threshold: usize,
+    streamed_bytes: AtomicUsize,
+    finalized: AtomicBool,
+}
+
+impl StreamingResponseFinalize {
+    fn new(
+        capture: CaptureService,
+        events: FlowEventPublisher,
+        input: ResponseDispatchInput,
+        parts: StreamedResponseParts,
+        threshold: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            capture,
+            events,
+            input,
+            parts,
+            threshold,
+            streamed_bytes: AtomicUsize::new(0),
+            finalized: AtomicBool::new(false),
+        })
+    }
+
+    fn add_streamed_bytes(&self, len: usize) {
+        self.streamed_bytes.fetch_add(len, Ordering::Relaxed);
+    }
+
+    fn finalize(self: &Arc<Self>, interrupted: bool) {
+        if self.finalized.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let this = Arc::clone(self);
+
+        tokio::spawn(async move {
+            let streamed_bytes = this.streamed_bytes.load(Ordering::Relaxed);
+            let elapsed_ms = this.input.started_at.elapsed().as_millis() as i64;
+
+            let body = streaming_response_capture_notice(
+                &this.parts.headers,
+                this.threshold,
+                streamed_bytes,
+                interrupted,
+            );
+
+            let response_commit = match this.capture.commit_response(EffectiveResponseCapture {
+                id: this.input.id,
+                seq: this.input.seq,
+                flow_key: this.input.flow_key.clone(),
+                flow_dir: this.input.flow_dir.clone(),
+                status: this.parts.status,
+                version: this.parts.version,
+                headers: this.parts.headers.clone(),
+                body_bytes: body,
+                body_size_override: Some(streamed_bytes as i64),
+                body_truncated_override: Some(true),
+                elapsed_ms,
+                origin: this.input.origin.clone(),
+                upstream_status: this.input.upstream_status,
+                upstream_remote_addr: this.input.upstream_remote_addr.clone(),
+                tls_sni: this.input.tls_sni.clone(),
+                tls_upstream: this.input.tls_upstream.clone(),
+                upstream_error_message: this.input.upstream_error_message.clone(),
+            })
+                .await
+            {
+                Ok(commit) => commit,
+                Err(err) => {
+                    tracing::error!(
+                        error = ?err,
+                        id = %this.input.id,
+                        flow_key = %this.input.flow_key,
+                        streamed_bytes,
+                        interrupted,
+                        "failed to commit streamed response after finalize"
+                    );
+                    return;
+                }
+            };
+
+            publish_response_committed(&this.events, &response_commit, Vec::new());
+        });
+    }
+}
+
+struct StreamingCaptureBody {
+    inner: Body,
+    finalize: Arc<StreamingResponseFinalize>,
+}
+
+impl StreamingBody for StreamingCaptureBody {
+    type Data = Bytes;
+    type Error = OpaqueError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match Pin::new(&mut self.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(bytes) = frame.data_ref() {
+                    self.finalize.add_streamed_bytes(bytes.len());
+                }
+
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(None) => {
+                self.finalize.finalize(false);
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(err))) => {
+                self.finalize.finalize(true);
+                Poll::Ready(Some(Err(err)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for StreamingCaptureBody {
+    fn drop(&mut self) {
+        self.finalize.finalize(true);
+    }
+}
+
 fn is_sse_response(headers: &http::HeaderMap) -> bool {
     headers
         .get(http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
+}
+
+fn should_stream_response(headers: &http::HeaderMap, threshold: usize) -> bool {
+    if threshold == 0 {
+        return false;
+    }
+
+    if is_compressed_response(headers) {
+        return true;
+    }
+
+    if is_probably_binary_response(headers) {
+        return true;
+    }
+
+    content_length(headers).is_some_and(|len| len > threshold)
+}
+
+fn streaming_response_capture_notice(
+    headers: &http::HeaderMap,
+    threshold: usize,
+    streamed_bytes: usize,
+    interrupted: bool,
+) -> Bytes {
+    let content_type = normalized_content_type(headers)
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let content_length = content_length(headers)
+        .map(|len| len.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let content_encoding = headers
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<none>");
+
+    let stream_status = if interrupted {
+        "interrupted before upstream EOF or dropped before normal completion"
+    } else {
+        "completed normally"
+    };
+
+    Bytes::from(format!(
+        "\
+<response body streamed by inspect>
+
+This response body was not fully buffered or captured.
+
+Reason:
+  inspect switched this response to streaming mode because it matched the
+  stream_body_threshold_bytes policy or a streaming body heuristic.
+
+Configuration:
+  stream_body_threshold_bytes = {threshold}
+
+Observed response metadata:
+  content-type: {content_type}
+  content-encoding: {content_encoding}
+  content-length: {content_length}
+
+Streaming result:
+  status: {stream_status}
+  streamed-bytes-observed-by-inspect: {streamed_bytes}
+
+Notes:
+  - The response was forwarded to the client as a stream.
+  - The complete response body is not stored in this capture.
+  - streamed-bytes-observed-by-inspect is counted from body data frames that
+    inspect actually observed while forwarding the stream.
+  - This value may differ from the Content-Length header if the client cancels,
+    the upstream connection ends early, the upstream header is inaccurate, or the
+    response uses protocol framing where Content-Length is absent.
+  - Whole-body Roto response filters, response-body rewrites, completed filters,
+    and captured-response outbound HTTP payloads are skipped for this streamed body.
+  - Set stream_body_threshold_bytes = 0 to disable threshold-based streaming.
+"
+    ))
+}
+
+fn content_length(headers: &http::HeaderMap) -> Option<usize> {
+    headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn is_compressed_response(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .any(|encoding| {
+                    matches!(
+                        encoding.as_str(),
+                        "gzip" | "x-gzip" | "br" | "zstd" | "deflate"
+                    )
+                })
+        })
+}
+
+fn is_probably_binary_response(headers: &http::HeaderMap) -> bool {
+    let Some(content_type) = normalized_content_type(headers) else {
+        return false;
+    };
+
+    if is_probably_text_content_type(&content_type) {
+        return false;
+    }
+
+    content_type.starts_with("image/")
+        || content_type.starts_with("video/")
+        || content_type.starts_with("audio/")
+        || content_type == "application/octet-stream"
+        || content_type == "application/pdf"
+        || content_type == "application/zip"
+        || content_type == "application/x-zip-compressed"
+        || content_type == "application/gzip"
+        || content_type == "application/x-gzip"
+        || content_type == "application/x-tar"
+        || content_type == "application/x-7z-compressed"
+        || content_type == "application/vnd.rar"
+        || content_type == "application/vnd.microsoft.portable-executable"
+        || content_type.starts_with("application/vnd.")
+}
+
+fn is_probably_text_content_type(content_type: &str) -> bool {
+    content_type.starts_with("text/")
+        || content_type == "application/json"
+        || content_type.ends_with("+json")
+        || content_type == "application/xml"
+        || content_type.ends_with("+xml")
+        || content_type == "application/javascript"
+        || content_type == "application/x-javascript"
+        || content_type == "application/ecmascript"
+        || content_type == "application/x-www-form-urlencoded"
 }
 
 fn build_synthetic_response(

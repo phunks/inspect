@@ -282,6 +282,8 @@ Options:
           UA for normal upstream HTTP requests [default: auto] [possible values: auto, chrome, firefox]
       --connect-ua-profile <CONNECT_UA_PROFILE>
           UA for upstream proxy CONNECT. If omitted, inherits --ua-profile [possible values: auto, chrome, firefox]
+      --connect-ua <CONNECT_UA>
+          Raw User-Agent header value for upstream proxy CONNECT. Overrides --connect-ua-profile
       --proxy-mode <PROXY_MODE>
           [default: observe] [possible values: observe, emulate]
       --upstream-handshake-timeout-ms <UPSTREAM_HANDSHAKE_TIMEOUT_MS>
@@ -294,6 +296,8 @@ Options:
           Save captured bodies without truncation
       --body-omit-content-types <BODY_OMIT_CONTENT_TYPES>
           Do not save bodies for matching Content-Type prefixes
+      --stream-body-threshold-bytes <STREAM_BODY_THRESHOLD_BYTES>
+          Stream response bodies larger than this many bytes instead of buffering them [default: 16777216]
       --generate-ca
           Generate (or reuse) persistent local MITM root CA and exit
       --force-regenerate-ca
@@ -376,6 +380,46 @@ suffixes. `.deflate` files are preserved but deflate search is best-effort.
 HTTP `Content-Encoding: deflate` is rarely seen in modern traffic: historically,
 some implementations interpreted it as zlib-wrapped deflate while others used
 raw deflate, so gzip/br/zstd are generally more predictable in practice.
+
+### Large and streamed response bodies
+
+Large, binary-like, or content-encoded response bodies can be forwarded to the
+client as streaming responses instead of being fully buffered in memory. This is
+controlled by:
+
+```toml
+# Stream response bodies larger than this many bytes instead of buffering them.
+# 0 disables threshold-based streaming.
+stream_body_threshold_bytes = 16777216
+```
+
+When a normal response is switched to the streaming path, Inspect forwards the
+body to the client while counting the body bytes it observes. The response is
+committed to the capture database and TUI only when the stream finishes or is
+dropped, so a large download is not shown as completed merely because the
+response headers were received.
+
+If the client cancels the download, the upstream response body errors, or the
+stream is dropped before normal EOF, Inspect finalizes the capture with the
+bytes observed up to that point. The streamed byte count may differ from the
+`Content-Length` header when a transfer is interrupted, when `Content-Length` is
+absent or inaccurate, or when protocol framing differs from the header metadata.
+
+Streaming response captures store a short explanatory notice in `response.body`
+instead of the complete body. In the TUI, `body size` reports the observed
+streamed body size, while the saved body file remains small and is marked as
+truncated.
+
+Streaming responses are not passed through ordinary whole-body response
+filtering, response-body rewriting, completed filters, or captured-response
+outbound HTTP payload generation.
+
+Set the threshold to `0` to disable threshold-based streaming and use the
+ordinary whole-body buffering path where possible:
+
+```toml
+stream_body_threshold_bytes = 0
+```
 
 ### Server-Sent Events (SSE)
 

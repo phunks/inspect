@@ -79,6 +79,7 @@ struct FileConfig {
     body_save_limit_bytes: Option<usize>,
     body_save_unlimited: Option<bool>,
     body_omit_content_types: Option<Vec<String>>,
+    stream_body_threshold_bytes: Option<usize>,
     sse_capture_max_events: Option<i32>,
     sse_capture_max_event_bytes: Option<i32>,
     outbound_http_clients: Option<Vec<NamedHttpClientConfig>>,
@@ -151,6 +152,9 @@ pub struct Opt {
 
     #[arg(long, value_delimiter = ',', help = "Do not save bodies for matching Content-Type prefixes")]
     pub body_omit_content_types: Vec<String>,
+
+    #[arg(long, default_value_t = 16 * 1024 * 1024, help = "Stream response bodies larger than this many bytes instead of buffering them")]
+    pub stream_body_threshold_bytes: usize,
 
     #[arg(skip = 100)]
     /// Maximum number of SSE events captured per text/event-stream response.
@@ -299,6 +303,11 @@ impl Opt {
             self.body_omit_content_types = value;
         }
 
+        if !cli_specified(matches, "stream_body_threshold_bytes")
+            && let Some(value) = config.stream_body_threshold_bytes {
+            self.stream_body_threshold_bytes = value;
+        }
+
         if let Some(value) = config.sse_capture_max_events {
             self.sse_capture_max_events = value;
         }
@@ -380,6 +389,7 @@ impl Opt {
             body_save_unlimited = self.body_save_unlimited,
             effective_body_save_limit_bytes = ?self.effective_body_save_limit_bytes(),
             body_omit_content_types = ?self.body_omit_content_types,
+            stream_body_threshold_bytes = self.stream_body_threshold_bytes,
             sse_capture_max_events = self.sse_capture_max_events,
             sse_capture_max_event_bytes = self.sse_capture_max_event_bytes,
             outbound_http_clients = ?self.outbound_http_clients,

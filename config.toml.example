@@ -99,6 +99,23 @@ upstream_handshake_timeout_ms = 10000
 # Default: 60
 upstream_request_timeout_sec = 60
 
+# Stream large/binary response bodies to the client without buffering the full body.
+# CLI: --stream-body-threshold-bytes
+# Default: 16777216
+#
+# Notes:
+# - 0 disables this streaming threshold and preserves the old whole-body buffering path.
+# - When enabled, responses larger than this threshold may be forwarded as streaming
+#   responses instead of being fully collected into memory.
+# - Binary-like responses and content-encoded responses such as gzip/br/zstd/deflate
+#   may also use the streaming path.
+# - Streaming responses are still forwarded to the client, but their complete body is
+#   not captured, not passed to whole-body Roto response filters, and not available
+#   for response-body rewriting.
+# - The captured response.body file will contain a short notice explaining that the
+#   body was streamed instead of captured.
+stream_body_threshold_bytes = 16777216
+
 # Maximum bytes to save per captured request/response body.
 # CLI: --body-save-limit-bytes
 # Default: 3072
