@@ -131,6 +131,7 @@ pub(crate) struct ConnectDispatchOutput {
 #[derive(Clone)]
 pub struct FlowDispatcherConfig {
     pub upstream_proxy: Option<ProxyAddress>,
+    pub upstream_no_proxy: Arc<[String]>,
     pub body_save_limit_bytes: Option<usize>,
     pub body_omit_content_types: Arc<[String]>,
     pub stream_body_threshold_bytes: usize,
@@ -190,7 +191,25 @@ impl FlowDispatcher {
         &self.upstream_client
     }
 
+    #[allow(unused)]
     pub(crate) fn upstream_proxy(&self) -> Option<ProxyAddress> {
+        self.config.upstream_proxy.clone()
+    }
+
+    pub(crate) fn upstream_proxy_for_host(
+        &self,
+        host: &str,
+        port: Option<u16>,
+    ) -> Option<ProxyAddress> {
+        if upstream_no_proxy_matches(&self.config.upstream_no_proxy, host, port) {
+            tracing::debug!(
+                host,
+                port,
+                "bypass upstream proxy due to upstream_no_proxy"
+            );
+            return None;
+        }
+
         self.config.upstream_proxy.clone()
     }
 
@@ -243,11 +262,12 @@ impl FlowDispatcher {
     async fn dispatch_http(&self, req: Request) -> FlowDispatchResult<Response> {
         let (mut req_parts, req_body) = req.into_parts();
 
-        if let Some(upstream_proxy) = self.config.upstream_proxy.clone() {
+        let ctx = self.new_request_context(&req_parts)?;
+
+        if let Some(upstream_proxy) = self.upstream_proxy_for_host(&ctx.host, request_port(&ctx)) {
             req_parts.extensions_mut().insert(upstream_proxy);
         }
 
-        let ctx = self.new_request_context(&req_parts)?;
         let mut req_body_bytes = collect_body(req_body, "request").await;
 
         let RequestDispatchOutput {
@@ -1396,5 +1416,141 @@ fn request_target(req: &FilterRequest) -> String {
         req.path.clone()
     } else {
         format!("{}?{}", req.path, req.query)
+    }
+}
+
+fn request_port(ctx: &RequestDispatchContext) -> Option<u16> {
+    ctx.uri
+        .port_u16()
+        .or_else(|| match ctx.protocol.as_str() {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        })
+}
+
+fn upstream_no_proxy_matches(patterns: &[String], host: &str, port: Option<u16>) -> bool {
+    let host = normalize_no_proxy_host(host);
+
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim();
+
+        if pattern.is_empty() {
+            return false;
+        }
+
+        if pattern == "*" {
+            return true;
+        }
+
+        let (pattern_host, pattern_port) = split_no_proxy_pattern(pattern);
+
+        if let Some(pattern_port) = pattern_port
+            && Some(pattern_port) != port {
+            return false;
+        }
+
+        host_matches_no_proxy_pattern(&host, &normalize_no_proxy_host(pattern_host))
+    })
+}
+
+fn split_no_proxy_pattern(pattern: &str) -> (&str, Option<u16>) {
+    if let Some(stripped) = pattern.strip_prefix('[')
+        && let Some((host, rest)) = stripped.split_once(']')
+        && let Some(port) = rest.strip_prefix(':').and_then(|value| value.parse().ok()) {
+        return (host, Some(port));
+    }
+
+    if let Some((host, port)) = pattern.rsplit_once(':')
+        && !host.contains(':')
+        && let Ok(port) = port.parse() {
+        return (host, Some(port));
+    }
+
+    (pattern, None)
+}
+
+fn normalize_no_proxy_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn host_matches_no_proxy_pattern(host: &str, pattern: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return host == suffix || host.ends_with(&format!(".{suffix}"));
+    }
+
+    if let Some(suffix) = pattern.strip_prefix('.') {
+        return host == suffix || host.ends_with(&format!(".{suffix}"));
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod upstream_no_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn matches_exact_host() {
+        let patterns = vec!["localhost".to_string()];
+
+        assert!(upstream_no_proxy_matches(&patterns, "localhost", Some(8080)));
+        assert!(!upstream_no_proxy_matches(&patterns, "example.com", Some(8080)));
+    }
+
+    #[test]
+    fn matches_case_insensitive_host() {
+        let patterns = vec!["LOCALHOST".to_string()];
+
+        assert!(upstream_no_proxy_matches(&patterns, "localhost", Some(8080)));
+    }
+
+    #[test]
+    fn matches_wildcard_suffix() {
+        let patterns = vec!["*.example.com".to_string()];
+
+        assert!(upstream_no_proxy_matches(&patterns, "api.example.com", Some(443)));
+        assert!(upstream_no_proxy_matches(&patterns, "example.com", Some(443)));
+        assert!(!upstream_no_proxy_matches(&patterns, "not-example.com", Some(443)));
+    }
+
+    #[test]
+    fn matches_dot_suffix() {
+        let patterns = vec![".example.com".to_string()];
+
+        assert!(upstream_no_proxy_matches(&patterns, "api.example.com", Some(443)));
+        assert!(upstream_no_proxy_matches(&patterns, "example.com", Some(443)));
+    }
+
+    #[test]
+    fn matches_port_specific_pattern() {
+        let patterns = vec!["localhost:8080".to_string()];
+
+        assert!(upstream_no_proxy_matches(&patterns, "localhost", Some(8080)));
+        assert!(!upstream_no_proxy_matches(&patterns, "localhost", Some(8081)));
+    }
+
+    #[test]
+    fn matches_ipv6_loopback() {
+        let patterns = vec!["::1".to_string()];
+
+        assert!(upstream_no_proxy_matches(&patterns, "[::1]", Some(8080)));
+        assert!(upstream_no_proxy_matches(&patterns, "::1", Some(8080)));
+    }
+
+    #[test]
+    fn matches_ipv6_with_port() {
+        let patterns = vec!["[::1]:8080".to_string()];
+
+        assert!(upstream_no_proxy_matches(&patterns, "::1", Some(8080)));
+        assert!(!upstream_no_proxy_matches(&patterns, "::1", Some(8081)));
     }
 }

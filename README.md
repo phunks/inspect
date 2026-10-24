@@ -115,8 +115,14 @@ If a site is sensitive to these checks, try:
 | Roto outbound HTTP jobs | enabled | disabled |
 | Request/response capture and SQLite metadata | enabled | enabled |
 | Upstream TLS metadata and HAR-oriented records | enabled | enabled |
-| Browser/TLS/HTTP emulation | optional | prioritized |
+| Browser/TLS/HTTP emulation | disabled | prioritized |
 | Upstream HTTP/2 via ALPN | supported | supported |
+
+In `observe` mode, `--ua-profile chrome` or `--ua-profile firefox` replaces
+the upstream User-Agent header only; it does not enable browser/TLS/HTTP
+emulation. The response and completed filter capabilities above apply to the
+ordinary buffered HTTP path; SSE and other streamed responses bypass these
+filters as described below.
 
 `emulate` is an experimental best-effort mode for prioritizing browser-like
 upstream wire behavior. In this mode, Roto is deliberately disabled so that
@@ -220,12 +226,28 @@ This clones and patches:
 - `ext/tuie`
   - `patches/tuie-0.2.4-scroll-fix.patch`
 
-Useful maintenance commands:
+Maintenance commands (discard local changes under `ext/`):
 ```bash
-just check-patches
 just reset-ext
 just recreate-ext
 ```
+
+`reset-ext` resets the vendored repositories and removes untracked files before
+reapplying the patches. `recreate-ext` deletes and reclones them. Save any local
+changes before running either command.
+
+`just check-patches` checks whether the patches can be applied to an **unpatched**
+checkout. It is not a post-setup health check: it is expected to fail when the
+patches have already been applied. To check whether the current patches can be
+reversed in a patched checkout without changing any files, run from the project root:
+
+```bash
+git -C ext/rama apply -R --check ../../patches/rama-0.3.0-alpha.4-tls-fix.patch
+git -C ext/tuie apply -R --check ../../patches/tuie-0.2.4-scroll-fix.patch
+```
+
+`just setup-ext` is intended for initial setup; rerunning it on an already patched
+Rama checkout fails its forward patch check.
 
 If you modify the vendored dependencies, update the patch files with:
 ```bash
@@ -245,7 +267,14 @@ cargo run -- --generate-ca
 
 
 ## Build
-Initialize patched vendored dependencies first:
+Initialize patched vendored dependencies with `just setup-ext` first.
+For a native build:
+
+```bash
+cargo build --release
+```
+
+Alternatively, with Zig installed and available on `PATH`:
 ```bash
 cargo install cargo-zigbuild
 cargo zigbuild --release
@@ -278,6 +307,8 @@ Options:
           Log verbosity level. -vv for more verbosity. Environmental variable `RUST_LOG` overrides this flag!
       --upstream-proxy [<UPSTREAM_PROXY>]
           Upstream proxy address in format 'host:port'
+      --upstream-no-proxy <UPSTREAM_NO_PROXY>
+          Hosts that bypass --upstream-proxy
       --ua-profile <UA_PROFILE>
           UA for normal upstream HTTP requests [default: auto] [possible values: auto, chrome, firefox]
       --connect-ua-profile <CONNECT_UA_PROFILE>
@@ -478,20 +509,30 @@ an incomplete event, the remaining bytes are written to
 `response.body.partial`.
 
 SSE response bodies are not passed through ordinary whole-body response
-filtering or response-body rewriting. Header and status based response handling
-remains available; event-level rewriting requires a dedicated streaming filter
-model.
+filtering or response-body rewriting. SSE responses also bypass Roto response
+filters (including header- and status-based actions), completed filters, and
+captured-response outbound HTTP payload generation. Request-side filters still
+apply in `observe` mode. Response headers and metadata are captured immediately,
+without waiting for the stream to end. Event-level rewriting requires a dedicated
+streaming filter model.
 
 ## Viewer mode
 Use --view-capture to open an existing capture directory without starting the proxy.
 ```bash
 inspect --view-capture capture/20260602143000Z
 ```
-Viewer mode is read-only:
+Viewer mode does not capture new traffic and opens the capture database read-only:
 - The proxy is not started.
 - No new capture directory is created.
 - `index.sqlite` is opened read-only.
 - Existing `flows/` files are used for detail view and full text search.
+
+This is not a filesystem-wide read-only guarantee. External diff/view operations
+for compressed or SSE bodies write derived files under
+`capture/<timestamp>/.external-diff/` and require write access there. Those
+operations can fail on a read-only capture directory. Uncompressed bodies,
+headers, and TLS detail files are passed directly to external tools, so saving
+changes in an external editor can modify the original capture files.
 
 ## TUI keys
 - `?`: show help
@@ -650,9 +691,9 @@ The first array element is the executable. Remaining elements, if any, are
 passed as fixed arguments before the two diff input paths.
 
 ```toml
+# Choose one command; uncomment an alternative if needed.
 external_diff_command = ["meld"]
-external_diff_command = ["vimdiff"]
-external_diff_command = ["code", "--wait", "--diff"]
+# external_diff_command = ["code", "--wait", "--diff"]
 ```
 
 > `external_diff_command` must be a top-level TOML key. In particular, do not
@@ -701,14 +742,19 @@ External diff is unavailable for the `info` detail tab.
 
 ### Compatibility
 
-The external diff command receives regular file paths, so tools such as `meld`,
-`vimdiff`, and Visual Studio Code are supported.
+The external diff command receives regular file paths, so GUI tools such as
+`meld` and Visual Studio Code are supported.
+
+Inspect launches the command with stdin disconnected and stdout/stderr piped
+while the TUI retains control of the terminal. Do not configure terminal tools
+such as `vimdiff` directly. Use a wrapper that opens a separate terminal window
+and forwards both file paths instead.
 
 
 ```toml
-# Supported examples
+# Choose one command.
 external_diff_command = ["meld"]
-external_diff_command = ["code", "--diff"]
+# external_diff_command = ["code", "--diff"]
 ```
 
 For body diffs, compressed captures such as `.gz`, `.br`, `.zst`, `.zstd`, and
@@ -716,7 +762,7 @@ For body diffs, compressed captures such as `.gz`, `.br`, `.zst`, `.zstd`, and
 normalized to text files under:
 
 ```text
-capture//.external-diff/
+capture/<timestamp>/.external-diff/
 ```
 
 These files are derived views for external diff and are not searched by the
@@ -749,7 +795,7 @@ body is compressed (`.gz`, `.br`, `.zst`, `.zstd`, `.deflate`) or is an SSE
 chunked capture, Inspect writes a normalized text view under:
 
 ```text
-capture//.external-diff/
+capture/<timestamp>/.external-diff/
 ```
 
 and opens that derived text file instead.
@@ -770,17 +816,19 @@ do not work correctly when configured directly.
 
 Good examples:
 ```toml
+# Choose one command; uncomment an alternative if needed.
 external_view_command = ["code", "--wait"]
-external_view_command = ["open"]
-external_view_command = ["wezterm", "start", "--", "vim"]
-external_view_command = ["kitty", "--detach", "vim"]
+# external_view_command = ["open"]
+# external_view_command = ["wezterm", "start", "--", "vim"]
+# external_view_command = ["kitty", "--detach", "vim"]
 ```
 
 Usually bad examples:
 ```toml
-external_view_command = ["vim"]
-external_view_command = ["less"]
-external_view_command = ["nano"]
+# Do not configure these directly:
+# external_view_command = ["vim"]
+# external_view_command = ["less"]
+# external_view_command = ["nano"]
 ```
 If you want to use a terminal editor, wrap it in a terminal-launching command or
 a small script that opens a new terminal window and passes the file path to the

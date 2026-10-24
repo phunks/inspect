@@ -82,6 +82,7 @@ async fn main() -> Result<(), AnyError> {
     });
 
     let upstream_proxy = opt.upstream_proxy.clone();
+    let upstream_no_proxy = opt.upstream_no_proxy.clone();
     let ua_profile = opt.ua_profile;
     let connect_ua_profile = opt.connect_ua_profile;
     let connect_ua = opt.connect_ua.clone();
@@ -135,6 +136,7 @@ async fn main() -> Result<(), AnyError> {
     let proxy_task = tokio::spawn(async move {
         if let Err(e) = mitm_proxy_main(
             upstream_proxy,
+            upstream_no_proxy,
             service_port,
             ua_profile,
             connect_ua_profile,

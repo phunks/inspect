@@ -68,6 +68,7 @@ struct FileConfig {
     view_capture: Option<std::path::PathBuf>,
     verbosity: Option<u8>,
     upstream_proxy: Option<String>,
+    upstream_no_proxy: Option<Vec<String>>,
     external_diff_command: Option<Vec<String>>,
     external_view_command: Option<Vec<String>>,
     ua_profile: Option<UaProfile>,
@@ -125,6 +126,9 @@ pub struct Opt {
 
     #[arg(long, num_args(0..=1), default_missing_value="false", help = "Upstream proxy address in format 'host:port'")]
     pub upstream_proxy: Option<String>,
+
+    #[arg(long, value_delimiter = ',', help = "Hosts that bypass --upstream-proxy")]
+    pub upstream_no_proxy: Vec<String>,
 
     #[arg(long, value_enum, default_value_t = UaProfile::Auto, help = "UA for normal upstream HTTP requests")]
     pub ua_profile: UaProfile,
@@ -258,6 +262,11 @@ impl Opt {
             self.upstream_proxy = Some(value);
         }
 
+        if !cli_specified(matches, "upstream_no_proxy")
+            && let Some(value) = config.upstream_no_proxy {
+            self.upstream_no_proxy = value;
+        }
+
         if !cli_specified(matches, "ua_profile")
             && let Some(value) = config.ua_profile {
             self.ua_profile = value;
@@ -377,6 +386,7 @@ impl Opt {
             view_capture = ?self.view_capture,
             verbosity = self.verbosity,
             upstream_proxy = ?self.upstream_proxy,
+            upstream_no_proxy = ?self.upstream_no_proxy,
             external_diff_command = ?self.external_diff_command,
             external_view_command = ?self.external_view_command,
             ua_profile = ?self.ua_profile,

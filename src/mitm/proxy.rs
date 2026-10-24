@@ -190,6 +190,7 @@ impl UpstreamFlowClient for UpstreamClient {
 #[allow(clippy::too_many_arguments)]
 pub async fn mitm_proxy_main(
     upstream_proxy: Option<String>,
+    upstream_no_proxy: Vec<String>,
     service_port: String,
     ua_profile: UaProfile,
     connect_ua_profile: Option<UaProfile>,
@@ -273,6 +274,7 @@ pub async fn mitm_proxy_main(
         outbound_http_pool,
         FlowDispatcherConfig {
             upstream_proxy: upstream_proxy.clone(),
+            upstream_no_proxy: upstream_no_proxy.into(),
             body_save_limit_bytes,
             body_omit_content_types: body_omit_content_types.clone(),
             stream_body_threshold_bytes,
@@ -460,7 +462,10 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
 
         let http_service = new_http_mitm_proxy(&state);
 
-        if let Some(upstream_proxy) = state.flow_dispatcher.upstream_proxy() {
+        if let Some(target) = client_target.as_ref()
+            && let Some(upstream_proxy) = state
+            .flow_dispatcher
+            .upstream_proxy_for_host(&target.host.to_string(), Some(target.port)) {
             upgraded.extensions_mut().insert(upstream_proxy);
         }
 

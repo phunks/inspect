@@ -55,6 +55,26 @@ verbosity = 0
 # upstream_proxy = "127.0.0.1:8080"
 # upstream_proxy = ""
 
+# Hosts that should bypass upstream_proxy and be reached directly.
+# CLI: --upstream-no-proxy localhost,127.0.0.1,::1
+# Default: empty
+#
+# Supported patterns:
+# - "*" matches all hosts
+# - "localhost" matches exactly
+# - "localhost:8080" matches a specific port
+# - "*.example.com" matches example.com and subdomains
+# - ".example.com" matches example.com and subdomains
+# - "::1" and "[::1]:8080" are supported for IPv6 literals
+#
+# Example:
+# upstream_no_proxy = [
+#     "localhost",
+#     "127.0.0.1",
+#     "::1",
+#     "*.local",
+# ]
+
 # User-Agent/TLS emulation profile for normal upstream HTTP requests.
 # CLI: --ua-profile
 # Default: "auto"
