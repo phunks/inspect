@@ -31,7 +31,7 @@ use crate::filters::types::{
     RotoResponseStringFn,
     FilterConnectView
 };
-use roto::{library, NoCtx, RotoString, Runtime, Val};
+use roto::{library, Runtime, runtime::context::NoCtx, value::RotoString, value::Val};
 use regex::Regex;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;

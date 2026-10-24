@@ -1,9 +1,9 @@
+use crate::filters::types::OutboundHttpJob;
+use crate::filters::{FilterRequest, FilterRequestView, FilterSyntheticResponse};
+use crate::mitm::flow::{FlowMark, ResponseOrigin};
 use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
-use crate::filters::{FilterRequest, FilterRequestView, FilterSyntheticResponse};
-use crate::filters::types::OutboundHttpJob;
-use crate::mitm::flow::{FlowMark, ResponseOrigin};
 
 pub(crate) struct RequestDispatchContext {
     pub(crate) id: Uuid,
@@ -15,19 +15,17 @@ pub(crate) struct RequestDispatchContext {
     pub(crate) tls_sni: Option<String>,
     pub(crate) protocol: String,
     pub(crate) host: String,
-    pub(crate) uri: http::Uri,
+    pub(crate) path: String,
+    pub(crate) uri: rama::net::uri::Uri,
     pub(crate) method: String,
 }
 
 impl RequestDispatchContext {
     pub(crate) fn path(&self) -> &str {
-        self.uri.path()
+        &self.path
     }
 
-    pub(crate) fn request_view<'a>(
-        &'a self,
-        method: &'a str,
-    ) -> FilterRequestView<'a> {
+    pub(crate) fn request_view<'a>(&'a self, method: &'a str) -> FilterRequestView<'a> {
         FilterRequestView {
             host: &self.host,
             path: self.path(),

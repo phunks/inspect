@@ -1,11 +1,15 @@
+use crate::filters::engine::diff::BodyDiffSource::Json;
+use crate::filters::{
+    DiffEvent, DiffNode, DiffPath, DiffPathSegment, DiffSource, FilterHeader, FilterRequest,
+    GeneratedJsonPatchOperation,
+};
+use crate::mitm::flow::filter_bridge::normalized_content_type;
+use crate::mitm::flow::http_types::ResponseDispatchInput;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
+use rama::http;
 use sqlx::types::JsonValue;
-use crate::filters::{DiffEvent, DiffNode, DiffPath, DiffPathSegment, DiffSource, FilterHeader, FilterRequest, GeneratedJsonPatchOperation};
-use crate::filters::engine::diff::BodyDiffSource::Json;
-use crate::mitm::flow::filter_bridge::normalized_content_type;
-use crate::mitm::flow::http_types::ResponseDispatchInput;
 
 pub fn json_filter_request_bytes(req: &FilterRequest) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -27,10 +31,10 @@ pub fn json_filter_request_bytes(req: &FilterRequest) -> Vec<u8> {
             &req.body.bytes,
         ),
     }))
-        .unwrap_or_else(|err| {
-            tracing::warn!(error = ?err, "failed to serialize captured request json");
-            b"{}".to_vec()
-        })
+    .unwrap_or_else(|err| {
+        tracing::warn!(error = ?err, "failed to serialize captured request json");
+        b"{}".to_vec()
+    })
 }
 
 pub fn json_filter_response_bytes(
@@ -55,10 +59,10 @@ pub fn json_filter_response_bytes(
             res_body_bytes,
         ),
     }))
-        .unwrap_or_else(|err| {
-            tracing::warn!(error = ?err, "failed to serialize captured response json");
-            b"{}".to_vec()
-        })
+    .unwrap_or_else(|err| {
+        tracing::warn!(error = ?err, "failed to serialize captured response json");
+        b"{}".to_vec()
+    })
 }
 
 pub(crate) fn json_filter_flow_bytes(
@@ -83,10 +87,10 @@ pub(crate) fn json_filter_flow_bytes(
             ),
         ).unwrap_or_else(|_| serde_json::json!({})),
     }))
-        .unwrap_or_else(|err| {
-            tracing::warn!(error = ?err, "failed to serialize captured flow json");
-            b"{}".to_vec()
-        })
+    .unwrap_or_else(|err| {
+        tracing::warn!(error = ?err, "failed to serialize captured flow json");
+        b"{}".to_vec()
+    })
 }
 
 fn json_filter_headers(headers: &[FilterHeader]) -> serde_json::Value {
@@ -144,7 +148,6 @@ fn json_body(
     }
 }
 
-
 pub fn push_json_body_diff_events(
     events: &mut Vec<DiffEvent>,
     original: &str,
@@ -163,12 +166,7 @@ pub fn push_json_body_diff_events(
         return false;
     };
 
-    diff_json_value(
-        events,
-        Vec::new(),
-        &original_json,
-        &edited_json,
-    );
+    diff_json_value(events, Vec::new(), &original_json, &edited_json);
 
     true
 }
@@ -269,12 +267,7 @@ fn diff_json_value(
                 let mut next_path = path.clone();
                 next_path.push(DiffPathSegment::JsonIndex(idx));
 
-                diff_json_value(
-                    events,
-                    next_path,
-                    &original_items[idx],
-                    &edited_items[idx],
-                );
+                diff_json_value(events, next_path, &original_items[idx], &edited_items[idx]);
             }
 
             for (idx, item) in original_items.iter().enumerate().skip(common_len) {
@@ -323,20 +316,18 @@ fn json_value_to_diff_node(value: &JsonValue) -> DiffNode {
 }
 
 fn looks_like_json(content_type: Option<&str>, text: &str) -> bool {
-    if content_type
-        .is_some_and(|content_type| {
-            let content_type = content_type
-                .split(';')
-                .next()
-                .unwrap_or(content_type)
-                .trim()
-                .to_ascii_lowercase();
+    if content_type.is_some_and(|content_type| {
+        let content_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim()
+            .to_ascii_lowercase();
 
-            content_type == "application/json"
-                || content_type.ends_with("+json")
-                || content_type == "text/json"
-        })
-    {
+        content_type == "application/json"
+            || content_type.ends_with("+json")
+            || content_type == "text/json"
+    }) {
         return true;
     }
 
@@ -354,9 +345,7 @@ pub fn json_patch_operations_from_diff_events(
         .collect()
 }
 
-fn json_patch_operation_from_diff_event(
-    event: &DiffEvent,
-) -> Option<GeneratedJsonPatchOperation> {
+fn json_patch_operation_from_diff_event(event: &DiffEvent) -> Option<GeneratedJsonPatchOperation> {
     if event.source() != DiffSource::Body(Json) {
         return None;
     }
@@ -401,17 +390,11 @@ pub fn json_pointer_from_diff_path(path: &DiffPath) -> Option<String> {
         }
     }
 
-    if seen_body {
-        Some(out)
-    } else {
-        None
-    }
+    if seen_body { Some(out) } else { None }
 }
 
 fn escape_json_pointer_segment(segment: &str) -> String {
-    segment
-        .replace('~', "~0")
-        .replace('/', "~1")
+    segment.replace('~', "~0").replace('/', "~1")
 }
 
 fn diff_node_to_json_patch_value(node: &DiffNode) -> String {
@@ -422,37 +405,35 @@ fn diff_node_to_json_patch_value(node: &DiffNode) -> String {
         DiffNode::String(value) | DiffNode::Text(value) => {
             serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
         }
-        DiffNode::Json { raw } => {
-            serde_json::from_str::<JsonValue>(raw)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|_| serde_json::to_string(raw).unwrap_or_else(|_| "null".to_string()))
-        }
+        DiffNode::Json { raw } => serde_json::from_str::<JsonValue>(raw)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|_| serde_json::to_string(raw).unwrap_or_else(|_| "null".to_string())),
         DiffNode::Xml { name, text } => serde_json::json!({
             "name": name,
             "text": text,
         })
-            .to_string(),
+        .to_string(),
         DiffNode::Html { tag, text } => serde_json::json!({
             "tag": tag,
             "text": text,
         })
-            .to_string(),
+        .to_string(),
         DiffNode::Ast { kind, text } => serde_json::json!({
             "kind": kind,
             "text": text,
         })
-            .to_string(),
+        .to_string(),
         DiffNode::BytesLen(value) => value.to_string(),
         DiffNode::Header { name, value } => serde_json::json!({
             "name": name,
             "value": value,
         })
-            .to_string(),
+        .to_string(),
         DiffNode::Cookie { name, value } => serde_json::json!({
             "name": name,
             "value": value,
         })
-            .to_string(),
+        .to_string(),
         DiffNode::Binary {
             bytes_len,
             content_type,
@@ -460,19 +441,15 @@ fn diff_node_to_json_patch_value(node: &DiffNode) -> String {
             "bytes_len": bytes_len,
             "content_type": content_type,
         })
-            .to_string(),
+        .to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::filters::{
-        extract_response_filter_from_edit,
-        json_patch_operations_to_rfc6902_json,
-        EditableHttpBody,
-        EditableHttpHeader,
-        EditableHttpMessage,
-        EditableHttpMessageKind
+        EditableHttpBody, EditableHttpHeader, EditableHttpMessage, EditableHttpMessageKind,
+        extract_response_filter_from_edit, json_patch_operations_to_rfc6902_json,
     };
 
     use super::*;
@@ -494,8 +471,8 @@ mod tests {
         ];
 
         let json = json_patch_operations_to_rfc6902_json(&operations);
-        let value = serde_json::from_str::<JsonValue>(&json)
-            .expect("generated patch should be valid JSON");
+        let value =
+            serde_json::from_str::<JsonValue>(&json).expect("generated patch should be valid JSON");
 
         assert_eq!(value[0]["op"], "replace");
         assert_eq!(value[0]["path"], "/user/name");
@@ -547,13 +524,9 @@ mod tests {
             ..original.clone()
         };
 
-        let filter = extract_response_filter_from_edit(
-            "json patch response",
-            &request,
-            &original,
-            &edited,
-        )
-            .expect("json edit should produce generated filter");
+        let filter =
+            extract_response_filter_from_edit("json patch response", &request, &original, &edited)
+                .expect("json edit should produce generated filter");
 
         let source = filter.to_roto_source();
 

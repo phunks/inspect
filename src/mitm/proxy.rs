@@ -1,40 +1,53 @@
-
+use crate::filters::FilterManager;
+use crate::filters::http_client::OutboundHttpClientPool;
+use crate::mitm::capture::CapturePaths;
+use crate::mitm::client::{UpstreamClient, new_upstream_client};
+use crate::mitm::dynamic_ca::DynamicIssuer;
+use crate::mitm::flow::dispatcher::UpstreamFlowResult;
+use crate::mitm::flow::state_store::FilterStateLimits;
+use crate::mitm::flow::websocket::dispatch_websocket_handshake;
+use crate::mitm::flow::{
+    CaptureService, FlowDispatcher, FlowDispatcherConfig, FlowEvent, FlowEventPublisher,
+    TunnelFailed, TunnelFailureCapture, UpstreamFlowClient, flow_marks_from_connect_action,
+};
+use crate::mitm::store_metadata::DbState;
+use crate::mitm::tls_sni::ConnectSniRouterService;
+use crate::options::{FilterStateConfig, ProxyMode, UaProfile};
+use chrono::Utc;
+use rama::http::ws::handshake::matcher::WebSocketMatcher;
+use rama::matcher::Matcher;
+use rama::net::address::{Host, HostWithPort, ProxyAddress};
+use rama::tls::server::{SniRouter, TlsServerConfig};
 use rama::{
-    error::{ErrorContext, OpaqueError}, extensions::{ExtensionsMut, ExtensionsRef},
+    Layer, Service,
+    error::{BoxError, ErrorContext},
+    extensions::{Extension, ExtensionsRef},
     http::{
+        Body, Request, Response, StatusCode,
         layer::{
             compression::CompressionLayer,
             map_response_body::MapResponseBodyLayer,
             required_header::AddRequiredRequestHeadersLayer,
             trace::TraceLayer,
             upgrade::{UpgradeLayer, Upgraded},
-        }, matcher::MethodMatcher,
-        server::HttpServer, service::web::response::IntoResponse,
-        Body,
-        Request,
-        Response,
-        StatusCode,
+        },
+        matcher::MethodMatcher,
+        server::HttpServer,
+        service::web::response::IntoResponse,
     },
     layer::{AddInputExtensionLayer, ConsumeErrLayer},
-    net::{
-        http::RequestContext, proxy::ProxyTarget,
-        tls::server::{ServerAuth, ServerConfig},
-    },
+    net::AuthorityInputExt,
     rt::Executor,
     service::service_fn,
-    tcp::{server::TcpListener},
+    tcp::server::TcpListener,
     telemetry::tracing,
     tls::boring::{
         client::EmulateTlsProfileLayer,
-        server::{TlsAcceptorData, TlsAcceptorLayer},
+        server::{BoringServerConfigExt, CacheKind, ServerCertIssuerData, TlsAcceptorLayer},
     },
-    ua::{
-        layer::emulate::UserAgentEmulateLayer,
-        profile::UserAgentDatabase,
-    },
-    Layer,
-    Service,
+    ua::{layer::emulate::UserAgentEmulateLayer, profile::UserAgentDatabase},
 };
+use serde::Serialize;
 use std::convert::Infallible;
 use std::fmt::{Debug, Formatter};
 use std::net::IpAddr;
@@ -43,38 +56,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use chrono::Utc;
-use rama::net::address::{Host, HostWithPort, ProxyAddress};
-use serde::Serialize;
-use rama::http::ws::handshake::server::WebSocketMatcher;
-use rama::matcher::Matcher;
-use rama::net::tls::server::SniRouter;
+use tokio::sync::watch;
 use tracing::{info, info_span};
 use tracing_futures::Instrument;
-use tokio::sync::watch;
 use uuid::Uuid;
-use crate::filters::FilterManager;
-use crate::filters::http_client::OutboundHttpClientPool;
-use crate::mitm::capture::CapturePaths;
-use crate::mitm::client::{new_upstream_client, UpstreamClient};
-use crate::mitm::dynamic_ca::DynamicIssuer;
-use crate::mitm::flow::dispatcher::UpstreamFlowResult;
-use crate::mitm::flow::{
-    CaptureService,
-    FlowDispatcher,
-    FlowDispatcherConfig,
-    FlowEvent,
-    TunnelFailed,
-    FlowEventPublisher,
-    UpstreamFlowClient,
-    TunnelFailureCapture,
-    flow_marks_from_connect_action,
-};
-use crate::mitm::flow::state_store::FilterStateLimits;
-use crate::mitm::flow::websocket::dispatch_websocket_handshake;
-use crate::mitm::store_metadata::DbState;
-use crate::mitm::tls_sni::ConnectSniRouterService;
-use crate::options::{FilterStateConfig, ProxyMode, UaProfile};
 
 // const PROXY_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 // const WEBSOCKET_NOT_CAPTURED_MESSAGE: &str =
@@ -142,9 +127,9 @@ pub struct PacketMarked {
     pub color: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Extension)]
 struct State {
-    mitm_tls_service_data: TlsAcceptorData,
+    mitm_tls_service_data: TlsServerConfig,
     _exec: Executor,
     flow_dispatcher: FlowDispatcher,
     proxy_mode: ProxyMode,
@@ -161,10 +146,7 @@ impl Debug for State {
 }
 
 impl UpstreamFlowClient for UpstreamClient {
-    fn serve(
-        &self,
-        req: Request,
-    ) -> Pin<Box<dyn Future<Output = UpstreamFlowResult> + Send + '_>> {
+    fn serve(&self, req: Request) -> Pin<Box<dyn Future<Output = UpstreamFlowResult> + Send + '_>> {
         Box::pin(async move {
             let result = UpstreamClient::serve(self, req).await;
 
@@ -177,13 +159,8 @@ impl UpstreamFlowClient for UpstreamClient {
         })
     }
 
-    fn serve_websocket(
-        &self,
-        req: Request,
-    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
-        Box::pin(async move {
-            UpstreamClient::serve_websocket(self, req).await
-        })
+    fn serve_websocket(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move { UpstreamClient::serve_websocket(self, req).await })
     }
 }
 
@@ -212,7 +189,7 @@ pub async fn mitm_proxy_main(
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> AnyResult<()> {
     let mitm_tls_service_data =
-        new_mitm_tls_service_data().await.context("generate self-signed mitm tls cert")?;
+        new_mitm_tls_service_data().context("generate self-signed mitm tls cert")?;
 
     info!(
         ?proxy_mode,
@@ -220,7 +197,7 @@ pub async fn mitm_proxy_main(
         connect_ua = ?connect_ua,
         "Starting mitm proxy with upstream proxy"
     );
-    
+
     let upstream_client = new_upstream_client(
         proxy_mode,
         ua_profile,
@@ -236,7 +213,10 @@ pub async fn mitm_proxy_main(
             let ip = a.split(":").next().unwrap();
             let port = a.split(":").last().unwrap();
             Some(ProxyAddress {
-                address: HostWithPort { host: Host::from(IpAddr::from_str(ip)?), port: port.parse()? },
+                address: HostWithPort {
+                    host: Host::from(IpAddr::from_str(ip)?),
+                    port: port.parse()?,
+                },
                 credential: None,
                 protocol: Some(rama::net::Protocol::HTTP),
             })
@@ -301,22 +281,23 @@ pub async fn mitm_proxy_main(
 
     let dbstate = store_dbstate.clone();
 
-    let handle = graceful.spawn_task_fn(async move |guard| {
+    let handle = graceful.spawn_task_fn(async move |_guard| {
         info!("starting tcp proxy on {service_port}");
-        let tcp_service = TcpListener::build()
-            .bind(service_port)
+        let tcp_service = TcpListener::build(exec.clone())
+            .bind_address(service_port)
             .await
             .expect("bind tcp proxy to {service_port}}");
 
         let http_mitm_service = new_http_mitm_proxy(&state);
-        let http_service = HttpServer::auto(exec).service(
+        let http_service = HttpServer::auto(exec.clone()).service(
             (
                 TraceLayer::new_for_http(),
                 // See [`ProxyAuthLayer::with_labels`] for more information,
                 // e.g. can also be used to extract upstream proxy filters
                 // ProxyAuthLayer::new(Basic::new_static("john", "secret")),
                 ConsumeErrLayer::default(),
-                UpgradeLayer::new(
+                UpgradeLayer::new_with_services(
+                    exec.clone(),
                     MethodMatcher::CONNECT,
                     service_fn(http_connect_accept),
                     service_fn(http_connect_proxy),
@@ -326,11 +307,7 @@ pub async fn mitm_proxy_main(
         );
 
         tcp_service
-            .serve_graceful(
-                guard,
-                AddInputExtensionLayer::new(state)
-                    .into_layer(http_service),
-            )
+            .serve(AddInputExtensionLayer::new(state).into_layer(http_service))
             .await;
     });
 
@@ -340,20 +317,23 @@ pub async fn mitm_proxy_main(
     Ok(())
 }
 
-async fn http_connect_accept(mut req: Request) -> Result<(Response, Request), Response> {
-    let authority = match RequestContext::try_from(&req).map(|ctx| ctx.host_with_port()) {
-        Ok(authority) => authority,
-        Err(err) => {
-            tracing::error!("error extracting authority: {err:?}");
+async fn http_connect_accept(
+    req: Request,
+) -> Result<rama::http::layer::upgrade::UpgradeResponse<Request, Response>, Response> {
+    let authority = match req.authority() {
+        Some(authority) => {
+            HostWithPort::new(authority.host.clone(), authority.port_u16().unwrap_or(443))
+        }
+        None => {
+            tracing::error!("error extracting CONNECT authority");
             return Err(StatusCode::BAD_REQUEST.into_response());
         }
     };
 
-    if let Some(state) = req.extensions().get::<State>().cloned() {
-        let connect = state.flow_dispatcher.dispatch_connect_filters(
-            authority.host.to_string(),
-            authority.port,
-        );
+    if let Some(state) = req.extensions().get_ref::<State>().cloned() {
+        let connect = state
+            .flow_dispatcher
+            .dispatch_connect_filters(authority.host.to_string(), authority.port);
 
         if connect.action.drop_tunnel {
             let status = connect
@@ -363,11 +343,7 @@ async fn http_connect_accept(mut req: Request) -> Result<(Response, Request), Re
 
             let now = Utc::now();
             let id = Uuid::new_v4().to_string();
-            let seq = state
-                .flow_dispatcher
-                .seq()
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
+            let seq = state.flow_dispatcher.seq().fetch_add(1, Ordering::Relaxed) + 1;
             let flow_key = format!("{seq:06}-{}", &id[..8]);
 
             let marks = flow_marks_from_connect_action(&connect.action);
@@ -377,8 +353,10 @@ async fn http_connect_accept(mut req: Request) -> Result<(Response, Request), Re
                 None => "CONNECT dropped by Roto".to_string(),
             };
 
-            state.flow_dispatcher.events().publish(FlowEvent::TunnelFailed(
-                TunnelFailed {
+            state
+                .flow_dispatcher
+                .events()
+                .publish(FlowEvent::TunnelFailed(TunnelFailed {
                     id,
                     seq,
                     flow_key,
@@ -389,34 +367,29 @@ async fn http_connect_accept(mut req: Request) -> Result<(Response, Request), Re
                     stage,
                     error,
                     marks,
-                },
-            ));
+                }));
 
             info!(
-                    server.address = %authority.host,
-                    server.port = %authority.port,
-                    reject_status = ?status,
-                    marks = connect.action.marks.len(),
-                    "CONNECT tunnel blocked by roto connect_action before upstream"
-                );
+                server.address = %authority.host,
+                server.port = %authority.port,
+                reject_status = ?status,
+                marks = connect.action.marks.len(),
+                "CONNECT tunnel blocked by roto connect_action before upstream"
+            );
 
             if let Some(status) = status {
-                return Err(
-                    Response::builder()
-                        .status(status)
-                        .header("connection", "close")
-                        .body(Body::empty())
-                        .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response())
-                );
-            }
-
-            return Err(
-                Response::builder()
-                    .status(StatusCode::FORBIDDEN)
+                return Err(Response::builder()
+                    .status(status)
                     .header("connection", "close")
                     .body(Body::empty())
-                    .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response())
-            );
+                    .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response()));
+            }
+
+            return Err(Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("connection", "close")
+                .body(Body::empty())
+                .unwrap_or_else(|_| StatusCode::FORBIDDEN.into_response()));
         }
     }
 
@@ -426,12 +399,22 @@ async fn http_connect_accept(mut req: Request) -> Result<(Response, Request), Re
         "accept CONNECT (lazy): insert proxy target into context",
     );
 
-    req.extensions_mut().insert(ProxyTarget(authority));
-
-    Ok((StatusCode::OK.into_response(), req))
+    let state = req
+        .extensions()
+        .get_ref::<State>()
+        .cloned()
+        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    let executor = crate::mitm::websocket::ConnectionExecutor(state._exec.clone());
+    // 0.4 deliberately does not copy request extensions onto upgraded transport.
+    Ok(
+        rama::http::layer::upgrade::UpgradeResponse::new(req, StatusCode::OK.into_response())
+            .with_extension(ProxyTarget(authority))
+            .with_extension(state)
+            .with_extension(executor),
+    )
 }
 
-async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
+async fn http_connect_proxy(upgraded: Upgraded) -> Result<(), Infallible> {
     // In the past we deleted the request context here, as such:
     // ```
     // ctx.remove::<RequestContext>();
@@ -442,38 +425,30 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
     // and should be preserved. This is especially important,
     // as we otherwise might not be able to define the scheme/authority
     // for upstream http requests.
-    // let state = upgraded.extensions().get::<State>().unwrap();
+    // let state = upgraded.extensions().get_ref::<State>().unwrap();
     let client_target = upgraded
         .extensions()
-        .get::<ProxyTarget>()
+        .get_ref::<ProxyTarget>()
         .map(|pt| pt.0.clone());
 
-    let span = info_span!(
-        "https_conn",
-        ?client_target,
-    );
+    let span = info_span!("https_conn", ?client_target,);
 
     async move {
-        let state = upgraded
-            .extensions()
-            .get::<State>()
-            .cloned()
-            .unwrap();
+        let state = upgraded.extensions().get_ref::<State>().cloned().unwrap();
 
         let http_service = new_http_mitm_proxy(&state);
 
         if let Some(target) = client_target.as_ref()
             && let Some(upstream_proxy) = state
-            .flow_dispatcher
-            .upstream_proxy_for_host(&target.host.to_string(), Some(target.port)) {
-            upgraded.extensions_mut().insert(upstream_proxy);
+                .flow_dispatcher
+                .upstream_proxy_for_host(&target.host.to_string(), Some(target.port))
+        {
+            upgraded
+                .extensions()
+                .insert(rama::net::client::ProxyRoutes::from(upstream_proxy));
         }
 
-        let executor = upgraded
-            .extensions()
-            .get::<Executor>()
-            .cloned()
-            .unwrap_or_default();
+        let executor = state._exec.clone();
         // let http_transport_service = HttpServer::auto(executor).service(http_service);
         let mut http_transport_server = HttpServer::auto(executor);
         http_transport_server
@@ -484,34 +459,28 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
         let https_service = TlsAcceptorLayer::new(
             upgraded
                 .extensions()
-                .get::<State>()
+                .get_ref::<State>()
                 .unwrap()
                 .mitm_tls_service_data
                 .clone(),
         )
-            .with_store_client_hello(true)
-            .into_layer(http_transport_service);
+        .with_store_client_hello(true)
+        .into_layer(http_transport_service);
 
-        let sni_router = SniRouter::new(ConnectSniRouterService {
-            https_service,
-        });
+        let sni_router = SniRouter::new(ConnectSniRouterService { https_service });
 
         if let Err(err) = sni_router.serve(upgraded).await {
             let error = format!("{err:#}");
 
             tracing::error!(
-                    error = %error,
-                    "error serving HTTPS connection"
-                );
+                error = %error,
+                "error serving HTTPS connection"
+            );
 
             if let Some(target) = client_target.as_ref() {
                 let now = Utc::now();
                 let id = Uuid::new_v4().to_string();
-                let seq = state
-                    .flow_dispatcher
-                    .seq()
-                    .fetch_add(1, Ordering::Relaxed)
-                    + 1;
+                let seq = state.flow_dispatcher.seq().fetch_add(1, Ordering::Relaxed) + 1;
                 let flow_key = format!("{seq:06}-{}", &id[..8]);
                 let flow_dir = state
                     .flow_dispatcher
@@ -532,16 +501,23 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
                     error: error.clone(),
                 };
 
-                if let Err(err) = state.flow_dispatcher.capture().commit_tunnel_failure(capture).await {
+                if let Err(err) = state
+                    .flow_dispatcher
+                    .capture()
+                    .commit_tunnel_failure(capture)
+                    .await
+                {
                     tracing::error!(
-                            error = ?err,
-                            flow_key = %flow_key,
-                            "failed to persist TLS tunnel failure"
-                        );
+                        error = ?err,
+                        flow_key = %flow_key,
+                        "failed to persist TLS tunnel failure"
+                    );
                 }
 
-                state.flow_dispatcher.events().publish(FlowEvent::TunnelFailed(
-                    TunnelFailed {
+                state
+                    .flow_dispatcher
+                    .events()
+                    .publish(FlowEvent::TunnelFailed(TunnelFailed {
                         id,
                         seq,
                         flow_key,
@@ -552,61 +528,243 @@ async fn http_connect_proxy(mut upgraded: Upgraded) -> Result<(), Infallible> {
                         stage: "TLS accept / handshake".to_string(),
                         error,
                         marks: Vec::new(),
-                    },
-                ));
+                    }));
             }
         }
 
         Ok(())
     }
-        .instrument(span)
-        .await
+    .instrument(span)
+    .await
 }
 
-fn new_http_mitm_proxy(state: &State) -> impl Service<Request, Output = Response, Error = Infallible> {
-    (
-        MapResponseBodyLayer::new(Body::new),
-        TraceLayer::new_for_http(),
-        ConsumeErrLayer::default(),
-        UserAgentEmulateLayer::new(state.ua_db.clone())
-            .with_try_auto_detect_user_agent(state.proxy_mode == ProxyMode::Emulate)
-            .with_is_optional(true),
-        // RemoveResponseHeaderLayer::hop_by_hop(),
-        // RemoveRequestHeaderLayer::hop_by_hop(),
-        CompressionLayer::new(),
-        AddRequiredRequestHeadersLayer::new(),
-        EmulateTlsProfileLayer::new(),
+fn new_http_mitm_proxy(
+    state: &State,
+) -> impl Service<Request, Output = Response, Error = Infallible> + Clone {
+    Arc::new(
+        (
+            MapResponseBodyLayer::new(Body::new),
+            TraceLayer::new_for_http(),
+            ConsumeErrLayer::default(),
+            UserAgentEmulateLayer::new(state.ua_db.clone())
+                .with_try_auto_detect_user_agent(state.proxy_mode == ProxyMode::Emulate)
+                .with_is_optional(true),
+            // RemoveResponseHeaderLayer::hop_by_hop(),
+            // RemoveRequestHeaderLayer::hop_by_hop(),
+            CompressionLayer::new(),
+            AddRequiredRequestHeadersLayer::new(),
+            EmulateTlsProfileLayer::new(),
+        )
+            .into_layer(service_fn(http_mitm_proxy)),
     )
-        .into_layer(service_fn(http_mitm_proxy))
 }
 
-async fn http_mitm_proxy(req: Request) -> Result<Response, Infallible> {
-    let state = req.extensions().get::<State>().cloned().unwrap();
+async fn http_mitm_proxy(mut req: Request) -> Result<Response, Infallible> {
+    let state = req.extensions().get_ref::<State>().cloned().unwrap();
+    // SNI contains no port. Preserve the CONNECT target's non-default port
+    // when Rama resolves an origin-form URI through TLS context.
+    if req.uri().port_u16().is_none()
+        && let Some(target) = req.extensions().get_ref::<ProxyTarget>().cloned()
+    {
+        req.uri_mut()
+            .set_scheme(rama::net::Protocol::HTTPS)
+            .set_host(target.0.host)
+            .set_port(target.0.port);
+    }
 
     if WebSocketMatcher::new().matches(None, &req) {
-        return Ok(dispatch_websocket_handshake(
-            &state.flow_dispatcher,
-            req,
-        ).await);
+        return Ok(dispatch_websocket_handshake(&state.flow_dispatcher, req).await);
     }
 
     state.flow_dispatcher.dispatch(req).await
 }
 
-
 // NOTE: for a production service you ideally use
 // an issued TLS cert (if possible via ACME). Or at the very least
 // load it in from memory/file, so that your clients can install the certificate for trust.
-async fn new_mitm_tls_service_data() -> Result<TlsAcceptorData, OpaqueError> {
+fn new_mitm_tls_service_data() -> Result<TlsServerConfig, BoxError> {
     let dynamic_issuer = DynamicIssuer::default();
 
-    let tls_server_config = ServerConfig::new(
-        ServerAuth::CertIssuer(rama::net::tls::server::ServerCertIssuerData {
-            kind: dynamic_issuer.into(),
-            cache_kind: rama::net::tls::server::CacheKind::Disabled,
-        }));
+    Ok(TlsServerConfig::new()
+        .with_alpn_http_auto()
+        .with_keylog(rama::tls::KeyLogIntent::Environment)
+        .with_cert_issuer(
+            ServerCertIssuerData::new(dynamic_issuer).with_cache_kind(CacheKind::Disabled),
+        ))
+}
 
-    tls_server_config
-        .try_into()
-        .context("create tls server config")
+#[derive(Debug, Clone, Extension)]
+struct ProxyTarget(HostWithPort);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rama::tls::client::{ServerVerifyMode, TlsClientConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn connect_mitm_preserves_state_and_captures_upstream_tls() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(connect_roundtrip());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn connect_roundtrip() {
+        let origin_listener = TcpListener::bind_address("127.0.0.1:0", Executor::default())
+            .await
+            .unwrap();
+        let origin_address = origin_listener.local_addr().unwrap();
+        let origin = TlsAcceptorLayer::new(TlsServerConfig::generated_http_auto().unwrap())
+            .into_layer(HttpServer::auto(Executor::default()).service(service_fn(
+                async |_: Request| Ok::<_, Infallible>(Response::new(Body::from("mitm-ok"))),
+            )));
+        let origin_task = tokio::spawn(origin_listener.serve(origin));
+
+        let root = std::env::temp_dir().join(format!("inspect-rama04-{}", Uuid::new_v4()));
+        let paths = CapturePaths {
+            db_path: root.join("index.sqlite"),
+            flows_dir: root.join("flows"),
+            filters_dir: root.join("filters"),
+            generated_filters_dir: root.join("filters/generated"),
+            quarantine_filters_dir: root.join("filters/quarantine"),
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(&paths.flows_dir).unwrap();
+        std::fs::create_dir_all(&paths.filters_dir).unwrap();
+        let db = DbState::new_for_paths(&paths).await.unwrap();
+        let capture = CaptureService::new(db.clone(), paths.clone(), None, Vec::new());
+        let (events, _receiver) = FlowEventPublisher::channel(32);
+        let client = new_upstream_client(
+            ProxyMode::Observe,
+            UaProfile::Auto,
+            None,
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        let dispatcher = FlowDispatcher::new(
+            capture,
+            FilterManager::new(&paths.filters_dir),
+            events,
+            Arc::new(client),
+            Arc::new(AtomicU64::new(0)),
+            None,
+            FlowDispatcherConfig {
+                upstream_proxy: None,
+                upstream_no_proxy: Arc::from([]),
+                body_save_limit_bytes: None,
+                body_omit_content_types: Arc::from([]),
+                stream_body_threshold_bytes: usize::MAX,
+                sse_capture_max_events: 10,
+                sse_capture_max_event_bytes: 1024,
+                filter_state_enabled: false,
+                filter_state_limits: FilterStateLimits::default(),
+            },
+        );
+        let state = State {
+            mitm_tls_service_data: TlsServerConfig::new().with_alpn_http_1().with_cert_issuer(
+                ServerCertIssuerData::new(DynamicIssuer::ephemeral())
+                    .with_cache_kind(CacheKind::Disabled),
+            ),
+            _exec: Executor::default(),
+            flow_dispatcher: dispatcher,
+            proxy_mode: ProxyMode::Observe,
+            ua_db: Arc::new(UserAgentDatabase::try_embedded().unwrap()),
+        };
+        let listener = TcpListener::bind_address("127.0.0.1:0", Executor::default())
+            .await
+            .unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let service = HttpServer::auto(Executor::default()).service(
+            (
+                ConsumeErrLayer::default(),
+                UpgradeLayer::new_with_services(
+                    Executor::default(),
+                    MethodMatcher::CONNECT,
+                    service_fn(http_connect_accept),
+                    service_fn(http_connect_proxy),
+                ),
+            )
+                .into_layer(new_http_mitm_proxy(&state)),
+        );
+        let proxy_task =
+            tokio::spawn(listener.serve(AddInputExtensionLayer::new(state).into_layer(service)));
+
+        let mut stream = tokio::net::TcpStream::connect(proxy_address).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "CONNECT localhost:{} HTTP/1.1\r\nHost: localhost:{}\r\n\r\n",
+                    origin_address.port(),
+                    origin_address.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(
+                tokio::time::timeout(Duration::from_secs(10), stream.read_u8())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert!(head.len() < 8192);
+        }
+        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 200"));
+        let config = TlsClientConfig::default_http()
+            .with_alpn_http_1()
+            .with_server_verify(ServerVerifyMode::Disable);
+        let mut tls = rama::tls::boring::client::TlsConnectorData::try_from(&config).unwrap();
+        // Low-level TLS needs an explicit peer identity for SNI.
+        tls.server_name = Some(Host::from_static("localhost"));
+        let mut stream =
+            rama::tls::boring::client::tls_connect(rama::ServiceInput::new(stream), Some(tls))
+                .await
+                .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "GET /probe HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+                    origin_address.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&response).contains("mitm-ok"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        let mut found = false;
+        for entry in std::fs::read_dir(&paths.flows_dir).unwrap() {
+            let path = entry.unwrap().path().join("ssl_tls.json");
+            if let Ok(text) = std::fs::read_to_string(path) {
+                assert!(text.contains("client_random"), "{text}");
+                assert!(text.contains("certificate_chain"), "{text}");
+                found = true;
+            }
+        }
+        assert!(found, "expected persisted TLS capture");
+        proxy_task.abort();
+        origin_task.abort();
+        db.db_pool.close().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

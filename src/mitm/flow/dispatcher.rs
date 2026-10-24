@@ -1,91 +1,54 @@
+use bytes::Bytes;
+use chrono::Utc;
+use rama::extensions::ExtensionsRef;
+use rama::http;
+use rama::http::body::util::BodyExt;
+use rama::{
+    error::BoxError,
+    http::{
+        Body, Request, Response, StatusCode, StreamingBody, Version,
+        body::{Frame, SizeHint},
+        service::web::response::IntoResponse,
+    },
+    net::{AuthorityInputExt, ProtocolInputExt, address::ProxyAddress},
+    telemetry::tracing,
+};
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
-use bytes::Bytes;
-use chrono::Utc;
-use http_body_util::BodyExt;
-use rama::{
-    error::OpaqueError,
-    http::{
-        body::{Frame, SizeHint},
-        service::web::response::IntoResponse,
-        Body,
-        Request,
-        Response,
-        StatusCode,
-        StreamingBody,
-        Version,
-    },
-    net::{
-        address::ProxyAddress,
-        http::RequestContext,
-    },
-    telemetry::tracing,
-};
-use rama::extensions::{ExtensionsMut, ExtensionsRef};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::filters::{
-    ConnectAction,
-    FilterConnect,
-    FilterConnectView,
-    FilterFlow,
-    FilterHeader,
-    FilterManager,
-    FilterRequest,
-    FilterResponseView,
-    FilterSyntheticResponse
+use crate::filters::engine::json::capture::{
+    json_filter_flow_bytes, json_filter_request_bytes, json_filter_response_bytes,
 };
 use crate::filters::http_client::OutboundHttpClientPool;
-use crate::filters::engine::json::capture::{
-    json_filter_flow_bytes,
-    json_filter_request_bytes,
-    json_filter_response_bytes
-};
-use crate::filters::types::{
-    OutboundHttpBodySource,
-    OutboundHttpJob
-};
-use crate::mitm::flow::{
-    CaptureService,
-    EffectiveRequestCapture,
-    EffectiveResponseCapture,
-    FlowEventPublisher,
-    FlowMark,
-    ResponseCommit,
-    ResponseOrigin
+use crate::filters::types::{OutboundHttpBodySource, OutboundHttpJob};
+use crate::filters::{
+    ConnectAction, FilterConnect, FilterConnectView, FilterFlow, FilterHeader, FilterManager,
+    FilterRequest, FilterResponseView, FilterSyntheticResponse,
 };
 use crate::mitm::flow::capture_service::build_response_head_text;
-use crate::mitm::flow::event_bridge::{
-    publish_request_committed,
-    publish_response_committed
-};
+use crate::mitm::flow::event_bridge::{publish_request_committed, publish_response_committed};
 use crate::mitm::flow::filter_bridge::{
-    apply_request_patch,
-    apply_response_patch,
-    build_filter_request,
-    build_filter_response,
-    flow_marks_from_request_action,
-    flow_marks_from_response_action,
-    normalized_content_type,
+    apply_request_patch, apply_response_patch, build_filter_request, build_filter_response,
+    flow_marks_from_request_action, flow_marks_from_response_action, normalized_content_type,
 };
 use crate::mitm::flow::filter_runtime::FlowFilterRuntime;
 use crate::mitm::flow::http_types::{
-    RequestDispatchContext,
-    RequestDispatchOutput,
-    ResponseDispatchInput,
-    ResponseFilterDispatchOutput
-};
-use crate::mitm::flow::state_store::FilterStateLimits;
-use crate::mitm::flow::tls_metadata::{
-    tls_sni_from_extensions,
-    upstream_tls_info_from_extensions
+    RequestDispatchContext, RequestDispatchOutput, ResponseDispatchInput,
+    ResponseFilterDispatchOutput,
 };
 use crate::mitm::flow::sse_capture::SseCapture;
+use crate::mitm::flow::state_store::FilterStateLimits;
+use crate::mitm::flow::tls_metadata::{tls_sni_from_extensions, upstream_tls_info_from_extensions};
+use crate::mitm::flow::{
+    CaptureService, EffectiveRequestCapture, EffectiveResponseCapture, FlowEventPublisher,
+    FlowMark, ResponseCommit, ResponseOrigin,
+};
 
 pub type FlowDispatchResult<T> = Result<T, FlowDispatchError>;
 
@@ -110,15 +73,9 @@ pub struct UpstreamFlowResult {
 }
 
 pub trait UpstreamFlowClient: Send + Sync {
-    fn serve(
-        &self,
-        req: Request,
-    ) -> Pin<Box<dyn Future<Output = UpstreamFlowResult> + Send + '_>>;
+    fn serve(&self, req: Request) -> Pin<Box<dyn Future<Output = UpstreamFlowResult> + Send + '_>>;
 
-    fn serve_websocket(
-        &self,
-        req: Request,
-    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>>;
+    fn serve_websocket(&self, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>>;
 }
 
 #[derive(Clone, Debug)]
@@ -167,7 +124,9 @@ impl FlowDispatcher {
                 filters,
                 capture.clone(),
                 config.filter_state_enabled.then(|| {
-                    crate::mitm::flow::state_store::FilterStateStore::new(config.filter_state_limits.clone())
+                    crate::mitm::flow::state_store::FilterStateStore::new(
+                        config.filter_state_limits.clone(),
+                    )
                 }),
             ),
             capture,
@@ -202,11 +161,7 @@ impl FlowDispatcher {
         port: Option<u16>,
     ) -> Option<ProxyAddress> {
         if upstream_no_proxy_matches(&self.config.upstream_no_proxy, host, port) {
-            tracing::debug!(
-                host,
-                port,
-                "bypass upstream proxy due to upstream_no_proxy"
-            );
+            tracing::debug!(host, port, "bypass upstream proxy due to upstream_no_proxy");
             return None;
         }
 
@@ -237,10 +192,7 @@ impl FlowDispatcher {
         host: String,
         port: u16,
     ) -> ConnectDispatchOutput {
-        let connect_view = FilterConnectView {
-            host: &host,
-            port,
-        };
+        let connect_view = FilterConnectView { host: &host, port };
 
         let connect = FilterConnect {
             id: Uuid::new_v4().to_string(),
@@ -252,11 +204,7 @@ impl FlowDispatcher {
 
         let action = self.filters.run_connect_filters(&connect_view, &connect);
 
-        ConnectDispatchOutput {
-            host,
-            port,
-            action,
-        }
+        ConnectDispatchOutput { host, port, action }
     }
 
     async fn dispatch_http(&self, req: Request) -> FlowDispatchResult<Response> {
@@ -264,9 +212,13 @@ impl FlowDispatcher {
 
         let ctx = self.new_request_context(&req_parts)?;
 
-        if let Some(upstream_proxy) = self.upstream_proxy_for_host(&ctx.host, request_port(&ctx)) {
-            req_parts.extensions_mut().insert(upstream_proxy);
-        }
+        let route = self
+            .upstream_proxy_for_host(&ctx.host, request_port(&ctx))
+            .map(rama::net::client::ProxyRoute::from)
+            .unwrap_or(rama::net::client::ProxyRoute::Direct);
+        req_parts
+            .extensions()
+            .insert(rama::net::client::ProxyRoutes::new([route]));
 
         let mut req_body_bytes = collect_body(req_body, "request").await;
 
@@ -275,11 +227,7 @@ impl FlowDispatcher {
             marks,
             synthetic_response,
             drop_client_response,
-        } = self.dispatch_request_filters(
-            &ctx,
-            &mut req_parts,
-            &mut req_body_bytes,
-        );
+        } = self.dispatch_request_filters(&ctx, &mut req_parts, &mut req_body_bytes);
 
         if drop_client_response {
             tracing::info!(
@@ -292,29 +240,17 @@ impl FlowDispatcher {
                 "request dropped by request filter before upstream"
             );
 
-            self.commit_request(
-                &ctx,
-                &req_parts,
-                &req_body_bytes,
-                marks,
-            )
+            self.commit_request(&ctx, &req_parts, &req_body_bytes, marks)
                 .await?;
 
-            return Ok(
-                Response::builder()
-                    .status(444)
-                    .header("connection", "close")
-                    .body(Body::from(Bytes::new()))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-            );
+            return Ok(Response::builder()
+                .status(444)
+                .header("connection", "close")
+                .body(Body::from(Bytes::new()))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()));
         }
 
-        self.commit_request(
-            &ctx,
-            &req_parts,
-            &req_body_bytes,
-            marks,
-        )
+        self.commit_request(&ctx, &req_parts, &req_body_bytes, marks)
             .await?;
 
         if let Some(synthetic_response) = synthetic_response {
@@ -331,11 +267,7 @@ impl FlowDispatcher {
         let upstream_req = Request::from_parts(req_parts, Body::from(req_body_bytes));
         let upstream_result = self.upstream_client.serve(upstream_req).await;
 
-        self.dispatch_upstream_response(
-            ctx,
-            filter_request,
-            upstream_result,
-        )
+        self.dispatch_upstream_response(ctx, filter_request, upstream_result)
             .await
     }
 
@@ -350,13 +282,12 @@ impl FlowDispatcher {
 
         let tls_sni = tls_sni_from_extensions(req_parts.extensions());
 
-        let req_ctx = RequestContext::try_from(req_parts).map_err(|err| {
-            tracing::error!("error extracting request context: {err:?}");
-            FlowDispatchError::BadRequest
-        })?;
-
-        let protocol = req_ctx.protocol.to_string();
-        let host = req_ctx.authority.host.to_string();
+        let authority = req_parts.authority().ok_or(FlowDispatchError::BadRequest)?;
+        let protocol = req_parts
+            .protocol()
+            .ok_or(FlowDispatchError::BadRequest)?
+            .to_string();
+        let host = authority.host.to_string();
         let uri = req_parts.uri.clone();
         let method = req_parts.method.to_string();
 
@@ -375,6 +306,7 @@ impl FlowDispatcher {
             tls_sni,
             protocol,
             host,
+            path: uri.path_or_root().into_owned(),
             uri,
             method,
         })
@@ -399,10 +331,9 @@ impl FlowDispatcher {
             ctx.tls_sni.clone(),
         );
 
-        let request_action = self.filters.run_request_filters(
-            &req_filter_view,
-            &filter_request,
-        );
+        let request_action = self
+            .filters
+            .run_request_filters(&req_filter_view, &filter_request);
 
         let marks = flow_marks_from_request_action(&request_action);
         let synthetic_response = request_action.synthetic_response;
@@ -478,7 +409,7 @@ impl FlowDispatcher {
             ),
             response,
         )
-            .await
+        .await
     }
 
     async fn dispatch_upstream_response(
@@ -487,8 +418,7 @@ impl FlowDispatcher {
         filter_request: FilterRequest,
         upstream_result: UpstreamFlowResult,
     ) -> FlowDispatchResult<Response> {
-        let (input, response) =
-            split_upstream_result(ctx, filter_request, upstream_result);
+        let (input, response) = split_upstream_result(ctx, filter_request, upstream_result);
 
         self.dispatch_response(input, response).await
     }
@@ -521,10 +451,7 @@ impl FlowDispatcher {
                     .await;
             }
             ResponseBodyMode::Probe => {
-                match probe_response_body(
-                    res_body,
-                    self.config.stream_body_threshold_bytes,
-                ).await {
+                match probe_response_body(res_body, self.config.stream_body_threshold_bytes).await {
                     ProbedResponseBody::Collected(body) => body,
                     ProbedResponseBody::Stream { prefix, rest } => {
                         return self
@@ -543,12 +470,8 @@ impl FlowDispatcher {
             }
         };
 
-        let response_filter_output = self.dispatch_response_filters(
-            &input,
-            &mut res_parts,
-            &mut res_body_bytes,
-            elapsed_ms,
-        );
+        let response_filter_output =
+            self.dispatch_response_filters(&input, &mut res_parts, &mut res_body_bytes, elapsed_ms);
 
         let response_marks = response_filter_output.marks;
         let drop_client_response = response_filter_output.drop_client_response;
@@ -561,38 +484,26 @@ impl FlowDispatcher {
         self.dispatch_outbound_http(outbound_http);
 
         let response_commit = self
-            .commit_response(
-                &input,
-                &res_parts,
-                &res_body_bytes,
-                elapsed_ms,
-            )
+            .commit_response(&input, &res_parts, &res_body_bytes, elapsed_ms)
             .await?;
 
-        self.dispatch_completed_filters(
-            &input,
-            &res_parts,
-            &res_body_bytes,
-            elapsed_ms,
-        );
+        self.dispatch_completed_filters(&input, &res_parts, &res_body_bytes, elapsed_ms);
 
         publish_response_committed(&self.events, &response_commit, response_marks);
 
         if drop_client_response {
             tracing::info!(
-                    id = %input.id,
-                    flow_key = %input.flow_key,
-                    status = %res_parts.status,
-                    "response dropped by response filter"
-                );
-
-            return Ok(
-                Response::builder()
-                    .status(444)
-                    .header("connection", "close")
-                    .body(Body::from(Bytes::new()))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+                id = %input.id,
+                flow_key = %input.flow_key,
+                status = %res_parts.status,
+                "response dropped by response filter"
             );
+
+            return Ok(Response::builder()
+                .status(444)
+                .header("connection", "close")
+                .body(Body::from(Bytes::new()))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()));
         }
 
         Ok(Response::from_parts(res_parts, Body::from(res_body_bytes)))
@@ -727,12 +638,8 @@ impl FlowDispatcher {
             content_type: res_content_type.as_deref(),
         };
 
-        let filter_response = build_filter_response(
-            res_parts,
-            res_body_bytes,
-            input.upstream_status,
-            elapsed_ms,
-        );
+        let filter_response =
+            build_filter_response(res_parts, res_body_bytes, input.upstream_status, elapsed_ms);
 
         let filter_flow = FilterFlow {
             id: input.id.to_string(),
@@ -742,11 +649,9 @@ impl FlowDispatcher {
             response: Some(filter_response.clone()),
         };
 
-        let response_action = self.filters.run_response_filters(
-            &res_filter_view,
-            &filter_flow,
-            &filter_response,
-        );
+        let response_action =
+            self.filters
+                .run_response_filters(&res_filter_view, &filter_flow, &filter_response);
 
         let response_marks = flow_marks_from_response_action(&response_action);
         let outbound_http = response_action.outbound_http;
@@ -770,9 +675,9 @@ impl FlowDispatcher {
 
         let Some(pool) = self.outbound_http_pool.as_ref() else {
             tracing::warn!(
-                        count = jobs.len(),
-                        "drop outbound http jobs: outbound http client pool is not configured"
-                    );
+                count = jobs.len(),
+                "drop outbound http jobs: outbound http client pool is not configured"
+            );
             return;
         };
 
@@ -788,8 +693,7 @@ impl FlowDispatcher {
         res_parts: &rama::http::response::Parts,
         res_body_bytes: &Bytes,
     ) -> Vec<OutboundHttpJob> {
-        jobs
-            .into_iter()
+        jobs.into_iter()
             .map(|job| self.resolve_outbound_http_job(job, input, res_parts, res_body_bytes))
             .collect()
     }
@@ -876,16 +780,10 @@ enum ResponseBodyMode {
 
 enum ProbedResponseBody {
     Collected(Bytes),
-    Stream {
-        prefix: Bytes,
-        rest: Body,
-    },
+    Stream { prefix: Bytes, rest: Body },
 }
 
-async fn probe_response_body(
-    mut body: Body,
-    threshold: usize,
-) -> ProbedResponseBody {
+async fn probe_response_body(mut body: Body, threshold: usize) -> ProbedResponseBody {
     let mut buffered = Vec::new();
 
     while let Some(frame_result) = body.frame().await {
@@ -925,7 +823,7 @@ struct PrefixThenBody {
 
 impl StreamingBody for PrefixThenBody {
     type Data = Bytes;
-    type Error = OpaqueError;
+    type Error = BoxError;
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
@@ -971,7 +869,7 @@ struct SseCaptureBody {
 
 impl StreamingBody for SseCaptureBody {
     type Data = Bytes;
-    type Error = OpaqueError;
+    type Error = BoxError;
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
@@ -1061,25 +959,27 @@ impl StreamingResponseFinalize {
                 interrupted,
             );
 
-            let response_commit = match this.capture.commit_response(EffectiveResponseCapture {
-                id: this.input.id,
-                seq: this.input.seq,
-                flow_key: this.input.flow_key.clone(),
-                flow_dir: this.input.flow_dir.clone(),
-                status: this.parts.status,
-                version: this.parts.version,
-                headers: this.parts.headers.clone(),
-                body_bytes: body,
-                body_size_override: Some(streamed_bytes as i64),
-                body_truncated_override: Some(true),
-                elapsed_ms,
-                origin: this.input.origin.clone(),
-                upstream_status: this.input.upstream_status,
-                upstream_remote_addr: this.input.upstream_remote_addr.clone(),
-                tls_sni: this.input.tls_sni.clone(),
-                tls_upstream: this.input.tls_upstream.clone(),
-                upstream_error_message: this.input.upstream_error_message.clone(),
-            })
+            let response_commit = match this
+                .capture
+                .commit_response(EffectiveResponseCapture {
+                    id: this.input.id,
+                    seq: this.input.seq,
+                    flow_key: this.input.flow_key.clone(),
+                    flow_dir: this.input.flow_dir.clone(),
+                    status: this.parts.status,
+                    version: this.parts.version,
+                    headers: this.parts.headers.clone(),
+                    body_bytes: body,
+                    body_size_override: Some(streamed_bytes as i64),
+                    body_truncated_override: Some(true),
+                    elapsed_ms,
+                    origin: this.input.origin.clone(),
+                    upstream_status: this.input.upstream_status,
+                    upstream_remote_addr: this.input.upstream_remote_addr.clone(),
+                    tls_sni: this.input.tls_sni.clone(),
+                    tls_upstream: this.input.tls_upstream.clone(),
+                    upstream_error_message: this.input.upstream_error_message.clone(),
+                })
                 .await
             {
                 Ok(commit) => commit,
@@ -1108,7 +1008,7 @@ struct StreamingCaptureBody {
 
 impl StreamingBody for StreamingCaptureBody {
     type Data = Bytes;
-    type Error = OpaqueError;
+    type Error = BoxError;
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
@@ -1206,8 +1106,7 @@ fn streaming_response_capture_notice(
     streamed_bytes: usize,
     interrupted: bool,
 ) -> Bytes {
-    let content_type = normalized_content_type(headers)
-        .unwrap_or_else(|| "<unknown>".to_string());
+    let content_type = normalized_content_type(headers).unwrap_or_else(|| "<unknown>".to_string());
     let content_length = content_length(headers)
         .map(|len| len.to_string())
         .unwrap_or_else(|| "<unknown>".to_string());
@@ -1387,15 +1286,8 @@ fn raw_filter_request_bytes(req: &FilterRequest) -> Vec<u8> {
     out
 }
 
-fn raw_response_bytes(
-    res_parts: &rama::http::response::Parts,
-    res_body_bytes: &Bytes,
-) -> Vec<u8> {
-    let mut out = build_response_head_text(
-        res_parts.version,
-        res_parts.status,
-        &res_parts.headers,
-    )
+fn raw_response_bytes(res_parts: &rama::http::response::Parts, res_body_bytes: &Bytes) -> Vec<u8> {
+    let mut out = build_response_head_text(res_parts.version, res_parts.status, &res_parts.headers)
         .into_bytes();
 
     out.extend_from_slice(res_body_bytes);
@@ -1420,13 +1312,11 @@ fn request_target(req: &FilterRequest) -> String {
 }
 
 fn request_port(ctx: &RequestDispatchContext) -> Option<u16> {
-    ctx.uri
-        .port_u16()
-        .or_else(|| match ctx.protocol.as_str() {
-            "http" => Some(80),
-            "https" => Some(443),
-            _ => None,
-        })
+    ctx.uri.port_u16().or_else(|| match ctx.protocol.as_str() {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    })
 }
 
 fn upstream_no_proxy_matches(patterns: &[String], host: &str, port: Option<u16>) -> bool {
@@ -1446,7 +1336,8 @@ fn upstream_no_proxy_matches(patterns: &[String], host: &str, port: Option<u16>)
         let (pattern_host, pattern_port) = split_no_proxy_pattern(pattern);
 
         if let Some(pattern_port) = pattern_port
-            && Some(pattern_port) != port {
+            && Some(pattern_port) != port
+        {
             return false;
         }
 
@@ -1457,13 +1348,15 @@ fn upstream_no_proxy_matches(patterns: &[String], host: &str, port: Option<u16>)
 fn split_no_proxy_pattern(pattern: &str) -> (&str, Option<u16>) {
     if let Some(stripped) = pattern.strip_prefix('[')
         && let Some((host, rest)) = stripped.split_once(']')
-        && let Some(port) = rest.strip_prefix(':').and_then(|value| value.parse().ok()) {
+        && let Some(port) = rest.strip_prefix(':').and_then(|value| value.parse().ok())
+    {
         return (host, Some(port));
     }
 
     if let Some((host, port)) = pattern.rsplit_once(':')
         && !host.contains(':')
-        && let Ok(port) = port.parse() {
+        && let Ok(port) = port.parse()
+    {
         return (host, Some(port));
     }
 
@@ -1502,40 +1395,80 @@ mod upstream_no_proxy_tests {
     fn matches_exact_host() {
         let patterns = vec!["localhost".to_string()];
 
-        assert!(upstream_no_proxy_matches(&patterns, "localhost", Some(8080)));
-        assert!(!upstream_no_proxy_matches(&patterns, "example.com", Some(8080)));
+        assert!(upstream_no_proxy_matches(
+            &patterns,
+            "localhost",
+            Some(8080)
+        ));
+        assert!(!upstream_no_proxy_matches(
+            &patterns,
+            "example.com",
+            Some(8080)
+        ));
     }
 
     #[test]
     fn matches_case_insensitive_host() {
         let patterns = vec!["LOCALHOST".to_string()];
 
-        assert!(upstream_no_proxy_matches(&patterns, "localhost", Some(8080)));
+        assert!(upstream_no_proxy_matches(
+            &patterns,
+            "localhost",
+            Some(8080)
+        ));
     }
 
     #[test]
     fn matches_wildcard_suffix() {
         let patterns = vec!["*.example.com".to_string()];
 
-        assert!(upstream_no_proxy_matches(&patterns, "api.example.com", Some(443)));
-        assert!(upstream_no_proxy_matches(&patterns, "example.com", Some(443)));
-        assert!(!upstream_no_proxy_matches(&patterns, "not-example.com", Some(443)));
+        assert!(upstream_no_proxy_matches(
+            &patterns,
+            "api.example.com",
+            Some(443)
+        ));
+        assert!(upstream_no_proxy_matches(
+            &patterns,
+            "example.com",
+            Some(443)
+        ));
+        assert!(!upstream_no_proxy_matches(
+            &patterns,
+            "not-example.com",
+            Some(443)
+        ));
     }
 
     #[test]
     fn matches_dot_suffix() {
         let patterns = vec![".example.com".to_string()];
 
-        assert!(upstream_no_proxy_matches(&patterns, "api.example.com", Some(443)));
-        assert!(upstream_no_proxy_matches(&patterns, "example.com", Some(443)));
+        assert!(upstream_no_proxy_matches(
+            &patterns,
+            "api.example.com",
+            Some(443)
+        ));
+        assert!(upstream_no_proxy_matches(
+            &patterns,
+            "example.com",
+            Some(443)
+        ));
     }
 
     #[test]
     fn matches_port_specific_pattern() {
         let patterns = vec!["localhost:8080".to_string()];
 
-        assert!(upstream_no_proxy_matches(&patterns, "localhost", Some(8080)));
-        assert!(!upstream_no_proxy_matches(&patterns, "localhost", Some(8081)));
+        assert!(upstream_no_proxy_matches(
+            &patterns,
+            "localhost",
+            Some(8080)
+        ));
+        assert!(!upstream_no_proxy_matches(
+            &patterns,
+            "localhost",
+            Some(8081)
+        ));
     }
 
     #[test]

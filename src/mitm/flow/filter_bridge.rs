@@ -1,25 +1,16 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use http::HeaderValue;
-use rama::http::StatusCode;
+use rama::http::{self, HeaderName, HeaderValue, StatusCode};
 use uuid::Uuid;
 
 use crate::filters::{
-    ConnectAction,
-    FilterBody,
-    FilterHeader,
-    FilterRequest,
-    FilterRequestPatch,
-    FilterResponse,
-    FilterResponsePatch,
-    RequestAction,
-    ResponseAction,
+    ConnectAction, FilterBody, FilterHeader, FilterRequest, FilterRequestPatch, FilterResponse,
+    FilterResponsePatch, RequestAction, ResponseAction,
 };
 use crate::mitm::flow::FlowMark;
-use crate::mitm::flow::capture_service::version_to_string;
 use crate::mitm::flow::body_encoding::decoded_body_or_raw;
-
+use crate::mitm::flow::capture_service::version_to_string;
 
 pub(crate) fn flow_marks_from_request_action(action: &RequestAction) -> Vec<FlowMark> {
     let mut marks = Vec::new();
@@ -96,7 +87,7 @@ pub(crate) fn merge_response_action(dst: &mut ResponseAction, src: ResponseActio
     dst.drop_client_response = dst.drop_client_response || src.drop_client_response;
 }
 
-fn filter_headers_from_header_map(headers: &http::HeaderMap) -> Vec<FilterHeader> {
+fn filter_headers_from_header_map(headers: &rama::http::HeaderMap) -> Vec<FilterHeader> {
     headers
         .iter()
         .map(|(name, value)| FilterHeader {
@@ -129,17 +120,27 @@ pub(crate) fn build_filter_request(
         method: parts.method.as_str().to_string(),
         scheme: req_protocol.to_string(),
         host: req_host.to_string(),
-        path: parts.uri.path().to_string(),
-        query: parts.uri.query().unwrap_or_default().to_string(),
+        path: parts
+            .uri
+            .path()
+            .map(|path| path.as_encoded_str().to_string())
+            .unwrap_or_else(|| "/".to_owned()),
+        query: parts
+            .uri
+            .query()
+            .map(|query| query.to_string())
+            .unwrap_or_default(),
         version: version_to_string(parts.version),
         headers: filter_headers_from_header_map(&parts.headers),
         body: FilterBody {
             bytes: req_body_bytes.to_vec(),
-            text: std::str::from_utf8(body_text_bytes.as_ref()).ok().map(str::to_string),
+            text: std::str::from_utf8(body_text_bytes.as_ref())
+                .ok()
+                .map(str::to_string),
             content_type: normalized_content_type(&parts.headers),
             encoding: parts
                 .headers
-                .get(http::header::CONTENT_ENCODING)
+                .get(rama::http::header::CONTENT_ENCODING)
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string),
             truncated: false,
@@ -162,11 +163,13 @@ pub(crate) fn build_filter_response(
         headers: filter_headers_from_header_map(&parts.headers),
         body: FilterBody {
             bytes: res_body_bytes.to_vec(),
-            text: std::str::from_utf8(body_text_bytes.as_ref()).ok().map(str::to_string),
+            text: std::str::from_utf8(body_text_bytes.as_ref())
+                .ok()
+                .map(str::to_string),
             content_type: normalized_content_type(&parts.headers),
             encoding: parts
                 .headers
-                .get(http::header::CONTENT_ENCODING)
+                .get(rama::http::header::CONTENT_ENCODING)
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string),
             truncated: false,
@@ -176,9 +179,9 @@ pub(crate) fn build_filter_response(
     }
 }
 
-pub(crate) fn normalized_content_type(headers: &http::HeaderMap) -> Option<String> {
+pub(crate) fn normalized_content_type(headers: &rama::http::HeaderMap) -> Option<String> {
     headers
-        .get(http::header::CONTENT_TYPE)
+        .get(rama::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
         .map(str::trim)
@@ -207,49 +210,45 @@ pub(crate) fn apply_request_patch(
     }
 
     if patch.path.is_some() || patch.query.is_some() {
-        let current_path = parts.uri.path().to_string();
-        let current_query = parts.uri.query().map(str::to_string);
+        let current_path = parts
+            .uri
+            .path()
+            .map(|path| path.as_encoded_str().to_string())
+            .unwrap_or_else(|| "/".to_owned());
+
+        let current_query = parts.uri.query().map(|query| query.to_string());
 
         let next_path = patch.path.unwrap_or(current_path);
         let next_query = patch.query.or(current_query);
 
-        let path_and_query = match next_query {
-            Some(query) if !query.is_empty() => format!("{next_path}?{query}"),
-            _ => next_path,
+        let parsed_query = match next_query {
+            Some(query) if !query.is_empty() => match query.parse() {
+                Ok(query) => Some(query),
+                Err(err) => {
+                    tracing::warn!(
+                        query,
+                        error = ?err,
+                        "ignored invalid request query from filter patch"
+                    );
+                    return;
+                }
+            },
+            _ => None,
         };
 
-        match path_and_query.parse() {
-            Ok(path_and_query) => {
-                let mut uri_parts = parts.uri.clone().into_parts();
-                uri_parts.path_and_query = Some(path_and_query);
+        parts.uri.set_path(next_path);
 
-                match http::Uri::from_parts(uri_parts) {
-                    Ok(uri) => {
-                        parts.uri = uri;
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            error = ?err,
-                            "ignored invalid request uri from filter patch"
-                        );
-                    }
-                }
+        match parsed_query {
+            Some(query) => {
+                parts.uri.set_query(query);
             }
-            Err(err) => {
-                tracing::warn!(
-                    path_and_query,
-                    error = ?err,
-                    "ignored invalid request path/query from filter patch"
-                );
+            None => {
+                parts.uri.unset_query();
             }
         }
     }
 
-    apply_header_patch(
-        &mut parts.headers,
-        patch.set_headers,
-        patch.remove_headers,
-    );
+    apply_header_patch(&mut parts.headers, patch.set_headers, patch.remove_headers);
 
     if let Some(body_patch) = patch.body {
         *body = Bytes::from(body_patch.bytes);
@@ -259,7 +258,9 @@ pub(crate) fn apply_request_patch(
         if let Some(content_type) = body_patch.content_type {
             match HeaderValue::from_str(&content_type) {
                 Ok(value) => {
-                    parts.headers.insert(http::header::CONTENT_TYPE, value);
+                    parts
+                        .headers
+                        .insert(rama::http::header::CONTENT_TYPE, value);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -293,11 +294,7 @@ pub(crate) fn apply_response_patch(
         }
     }
 
-    apply_header_patch(
-        &mut parts.headers,
-        patch.set_headers,
-        patch.remove_headers,
-    );
+    apply_header_patch(&mut parts.headers, patch.set_headers, patch.remove_headers);
 
     if let Some(body_patch) = patch.body {
         *body = Bytes::from(body_patch.bytes);
@@ -307,7 +304,9 @@ pub(crate) fn apply_response_patch(
         if let Some(content_type) = body_patch.content_type {
             match HeaderValue::from_str(&content_type) {
                 Ok(value) => {
-                    parts.headers.insert(http::header::CONTENT_TYPE, value);
+                    parts
+                        .headers
+                        .insert(rama::http::header::CONTENT_TYPE, value);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -322,12 +321,12 @@ pub(crate) fn apply_response_patch(
 }
 
 fn apply_header_patch(
-    headers: &mut http::HeaderMap,
+    headers: &mut rama::http::HeaderMap,
     set_headers: Vec<FilterHeader>,
     remove_headers: Vec<String>,
 ) {
     for name in remove_headers {
-        match http::HeaderName::from_bytes(name.as_bytes()) {
+        match rama::http::HeaderName::from_bytes(name.as_bytes()) {
             Ok(name) => {
                 headers.remove(name);
             }
@@ -342,7 +341,7 @@ fn apply_header_patch(
     }
 
     for header in set_headers {
-        let name = match http::HeaderName::from_bytes(header.name.as_bytes()) {
+        let name = match HeaderName::from_bytes(header.name.as_bytes()) {
             Ok(name) => name,
             Err(err) => {
                 tracing::warn!(

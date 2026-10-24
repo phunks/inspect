@@ -1,6 +1,6 @@
 [package]
 name = "inspect"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 
 #[profile.release]
@@ -14,7 +14,9 @@ strip = false
 split-debuginfo = "packed"
 
 [dependencies]
-rama = { path = "ext/rama", version = "0.3.0-alpha.4", features = ["http", "boring", "http-full", "ua", "compression"]  }
+#rama = { path = "ext/rama", version = "=0.4.0", features = ["http", "boring", "http-full", "ua", "compression", "ring"] }
+#rama = { git = "https://github.com/plabayo/rama.git", rev = "36a1eb0d2915936e1a63c95a250029fe4eb854b7", features = ["http", "boring", "http-full", "ua", "compression", "ring"] }
+rama = { version = "0.4", features = ["http", "boring", "http-full", "ua", "compression", "ring"] }
 bytes = "1.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -22,8 +24,7 @@ uuid = { version = "1.23", features = ["v4"] }
 anyhow = "1.0"
 sqlx = { version = "0.9", features = ["sqlite", "json", "chrono", "_sqlite", "runtime-tokio"] }
 http = "1.4"
-http-body-util = "0.1"
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 time = "0.3"
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1.1"
@@ -48,9 +49,6 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 toml = "1.1"
-roto = { git = "https://codeberg.org/NLnetLabs/roto", features = ["selinux-fix"] }
+roto = "0.13"
 json-patch = "4.2"
 terminal-colorsaurus = "1"
-
-[patch.crates-io]
-rama-tls-boring = { path = "ext/rama/rama-tls-boring" }

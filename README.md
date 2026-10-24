@@ -219,10 +219,11 @@ Initialize patched vendored dependencies first:
 just setup-ext
 ```
 
-This clones and patches:
+This initializes:
 
 - `ext/rama`
-  - `patches/rama-0.3.0-alpha.4-tls-fix.patch`
+  - Unmodified `rama-0.4.0`; TLS metadata capture and response propagation live in inspect.
+  - The alpha4 TLS patch is retained under `patches/` for historical reference only.
 - `ext/tuie`
   - `patches/tuie-0.2.4-scroll-fix.patch`
 
@@ -233,25 +234,19 @@ just recreate-ext
 ```
 
 `reset-ext` resets the vendored repositories and removes untracked files before
-reapplying the patches. `recreate-ext` deletes and reclones them. Save any local
+reapplying the Tuie patch. `recreate-ext` deletes and reclones them. Save any local
 changes before running either command.
 
-`just check-patches` checks whether the patches can be applied to an **unpatched**
-checkout. It is not a post-setup health check: it is expected to fail when the
-patches have already been applied. To check whether the current patches can be
-reversed in a patched checkout without changing any files, run from the project root:
+`just check-rama` verifies the pinned Rama release and absence of local changes.
+`just check-patches` also checks whether the Tuie patch applies to an **unpatched**
+checkout. To verify an already patched Tuie checkout without changing files:
 
 ```bash
-git -C ext/rama apply -R --check ../../patches/rama-0.3.0-alpha.4-tls-fix.patch
 git -C ext/tuie apply -R --check ../../patches/tuie-0.2.4-scroll-fix.patch
 ```
 
-`just setup-ext` is intended for initial setup; rerunning it on an already patched
-Rama checkout fails its forward patch check.
-
-If you modify the vendored dependencies, update the patch files with:
+If you modify Tuie, update its patch with:
 ```bash
-just update-rama-patch
 just update-tuie-patch
 ```
 
@@ -575,7 +570,7 @@ Supported conditions:
   - Prefixes: `status:`, `stat:`, `s:`
   - Exact status codes such as `200`
   - Status classes such as `2xx` or `5xx`
-  - No response: `s:-`, `s:none`, `s:----`  
+  - No response: `s:-`, `s:none`, `s:----`
     Also works with `status:` and `stat:`
 - HTTP method
   - Prefixes: `method:`, `meth:`, `m:`
@@ -885,7 +880,6 @@ Depending on where you capture packets and which TLS session you want to decrypt
 - Non-text bodies may be rendered as hex for inspection.
 - The packet detail view includes the flow directory for easier correlation with on-disk captures.
 - Auto-scroll follows appended items even when scrollbar remains at top. [^1]
-- Upstream TLS metadata in `ssl_tls.json` depends on the local rama TLS patch. [^2]
+- Upstream TLS metadata in `ssl_tls.json` is captured by inspect's connector and response layers; Rama 0.4 requires no local TLS patch.
 
 [^1]: Temporary patch applied to tuie 0.2 crate `patches/tuie-0.2.4-scroll-fix.patch`
-[^2]: Temporary patch applied to rama 0.3.0-alpha.4 crate `patches/rama-0.3.0-alpha.4-tls-fix.patch`

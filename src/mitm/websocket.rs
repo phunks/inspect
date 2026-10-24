@@ -1,5 +1,7 @@
 use std::future::Future;
 
+use rama::extensions::ExtensionsRef;
+use rama::net::http::TargetHttpVersion;
 use rama::{
     Service,
     error::BoxError,
@@ -7,10 +9,7 @@ use rama::{
     futures::SinkExt,
     http::{
         Body, Request, Response, StatusCode,
-        conn::TargetHttpVersion,
-        headers::{
-            SecWebSocketExtensions, TypedHeader as _,
-        },
+        headers::{SecWebSocketExtensions, TypedHeader as _},
         io::upgrade,
         service::web::response::IntoResponse,
         ws::{
@@ -19,10 +18,11 @@ use rama::{
             protocol::{Role, WebSocketConfig},
         },
     },
-    rt::Executor,
     telemetry::tracing,
 };
-use rama::extensions::ExtensionsRef;
+
+#[derive(Debug, Clone, rama::extensions::Extension)]
+pub(crate) struct ConnectionExecutor(pub rama::rt::Executor);
 
 pub async fn mitm_websocket<S>(client: &S, req: Request) -> Response
 where
@@ -41,10 +41,9 @@ where
     let req = Request::from_parts(parts, body);
     let guard = req
         .extensions()
-        .get::<Executor>()
-        .and_then(|exec| exec.guard())
+        .get_ref::<ConnectionExecutor>()
+        .and_then(|exec| exec.0.guard())
         .cloned();
-
     let cancel = async move {
         match guard {
             Some(guard) => guard.downgrade().into_cancelled().await,
@@ -59,7 +58,7 @@ where
     );
     tracing::debug!("forcing egress http connection as {target_version:?} to ensure WS upgrade");
 
-    let mut extensions = Extensions::new();
+    let extensions = Extensions::new();
     extensions.insert(TargetHttpVersion(target_version));
 
     let mut handshake = match client
@@ -85,7 +84,11 @@ where
         }
     };
 
-    let (egress_socket, mut response_parts, _) = egress_socket.into_parts();
+    let rama::http::ws::handshake::client::ClientWebSocket {
+        socket: egress_socket,
+        response: mut response_parts,
+        ..
+    } = egress_socket;
 
     // Do not advertise permessage-deflate to the downstream client.
     let _ = response_parts

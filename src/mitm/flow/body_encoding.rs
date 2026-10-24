@@ -1,13 +1,13 @@
+use rama::http;
 use std::io::Read;
 
 use bytes::Bytes;
 use flate2::read;
-use http::{HeaderMap, HeaderValue};
+use rama::http::{HeaderMap, HeaderValue};
 
 pub(crate) fn decoded_body_or_raw(headers: &HeaderMap, body: &Bytes) -> Bytes {
-    decode_content_encoded_body(headers, body).unwrap_or_else(|| {
-        decode_body_by_magic_number(body).unwrap_or_else(|| body.clone())
-    })
+    decode_content_encoded_body(headers, body)
+        .unwrap_or_else(|| decode_body_by_magic_number(body).unwrap_or_else(|| body.clone()))
 }
 
 pub(crate) fn decode_content_encoded_body(headers: &HeaderMap, body: &Bytes) -> Option<Bytes> {

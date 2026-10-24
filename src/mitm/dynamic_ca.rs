@@ -5,18 +5,14 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use rama::crypto::dep::rcgen::{BasicConstraints,
-                               CertificateParams,
-                               DistinguishedName,
-                               DnType,
-                               ExtendedKeyUsagePurpose,
-                               IsCa, Issuer, KeyPair,
-                               KeyUsagePurpose};
-use rama::error::OpaqueError;
-use rama::net::tls::client::ClientHello;
-use rama::net::tls::DataEncoding;
-use rama::net::tls::server::{DynamicCertIssuer, ServerAuthData};
+use rama::crypto::dep::rcgen::{
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose,
+};
+use rama::crypto::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rama::error::{BoxError, BoxErrorExt};
 use rama::telemetry::tracing;
+use rama::tls::server::{CertificateIssuanceContext, DynamicCertIssuer, ServerAuthData};
 use time::OffsetDateTime;
 
 const DEFAULT_CA_DIR_NAME: &str = ".inspect";
@@ -53,13 +49,23 @@ impl Ca {
         let key_pair = KeyPair::from_pem(&key_pem).context("parse CA private key PEM")?;
         let issuer = Issuer::new(ca_params()?, key_pair);
 
-        Ok(Self { _ca_cert_der: ca_cert_der, issuer })
+        Ok(Self {
+            _ca_cert_der: ca_cert_der,
+            issuer,
+        })
     }
 
-    fn sign_for_host(&self, host: &str, issuer: &Issuer<'_, KeyPair>) -> anyhow::Result<ServerAuthData> {
+    fn sign_for_host(
+        &self,
+        host: &str,
+        issuer: &Issuer<'_, KeyPair>,
+    ) -> anyhow::Result<ServerAuthData> {
         let mut params = CertificateParams::new(vec![host.to_string()])?;
         params.is_ca = IsCa::NoCa;
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.use_authority_key_identifier_extension = true;
         params.distinguished_name = {
@@ -75,18 +81,12 @@ impl Ca {
         let key_pair = KeyPair::generate()?;
         let cert = params.signed_by(&key_pair, issuer)?;
 
+        let private_key_pem = key_pair.serialize_pem();
+        let private_key = PrivateKeyDer::from_pem_slice(private_key_pem.as_bytes())?;
+
         Ok(ServerAuthData {
-            private_key: DataEncoding::Pem(
-                key_pair
-                    .serialize_pem()
-                    .try_into()
-                    .expect("valid PEM key"),
-            ),
-            cert_chain: DataEncoding::Pem(
-                cert.pem()
-                    .try_into()
-                    .expect("valid PEM cert"),
-            ),
+            private_key,
+            cert_chain: vec![CertificateDer::from(cert.der().to_vec())],
             ocsp: None,
         })
     }
@@ -161,10 +161,8 @@ fn ensure_ca_artifacts(dir: &Path, force: bool) -> Result<()> {
 
     std::fs::write(&key, key_pair.serialize_pem())
         .with_context(|| format!("write {}", key.display()))?;
-    std::fs::write(&crt, cert.pem())
-        .with_context(|| format!("write {}", crt.display()))?;
-    std::fs::write(&der, cert.der())
-        .with_context(|| format!("write {}", der.display()))?;
+    std::fs::write(&crt, cert.pem()).with_context(|| format!("write {}", crt.display()))?;
+    std::fs::write(&der, cert.der()).with_context(|| format!("write {}", der.display()))?;
 
     let fp = cert.der();
     let sha256_b64 = base64::engine::general_purpose::STANDARD.encode(fp);
@@ -183,12 +181,13 @@ pub struct DynamicIssuer {
 impl DynamicCertIssuer for DynamicIssuer {
     async fn issue_cert(
         &self,
-        client_hello: ClientHello,
-        _server_name: Option<rama::net::address::Domain>,
-    ) -> Result<ServerAuthData, OpaqueError> {
-        let sni = match client_hello.ext_server_name() {
+        context: CertificateIssuanceContext,
+    ) -> Result<ServerAuthData, BoxError> {
+        let sni = match context.client_hello.ext_server_name() {
             Some(domain) => domain.to_string(),
-            None => return Err(OpaqueError::from_display("missing SNI")),
+            None => {
+                return Err(BoxError::from_static_str("missing SNI"));
+            }
         };
 
         if let Some(data) = self.cache.read().unwrap().get(&sni).cloned() {
@@ -199,9 +198,24 @@ impl DynamicCertIssuer for DynamicIssuer {
         let data = self
             .ca
             .sign_for_host(&sni, &ca.issuer)
-            .map_err(OpaqueError::from_display)?;
+            .map_err(|err| BoxError::from(err.to_string()))?;
 
         self.cache.write().unwrap().insert(sni, data.clone());
+
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+impl DynamicIssuer {
+    pub(crate) fn ephemeral() -> Self {
+        let key = KeyPair::generate().unwrap();
+        Self {
+            ca: Arc::new(Ca {
+                _ca_cert_der: Vec::new(),
+                issuer: Issuer::new(ca_params().unwrap(), key),
+            }),
+            cache: RwLock::new(HashMap::new()),
+        }
     }
 }

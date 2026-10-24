@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::path::PathBuf;
-use roto::{NoCtx, RotoString, TypedFunc, Val};
+use roto::{runtime::context::NoCtx, value::RotoString, TypedFunc, value::Val};
 use crate::filters::runtime::{
     RotoRequestActionData,
     RotoRequestData,

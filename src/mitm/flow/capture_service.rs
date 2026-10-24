@@ -3,8 +3,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use http::{HeaderMap, StatusCode, Version};
-use serde_json::{json, Value};
+use rama::http;
+use rama::http::{HeaderMap, StatusCode, Version};
+use serde_json::{Value, json};
 use std::io;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -12,7 +13,9 @@ use uuid::Uuid;
 use crate::mitm::capture::CapturePaths;
 use crate::mitm::flow::body_encoding::decoded_body_or_raw;
 use crate::mitm::flow::filter_bridge::normalized_content_type;
-use crate::mitm::store_metadata::{DbState, FilterExecStatMetadata, RequestMetadata, RequestResponseEvent, ResponseMetadata};
+use crate::mitm::store_metadata::{
+    DbState, FilterExecStatMetadata, RequestMetadata, RequestResponseEvent, ResponseMetadata,
+};
 
 #[derive(Clone, Debug)]
 pub struct TunnelFailureCapture {
@@ -75,10 +78,7 @@ impl CaptureService {
         }
     }
 
-    pub async fn commit_tunnel_failure(
-        &self,
-        capture: TunnelFailureCapture,
-    ) -> anyhow::Result<()> {
+    pub async fn commit_tunnel_failure(&self, capture: TunnelFailureCapture) -> anyhow::Result<()> {
         tokio::fs::create_dir_all(&capture.flow_dir)
             .await
             .with_context(|| format!("create tunnel failure dir {}", capture.flow_dir.display()))?;
@@ -98,8 +98,8 @@ impl CaptureService {
             "error": capture.error,
         });
 
-        let failure_json = serde_json::to_vec_pretty(&failure)
-            .context("serialize TLS tunnel failure metadata")?;
+        let failure_json =
+            serde_json::to_vec_pretty(&failure).context("serialize TLS tunnel failure metadata")?;
 
         tokio::fs::write(&ssl_tls_path, &failure_json)
             .await
@@ -150,9 +150,7 @@ impl CaptureService {
     ) -> anyhow::Result<RequestCommit> {
         tokio::fs::create_dir_all(&capture.flow_dir)
             .await
-            .with_context(|| {
-                format!("create flow dir {}", capture.flow_dir.display())
-            })?;
+            .with_context(|| format!("create flow dir {}", capture.flow_dir.display()))?;
 
         let request_head_path = capture.flow_dir.join("request.head");
         let request_body_path = capture
@@ -169,14 +167,10 @@ impl CaptureService {
 
         tokio::fs::write(&request_head_path, request_head_text)
             .await
-            .with_context(|| {
-                format!("write request head {}", request_head_path.display())
-            })?;
+            .with_context(|| format!("write request head {}", request_head_path.display()))?;
 
-        let omit_reason = body_omit_reason_by_content_type(
-            &capture.headers,
-            &self.body_omit_content_types,
-        );
+        let omit_reason =
+            body_omit_reason_by_content_type(&capture.headers, &self.body_omit_content_types);
 
         let stored_body_bytes = if let Some(reason) = omit_reason.as_deref() {
             Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
@@ -210,15 +204,13 @@ impl CaptureService {
                 self.body_save_limit_bytes
             },
         )
-            .await
-            .with_context(|| {
-                format!("write request body {}", request_body_path.display())
-            })?;
+        .await
+        .with_context(|| format!("write request body {}", request_body_path.display()))?;
 
         let time = rfc3999z(&capture.time);
         let epoch_ms = capture.time.timestamp_millis();
-        let uri = capture.uri.path().to_string();
-        let query_str = capture.uri.query().unwrap_or_default().to_string();
+        let uri = capture.uri.path_or_root().into_owned();
+        let query_str = capture.uri.query_or_empty().into_owned();
         let version = version_to_string(capture.version);
 
         self.dbstate
@@ -273,9 +265,7 @@ impl CaptureService {
     ) -> anyhow::Result<ResponseCommit> {
         tokio::fs::create_dir_all(&capture.flow_dir)
             .await
-            .with_context(|| {
-                format!("create flow dir {}", capture.flow_dir.display())
-            })?;
+            .with_context(|| format!("create flow dir {}", capture.flow_dir.display()))?;
 
         let response_head_path = capture.flow_dir.join("response.head");
         let response_body_path = capture
@@ -298,21 +288,14 @@ impl CaptureService {
 
         tokio::fs::write(&ssl_tls_path, ssl_tls_text)
             .await
-            .with_context(|| {
-                format!("write ssl tls info {}", ssl_tls_path.display())
-            })?;
+            .with_context(|| format!("write ssl tls info {}", ssl_tls_path.display()))?;
 
-        let response_head_text = build_response_head_text(
-            capture.version,
-            capture.status,
-            &capture.headers,
-        );
+        let response_head_text =
+            build_response_head_text(capture.version, capture.status, &capture.headers);
 
         tokio::fs::write(&response_head_path, response_head_text)
             .await
-            .with_context(|| {
-                format!("write response head {}", response_head_path.display())
-            })?;
+            .with_context(|| format!("write response head {}", response_head_path.display()))?;
 
         let body_size = capture
             .body_size_override
@@ -334,15 +317,13 @@ impl CaptureService {
                 msg.as_bytes(),
                 self.body_save_limit_bytes,
             )
-                .await
-                .with_context(|| {
-                    format!("write response error body {}", response_body_path.display())
-                })?;
+            .await
+            .with_context(|| {
+                format!("write response error body {}", response_body_path.display())
+            })?;
         } else {
-            let omit_reason = body_omit_reason_by_content_type(
-                &capture.headers,
-                &self.body_omit_content_types,
-            );
+            let omit_reason =
+                body_omit_reason_by_content_type(&capture.headers, &self.body_omit_content_types);
 
             let stored_body_bytes = if let Some(reason) = omit_reason.as_deref() {
                 Bytes::from(format!("<body omitted by inspect: {reason}>\n"))
@@ -380,10 +361,8 @@ impl CaptureService {
                     self.body_save_limit_bytes
                 },
             )
-                .await
-                .with_context(|| {
-                    format!("write response body {}", response_body_path.display())
-                })?;
+            .await
+            .with_context(|| format!("write response body {}", response_body_path.display()))?;
         }
 
         let status = capture.status.as_u16();
@@ -444,21 +423,23 @@ impl CaptureService {
     ) {
         self.dbstate
             .event_sender
-            .send(RequestResponseEvent::FilterExecStat(FilterExecStatMetadata {
-                id: id.to_string(),
-                seq: seq as i64,
-                flow_key: flow_key.to_string(),
-                phase: phase.to_string(),
-                filter_id: filter_id.map(str::to_string),
-                filter_name: filter_name.to_string(),
-                elapsed_us,
-                result_code,
-                state_read_bytes: resource_stats.state_read_bytes,
-                state_write_bytes: resource_stats.state_write_bytes,
-                state_items: resource_stats.state_items,
-                evicted_items: resource_stats.evicted_items,
-                limit_hit: i64::from(resource_stats.limit_hit),
-            }))
+            .send(RequestResponseEvent::FilterExecStat(
+                FilterExecStatMetadata {
+                    id: id.to_string(),
+                    seq: seq as i64,
+                    flow_key: flow_key.to_string(),
+                    phase: phase.to_string(),
+                    filter_id: filter_id.map(str::to_string),
+                    filter_name: filter_name.to_string(),
+                    elapsed_us,
+                    result_code,
+                    state_read_bytes: resource_stats.state_read_bytes,
+                    state_write_bytes: resource_stats.state_write_bytes,
+                    state_items: resource_stats.state_items,
+                    evicted_items: resource_stats.evicted_items,
+                    limit_hit: i64::from(resource_stats.limit_hit),
+                },
+            ))
             .unwrap_or_else(|err| {
                 tracing::error!("error sending filter exec stat event: {err:?}");
             });
@@ -472,7 +453,7 @@ pub struct EffectiveRequestCapture {
     pub time: DateTime<Utc>,
     pub flow_dir: PathBuf,
     pub method: String,
-    pub uri: http::Uri,
+    pub uri: rama::net::uri::Uri,
     pub version: Version,
     pub headers: HeaderMap,
     pub body_bytes: Bytes,
@@ -602,9 +583,7 @@ fn body_omit_reason_by_content_type(
     omit_content_types
         .iter()
         .find(|pattern| content_type.starts_with(pattern.as_str()))
-        .map(|pattern| {
-            format!("content-type {content_type} matched omit rule {pattern}")
-        })
+        .map(|pattern| format!("content-type {content_type} matched omit rule {pattern}"))
 }
 
 async fn write_body_limited(
@@ -617,11 +596,14 @@ async fn write_body_limited(
     out.extend_from_slice(&bytes[..take_len]);
 
     if bytes.len() > max_len {
-        out.extend_from_slice(format!(
-            "\n<< mitm truncated: max_len={} bytes, total={} bytes >>",
-            max_len,
-            bytes.len()
-        ).as_bytes());
+        out.extend_from_slice(
+            format!(
+                "\n<< mitm truncated: max_len={} bytes, total={} bytes >>",
+                max_len,
+                bytes.len()
+            )
+            .as_bytes(),
+        );
     }
 
     tokio::fs::write(path, out).await
@@ -667,7 +649,6 @@ pub(crate) fn version_to_string(v: Version) -> String {
         Version::HTTP_11 => "HTTP/1.1".into(),
         Version::HTTP_2 => "HTTP/2".into(),
         Version::HTTP_3 => "HTTP/3".into(),
-        other => format!("{other:?}"),
     }
 }
 
@@ -700,7 +681,7 @@ pub(crate) fn headers_to_json(headers: &HeaderMap) -> Value {
 
 pub(crate) fn build_request_head_text(
     method: &str,
-    uri: &http::Uri,
+    uri: &rama::net::uri::Uri,
     version: Version,
     headers: &HeaderMap,
     tls_sni: Option<&str>,
@@ -734,11 +715,7 @@ pub(crate) fn build_response_head_text(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str(&format!(
-        "{} {}\r\n",
-        version_to_string(version),
-        status
-    ));
+    out.push_str(&format!("{} {}\r\n", version_to_string(version), status));
 
     for (name, value) in headers {
         let value = value.to_str().unwrap_or("<binary>");

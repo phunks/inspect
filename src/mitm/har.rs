@@ -1,9 +1,9 @@
-use std::net::SocketAddr;
 use anyhow::{Context, Result};
-use http::StatusCode;
-use serde_json::{json, Map, Value};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use rama::http::StatusCode;
+use serde_json::{Map, Value, json};
 use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::mitm::capture::CapturePaths;
@@ -110,9 +110,9 @@ async fn select_har_rows(pool: &sqlx::SqlitePool) -> Result<Vec<HarRow>> {
         ORDER BY requests.seq ASC
         "#,
     )
-        .fetch_all(pool)
-        .await
-        .context("Failed to select HAR rows")?;
+    .fetch_all(pool)
+    .await
+    .context("Failed to select HAR rows")?;
 
     Ok(rows
         .into_iter()
@@ -175,8 +175,12 @@ async fn build_entry(row: HarRow) -> Value {
     let request_headers = parse_headers(row.request_headers.as_deref());
     let response_headers = parse_headers(row.response_headers.as_deref());
 
-    let request_headers_size = file_size(row.request_head_path.as_deref()).await.unwrap_or(-1);
-    let response_headers_size = file_size(row.response_head_path.as_deref()).await.unwrap_or(-1);
+    let request_headers_size = file_size(row.request_head_path.as_deref())
+        .await
+        .unwrap_or(-1);
+    let response_headers_size = file_size(row.response_head_path.as_deref())
+        .await
+        .unwrap_or(-1);
 
     let mut request = json!({
         "method": row.method.as_deref().unwrap_or("GET"),
@@ -194,10 +198,9 @@ async fn build_entry(row: HarRow) -> Value {
         "bodySize": row.request_body_size.unwrap_or(-1)
     });
 
-    if should_include_body(
-        row.request_body_save_unlimited,
-        row.request_body_truncated,
-    ) && let Some(body) = read_file(row.request_body_path.as_deref()).await {
+    if should_include_body(row.request_body_save_unlimited, row.request_body_truncated)
+        && let Some(body) = read_file(row.request_body_path.as_deref()).await
+    {
         let content = format_body_for_har(&request_headers, &body);
 
         let mut post_data = json!({
@@ -226,7 +229,8 @@ async fn build_entry(row: HarRow) -> Value {
     if should_include_body(
         row.response_body_save_unlimited,
         row.response_body_truncated,
-    ) && let Some(body) = read_file(row.response_body_path.as_deref()).await {
+    ) && let Some(body) = read_file(row.response_body_path.as_deref()).await
+    {
         response_content = format_body_for_har(&response_headers, &body);
     }
 
@@ -258,24 +262,23 @@ async fn build_entry(row: HarRow) -> Value {
     });
 
     if let Some((ip, port)) = split_remote_addr(row.upstream_remote_addr.as_deref())
-        && let Some(obj) = entry.as_object_mut() {
+        && let Some(obj) = entry.as_object_mut()
+    {
         obj.insert("serverIPAddress".to_string(), Value::String(ip));
         obj.insert("connection".to_string(), Value::String(port));
     }
 
     let comments = truncation_comments(&row);
     if !comments.is_empty()
-        && let Some(obj) = entry.as_object_mut() {
+        && let Some(obj) = entry.as_object_mut()
+    {
         obj.insert("comment".to_string(), Value::String(comments.join("; ")));
     }
 
     entry
 }
 
-fn should_include_body(
-    body_save_unlimited: Option<i64>,
-    body_truncated: Option<i64>,
-) -> bool {
+fn should_include_body(body_save_unlimited: Option<i64>, body_truncated: Option<i64>) -> bool {
     body_save_unlimited == Some(1) && body_truncated != Some(1)
 }
 
@@ -467,12 +470,16 @@ fn truncation_comments(row: &HarRow) -> Vec<String> {
     let mut comments = Vec::new();
 
     if !should_include_body(row.request_body_save_unlimited, row.request_body_truncated)
-        && row.request_body_size.unwrap_or(0) > 0 {
+        && row.request_body_size.unwrap_or(0) > 0
+    {
         comments.push("Request body text is omitted because body_save_unlimited was not enabled or body was truncated".to_string());
     }
 
-    if !should_include_body(row.response_body_save_unlimited, row.response_body_truncated)
-        && row.response_body_size.unwrap_or(0) > 0 {
+    if !should_include_body(
+        row.response_body_save_unlimited,
+        row.response_body_truncated,
+    ) && row.response_body_size.unwrap_or(0) > 0
+    {
         comments.push("Response body text is omitted because body_save_unlimited was not enabled or body was truncated".to_string());
     }
 
