@@ -57,7 +57,13 @@ jobs:
         env:
           RUSTFLAGS: -C strip=symbols
         run: |
-          cargo zigbuild --release --target ${{ matrix.job.target }}
+          target="${{ matrix.job.target }}"
+          # rama-dns 0.4 uses res_nsearch, exported under this name since glibc 2.34.
+          # GNU artifacts therefore require glibc >= 2.34 at runtime.
+          if [[ "$target" == *-linux-gnu ]]; then
+            target="$target.2.34"
+          fi
+          cargo zigbuild --release --target "$target"
 
       - name: Rename artifacts
         shell: bash

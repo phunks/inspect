@@ -1312,7 +1312,7 @@ fn request_target(req: &FilterRequest) -> String {
 }
 
 fn request_port(ctx: &RequestDispatchContext) -> Option<u16> {
-    ctx.uri.port_u16().or_else(|| match ctx.protocol.as_str() {
+    ctx.uri.port_u16().or(match ctx.protocol.as_str() {
         "http" => Some(80),
         "https" => Some(443),
         _ => None,

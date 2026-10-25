@@ -14,8 +14,6 @@ strip = false
 split-debuginfo = "packed"
 
 [dependencies]
-#rama = { path = "ext/rama", version = "=0.4.0", features = ["http", "boring", "http-full", "ua", "compression", "ring"] }
-#rama = { git = "https://github.com/plabayo/rama.git", rev = "36a1eb0d2915936e1a63c95a250029fe4eb854b7", features = ["http", "boring", "http-full", "ua", "compression", "ring"] }
 rama = { version = "0.4", features = ["http", "boring", "http-full", "ua", "compression", "ring"] }
 bytes = "1.11"
 serde = { version = "1.0", features = ["derive"] }

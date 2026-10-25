@@ -87,6 +87,16 @@ If a site is sensitive to these checks, try:
   fingerprint-related rather than deterministic proxy logic bugs
 
 
+### HTTPS request header limit
+
+The HTTP/2 server inside HTTPS CONNECT tunnels accepts decoded request header
+lists up to 64 KiB (including HTTP/2 per-field accounting), instead of Rama's
+default 16 KiB. This accommodates browser API requests with large cookies and
+authentication headers while retaining a finite limit. Requests exceeding this
+limit may receive an automatic `431 Request Header Fields Too Large` before the
+capture handler runs, so they do not appear as ordinary captured HTTP flows.
+HTTP/1 limits and upstream server/proxy limits are unchanged.
+
 ### Design principles
 
 - **Roto is a semantic MITM-termination layer.** It can inspect, mark, rewrite,

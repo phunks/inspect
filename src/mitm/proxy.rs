@@ -448,12 +448,7 @@ async fn http_connect_proxy(upgraded: Upgraded) -> Result<(), Infallible> {
                 .insert(rama::net::client::ProxyRoutes::from(upstream_proxy));
         }
 
-        let executor = state._exec.clone();
-        // let http_transport_service = HttpServer::auto(executor).service(http_service);
-        let mut http_transport_server = HttpServer::auto(executor);
-        http_transport_server
-            .http1_mut()
-            .set_header_read_timeout(Duration::from_secs(60));
+        let http_transport_server = new_https_http_server(state._exec.clone());
         let http_transport_service = http_transport_server.service(http_service);
 
         let https_service = TlsAcceptorLayer::new(
@@ -570,6 +565,24 @@ async fn http_mitm_proxy(mut req: Request) -> Result<Response, Infallible> {
     state.flow_dispatcher.dispatch(req).await
 }
 
+const HTTPS_MAX_HEADER_LIST_SIZE: u32 = 64 * 1024;
+
+fn new_https_http_server(
+    executor: Executor,
+) -> HttpServer<rama::http::core::server::conn::auto::Builder> {
+    let mut server = HttpServer::auto(executor);
+    server
+        .http1_mut()
+        .set_header_read_timeout(Duration::from_secs(60));
+    // Browser API requests can exceed Rama's default 16 KiB with cookies and
+    // authentication headers. Keep a finite limit, but allow these requests to
+    // reach the dispatcher/capture instead of receiving an automatic 431.
+    server
+        .h2_mut()
+        .set_max_header_list_size(HTTPS_MAX_HEADER_LIST_SIZE);
+    server
+}
+
 fn normalize_https_request_uri(req: &mut Request) {
     // SNI contains no port. Preserve the CONNECT target's non-default port
     // when Rama resolves an origin-form URI through TLS context.
@@ -612,6 +625,96 @@ mod tests {
     use super::*;
     use rama::tls::client::{ServerVerifyMode, TlsClientConfig};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn https_http2_header_limit() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        use rama::http::{BodyExtractExt, Version};
+
+                        // The default server reproduces the pre-dispatch 431;
+                        // the production builder accepts 32 KiB, but not 80 KiB.
+                        for (configured, size, expected) in [
+                            (
+                                false,
+                                32 * 1024,
+                                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                            ),
+                            (true, 32 * 1024, StatusCode::OK),
+                            (true, 80 * 1024, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE),
+                        ] {
+                            let listener =
+                                TcpListener::bind_address("127.0.0.1:0", Executor::default())
+                                    .await
+                                    .unwrap();
+                            let address = listener.local_addr().unwrap();
+                            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                            let builder = if configured {
+                                new_https_http_server(Executor::default())
+                            } else {
+                                HttpServer::auto(Executor::default())
+                            };
+                            let server = TlsAcceptorLayer::new(
+                                TlsServerConfig::generated_http_auto().unwrap(),
+                            )
+                            .into_layer(builder.service(service_fn(move |req: Request| {
+                                let tx = tx.clone();
+                                async move {
+                                    assert_eq!(req.version(), Version::HTTP_2);
+                                    tx.send(req.headers()["cookie"].as_bytes().len())
+                                        .await
+                                        .unwrap();
+                                    Ok::<_, Infallible>(Response::new(rama::http::Body::from("ok")))
+                                }
+                            })));
+                            let task = tokio::spawn(listener.serve(server));
+                            let client = new_upstream_client(
+                                ProxyMode::Observe,
+                                UaProfile::Auto,
+                                None,
+                                None,
+                                Duration::from_secs(5),
+                                Duration::from_secs(5),
+                            );
+                            let request = Request::builder()
+                                .uri(format!("https://localhost:{}/probe", address.port()))
+                                .version(Version::HTTP_2)
+                                .header("cookie", format!("session={}", "a".repeat(size)))
+                                .body(rama::http::Body::empty())
+                                .unwrap();
+                            request
+                                .extensions()
+                                .insert(rama::net::http::TargetHttpVersion(Version::HTTP_2));
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(10),
+                                Box::pin(client.serve(request)),
+                            )
+                            .await
+                            .unwrap();
+                            assert!(result.upstream_err.is_none(), "{:?}", result.upstream_err);
+                            assert_eq!(result.response.version(), Version::HTTP_2);
+                            assert_eq!(result.response.status(), expected);
+                            let body = result.response.into_body().try_into_string().await.unwrap();
+                            if expected == StatusCode::OK {
+                                assert_eq!(body, "ok");
+                                assert_eq!(rx.recv().await.unwrap(), size + "session=".len());
+                            } else {
+                                assert!(rx.try_recv().is_err(), "rejected request reached handler");
+                            }
+                            task.abort();
+                        }
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn https_uri_omits_default_port_in_http2_authority() {
