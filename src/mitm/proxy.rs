@@ -561,6 +561,16 @@ fn new_http_mitm_proxy(
 
 async fn http_mitm_proxy(mut req: Request) -> Result<Response, Infallible> {
     let state = req.extensions().get_ref::<State>().cloned().unwrap();
+    normalize_https_request_uri(&mut req);
+
+    if WebSocketMatcher::new().matches(None, &req) {
+        return Ok(dispatch_websocket_handshake(&state.flow_dispatcher, req).await);
+    }
+
+    state.flow_dispatcher.dispatch(req).await
+}
+
+fn normalize_https_request_uri(req: &mut Request) {
     // SNI contains no port. Preserve the CONNECT target's non-default port
     // when Rama resolves an origin-form URI through TLS context.
     if req.uri().port_u16().is_none()
@@ -572,11 +582,12 @@ async fn http_mitm_proxy(mut req: Request) -> Result<Response, Infallible> {
             .set_port(target.0.port);
     }
 
-    if WebSocketMatcher::new().matches(None, &req) {
-        return Ok(dispatch_websocket_handshake(&state.flow_dispatcher, req).await);
+    // Keep the effective HTTPS destination, but do not emit its default port
+    // in HTTP/2 :authority (or in the captured absolute URI).
+    if req.uri().scheme() == Some(&rama::net::Protocol::HTTPS) && req.uri().port_u16() == Some(443)
+    {
+        req.uri_mut().unset_port();
     }
-
-    state.flow_dispatcher.dispatch(req).await
 }
 
 // NOTE: for a production service you ideally use
@@ -601,6 +612,65 @@ mod tests {
     use super::*;
     use rama::tls::client::{ServerVerifyMode, TlsClientConfig};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn https_uri_omits_default_port_in_http2_authority() {
+        for (input, target, expected_uri, expected_authority) in [
+            (
+                "/asset.css?v=1",
+                Some("chatgpt.com:443"),
+                "https://chatgpt.com/asset.css?v=1",
+                "chatgpt.com",
+            ),
+            (
+                "https://chatgpt.com:443/asset.css?v=1",
+                Some("chatgpt.com:443"),
+                "https://chatgpt.com/asset.css?v=1",
+                "chatgpt.com",
+            ),
+            (
+                "https://chatgpt.com/",
+                Some("chatgpt.com:443"),
+                "https://chatgpt.com/",
+                "chatgpt.com",
+            ),
+            (
+                "/probe",
+                Some("localhost:8443"),
+                "https://localhost:8443/probe",
+                "localhost:8443",
+            ),
+            (
+                "https://localhost:9443/probe",
+                Some("localhost:8443"),
+                "https://localhost:9443/probe",
+                "localhost:9443",
+            ),
+            (
+                "https://[::1]:443/probe",
+                None,
+                "https://[::1]/probe",
+                "[::1]",
+            ),
+            (
+                "http://example.com:443/probe",
+                None,
+                "http://example.com:443/probe",
+                "example.com:443",
+            ),
+        ] {
+            let mut req = Request::builder().uri(input).body(Body::empty()).unwrap();
+            if let Some(target) = target {
+                req.extensions()
+                    .insert(ProxyTarget(target.parse().unwrap()));
+            }
+            normalize_https_request_uri(&mut req);
+            assert_eq!(req.uri().to_string(), expected_uri);
+            let mut authority = bytes::BytesMut::new();
+            req.uri().write_h2_authority(&mut authority).unwrap();
+            assert_eq!(authority.as_ref(), expected_authority.as_bytes());
+        }
+    }
 
     #[test]
     fn connect_mitm_preserves_state_and_captures_upstream_tls() {

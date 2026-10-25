@@ -563,6 +563,124 @@ mod tests {
     }
 
     #[test]
+    fn observe_http2_preserves_cookies_and_uses_separate_tls_connections() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(observe_http2_cookie_roundtrip());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn observe_http2_cookie_roundtrip() {
+        use rama::http::{BodyExtractExt, Version};
+        use rama::tcp::server::TcpListener;
+        use rama::tls::boring::server::TlsAcceptorLayer;
+        use rama::tls::server::TlsServerConfig;
+
+        let listener = TcpListener::bind_address("127.0.0.1:0", Executor::default())
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let server = TlsAcceptorLayer::new(TlsServerConfig::generated_http_auto().unwrap())
+            .into_layer(
+                rama::http::server::HttpServer::auto(Executor::default()).service(service_fn(
+                    move |req: Request| {
+                        let tx = tx.clone();
+                        async move {
+                            tx.send((req.version(), req.uri().clone(), req.headers().clone()))
+                                .await
+                                .unwrap();
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .header("set-cookie", "device=test; Path=/; Secure")
+                                    .header("set-cookie", "visit=updated; Path=/; Secure")
+                                    .body(Body::from("ok"))
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                )),
+            );
+        let task = tokio::spawn(listener.serve(server));
+        let client = new_upstream_client(
+            ProxyMode::Observe,
+            UaProfile::Auto,
+            None,
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        let host = format!("localhost:{}", address.port());
+        let mut previous_random = None;
+        for (path, visit) in [("/", "visit=initial"), ("/asset.css", "visit=updated")] {
+            let request = Request::builder()
+                .uri(format!("https://{host}{path}"))
+                .version(Version::HTTP_2)
+                .header("host", host.as_str())
+                .header("cookie", "device=test")
+                .header("cookie", visit)
+                .header("te", "trailers")
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions()
+                .insert(rama::net::http::TargetHttpVersion(Version::HTTP_2));
+            let result =
+                tokio::time::timeout(Duration::from_secs(10), Box::pin(client.serve(request)))
+                    .await
+                    .unwrap();
+            assert!(result.upstream_err.is_none(), "{:?}", result.upstream_err);
+            assert_eq!(result.response.status(), StatusCode::OK);
+            assert_eq!(result.response.version(), Version::HTTP_2);
+            let cookies: Vec<_> = result
+                .response
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect();
+            assert_eq!(
+                cookies,
+                ["device=test; Path=/; Secure", "visit=updated; Path=/; Secure"]
+            );
+            let info = upstream_tls_info_from_extensions(result.response.extensions()).unwrap();
+            if let Some(previous) = previous_random.as_ref() {
+                assert_ne!(
+                    previous, &info["client_random"],
+                    "production client does not pool TLS connections"
+                );
+            }
+            previous_random = Some(info["client_random"].clone());
+            assert_eq!(
+                result.response.into_body().try_into_string().await.unwrap(),
+                "ok"
+            );
+            let (version, uri, headers) = rx.recv().await.unwrap();
+            assert_eq!(version, Version::HTTP_2);
+            assert_eq!(uri.path_or_root().as_ref(), path);
+            assert_eq!(uri.authority().unwrap().to_string(), host);
+            // The receiving HTTP/2 server exposes :authority through the URI.
+            assert!(headers.get("host").is_none());
+            let cookies: Vec<_> = headers
+                .get_all("cookie")
+                .iter()
+                .map(|value| value.to_str().unwrap())
+                .collect();
+            assert_eq!(cookies, ["device=test", visit]);
+            assert_eq!(headers.get("te").unwrap(), "trailers");
+        }
+        task.abort();
+    }
+
+    #[test]
     fn websocket_upgrade_and_message_relay() {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
