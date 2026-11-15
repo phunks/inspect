@@ -21,7 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-
+use rama::http::conn::H2ClientContextParams;
 use crate::mitm::flow::tls_metadata::ExtendedTlsParameters;
 use crate::mitm::websocket::mitm_websocket;
 use crate::options::{ProxyMode, UaProfile};
@@ -240,6 +240,11 @@ pub fn new_upstream_client(
                     if let Some(ua) = request_ua {
                         req.headers_mut().insert(USER_AGENT, ua);
                     }
+                    
+                    req.extensions().insert(H2ClientContextParams {
+                        max_header_list_size: Some(128 * 1024),
+                        ..Default::default()
+                    });
 
                     match client.serve(req).await {
                         Ok(res) => {
@@ -315,6 +320,11 @@ pub fn new_upstream_client(
                     if let Some(ua) = request_ua {
                         req.headers_mut().insert(USER_AGENT, ua);
                     }
+
+                    req.extensions().insert(H2ClientContextParams {
+                        max_header_list_size: Some(128 * 1024),
+                        ..Default::default()
+                    });
 
                     match client.serve(req).await {
                         Ok(res) => {

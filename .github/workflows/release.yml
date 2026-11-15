@@ -40,6 +40,9 @@ jobs:
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
+        with:
+          # Older Zig releases reject the ARM musleabihf ABI used by cargo-zigbuild.
+          version: '0.16.0'
 
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@cargo-zigbuild
